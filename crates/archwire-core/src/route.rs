@@ -75,6 +75,9 @@ const LABEL_PAD: i32 = 6;
 /// Text width per character at font size 12.
 const CHAR_ASCII: i32 = 7;
 const CHAR_WIDE: i32 = 12;
+/// Text width of a full-width character, and of a full-width parenthesis, at font size 11.
+const WIRE_CHAR_WIDE: i32 = 11;
+const WIRE_CHAR_PAREN: i32 = 6;
 /// Frame names sit at the frame's top-left corner, after the group icon or a small indent.
 const FRAME_NAME_INDENT: i32 = 30;
 const FRAME_NAME_H: i32 = 25;
@@ -102,7 +105,7 @@ const LANE: i32 = 8;
 /// A line's label: the height of each text line, and how far beside the line its area starts.
 const WIRE_LABEL_LINE: i32 = 13;
 const WIRE_LABEL_BESIDE: i32 = 6;
-/// Spots tried for a moved label are this far apart along the line.
+/// Spots tried for a moved label are this far apart along the line; the spots in between are tried after them.
 const LABEL_STEP: i32 = 2;
 /// A line's label keeps at least this far from frame sides, icons and other text; a moved label
 /// looks for a spot with this much room first.
@@ -244,6 +247,18 @@ fn text_width(text: &str) -> i32 {
         .unwrap_or(0)
 }
 
+/// Text width of a line's label, drawn at font size 11: Latin text at the generous width of the
+/// icon labels, other text at the width of a full-width character, and the full-width parentheses,
+/// which draw.io draws at half that width, at half plus a pixel.
+fn wire_text_width(text: &str) -> i32 {
+    let char_width = |c: char| match c {
+        c if c.is_ascii() => CHAR_ASCII,
+        '（' | '）' => WIRE_CHAR_PAREN,
+        _ => WIRE_CHAR_WIDE,
+    };
+    text.lines().map(|l| l.chars().map(char_width).sum::<i32>()).max().unwrap_or(0)
+}
+
 /// The area an icon's label takes: centred under the icon.
 fn label_area(i: &Icon) -> Rect {
     let half = (text_width(&i.label) + 1) / 2;
@@ -260,7 +275,7 @@ fn label_area(i: &Icon) -> Rect {
 /// left if `flip`) with its last line ending at the anchor. Measured from rendered diagrams, with
 /// a pixel or two to spare.
 fn wire_label_area(text: &str, p: Pt, above: bool, flip: bool) -> Rect {
-    let w = text_width(text);
+    let w = wire_text_width(text);
     let lines = WIRE_LABEL_LINE * text.lines().count().max(1) as i32;
     match (above, flip) {
         (true, false) => Rect { x: p.0 - w / 2 - 2, y: p.1 - lines - 4, w: w + 4, h: lines + 4 },
@@ -780,8 +795,9 @@ impl<'a> Ctx<'a> {
     /// The label at its usual spot (the middle, or a quarter along for `near_source`) if nothing
     /// cuts or covers it there. Otherwise the clear spot nearest the usual one along the line, on
     /// one line if that fits anywhere, else one part per line; spots with room around them come
-    /// before tight ones. A horizontal stretch carries the label centred above it, or below; a
-    /// vertical one beside it on the right, or on the left. If no spot is clear, the usual one stays.
+    /// before tight ones, and spots on a 2-pixel grid before those between. A horizontal stretch
+    /// carries the label centred above it, or below; a vertical one beside it on the right, or on
+    /// the left. If no spot is clear, the usual one stays.
     fn place_label(&self, parts: &[String], (paths, me): (&[Vec<Pt>], usize), level: bool, near_source: bool, placed: &[Rect]) -> LabelSpot {
         let path = &paths[me];
         let one = parts.join(" ");
@@ -798,9 +814,16 @@ impl<'a> Ctx<'a> {
         if parts.len() > 1 {
             texts.push(parts.join("\n"));
         }
-        for (margin, text) in [LABEL_ROOM, LABEL_MARGIN].into_iter().flat_map(|m| texts.iter().map(move |t| (m, t))) {
+        // The spots between the steps come last, for a label that fits only there.
+        let mut tries = Vec::new();
+        for between in [0, 1] {
+            for margin in [LABEL_ROOM, LABEL_MARGIN] {
+                tries.extend(texts.iter().map(|t| (between, margin, t)));
+            }
+        }
+        for (between, margin, text) in tries {
             for k in 0..=len / LABEL_STEP {
-                for d in [usual + k * LABEL_STEP, usual - k * LABEL_STEP] {
+                for d in [usual + k * LABEL_STEP + between, usual - k * LABEL_STEP - between] {
                     if d < 0 || d > len {
                         continue;
                     }
@@ -1175,6 +1198,8 @@ fn slots(n: usize) -> Vec<u8> {
 
 const AUDIT_CHAR_ASCII: i32 = 7;
 const AUDIT_CHAR_WIDE: i32 = 12;
+const AUDIT_WIRE_WIDE: i32 = 11;
+const AUDIT_WIRE_PAREN: i32 = 6;
 const AUDIT_ICON_MARGIN: i32 = 2;
 const AUDIT_STROKES_MERGE: i32 = 2;
 
@@ -1182,6 +1207,17 @@ type Seg = ((i32, i32), (i32, i32));
 
 fn audit_text_width(text: &str) -> i32 {
     text.lines().map(|l| l.chars().map(|c| if c.is_ascii() { AUDIT_CHAR_ASCII } else { AUDIT_CHAR_WIDE }).sum()).max().unwrap_or(0)
+}
+
+/// A line's label is drawn at font size 11, where a full-width character is narrower and a
+/// full-width parenthesis is drawn at about half width.
+fn audit_wire_text_width(text: &str) -> i32 {
+    let width = |c: char| match c {
+        c if c.is_ascii() => AUDIT_CHAR_ASCII,
+        '（' | '）' => AUDIT_WIRE_PAREN,
+        _ => AUDIT_WIRE_WIDE,
+    };
+    text.lines().map(|l| l.chars().map(width).sum()).max().unwrap_or(0)
 }
 
 /// True if the segment enters the inside of the box; touching its edge does not count.
@@ -1249,7 +1285,7 @@ fn audit_wire_label(w: &Wire, path: &[(i32, i32)]) -> Option<Rect> {
         }
         d -= l;
     }
-    let (w_px, h_px) = (audit_text_width(&w.label), 13 * w.label.lines().count().max(1) as i32);
+    let (w_px, h_px) = (audit_wire_text_width(&w.label), 13 * w.label.lines().count().max(1) as i32);
     let (x, y) = anchor;
     Some(match (w.horizontal_label, w.label_flip) {
         (true, false) => Rect { x: x - w_px / 2 - 2, y: y - h_px - 4, w: w_px + 4, h: h_px + 4 },
@@ -1505,6 +1541,50 @@ mod tests {
         assert!(!nat.iter().find(|x| x.to == "s3").unwrap().label.contains("VPC"));
     }
 
+    /// A route answered with `endpoint`, in Japanese: the label has three parts and is too long for one line.
+    const ENDPOINT_JA: &str = "flows:\n  - user -> alb -> ecs -> s3\nset:\n  lang: ja\nchoose:\n  route.ecs.s3: endpoint\n";
+
+    fn endpoint_ja_definitions() -> Vec<String> {
+        let with_cw = ENDPOINT_JA.replace("ecs -> s3\n", "ecs -> s3\n  - ecs ~> cloudwatch\n");
+        vec![
+            ENDPOINT_JA.to_string(),
+            ENDPOINT_JA.replace("lang: ja\n", "lang: ja\n  azs: 3\n"),
+            with_cw.clone(),
+            with_cw.replace("lang: ja\n", "lang: ja\n  azs: 3\n"),
+        ]
+    }
+
+    #[test]
+    fn a_japanese_label_of_several_parts_stacks_them_clear_of_frame_sides() {
+        for src in endpoint_ja_definitions() {
+            let (_, l, w, notes) = wires(&src);
+            assert!(notes.iter().all(|n| !n.contains("edge-")), "{notes:?} in\n{src}");
+            let s3 = w.iter().find(|x| x.to == "s3").unwrap();
+            assert_eq!(s3.label, "読み書き\n（VPC エンドポイント経由）\n（全 AZ から）", "{src}");
+            let borders = Scene::new(&l).borders;
+            for x in w.iter().filter(|x| !x.label.is_empty()) {
+                let area = label_area_of(x, &l);
+                for &(c, d) in &borders {
+                    assert!(!hits(c, d, area), "a frame side {c:?}-{d:?} cuts the label of {} in\n{src}", x.id);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_line_label_is_estimated_no_narrower_than_draw_io_draws_it_and_not_much_wider() {
+        // Widths of the drawn text, read from draw.io's rendering at font size 11.
+        for (text, drawn) in [("読み書き", 42), ("（VPC エンドポイント経由）", 132), ("（全 AZ から）", 61), ("ログ・メトリクス", 86), ("ああああああああああ", 108)] {
+            let w = wire_text_width(text);
+            assert!(w >= drawn && w <= drawn + 16, "{text}: estimated {w}, drawn {drawn}");
+        }
+        // Latin text keeps a generous estimate.
+        for (text, drawn) in [("Read/Write", 54), ("(via VPC endpoint)", 92), ("HTTPS", 35), ("HTTP", 28)] {
+            let w = wire_text_width(text);
+            assert!(w >= drawn, "{text}: estimated {w}, drawn {drawn}");
+        }
+    }
+
     /// Lines from the load balancer and the private parts all head for the side column.
     const AUX_TO_SIDE: &str = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora -> s3\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n  - alb ~> s3\nchoose:\n  route.aurora.s3: endpoint\n";
 
@@ -1633,6 +1713,7 @@ mod tests {
             "flows:\n  - user -> alb -> ecs -> aurora\n  - alb -> aurora\n  - aurora ~> cloudwatch\n  - alb ~> s3\nset:\n  azs: 3\n",
             "flows:\n  - user -> cloudfront -> alb -> ecs\n  - acm -- cloudfront\n  - waf -- cloudfront\n  - cloudfront -> s3\n  - cloudfront ~> cloudwatch\n",
         ].map(String::from));
+        srcs.extend(endpoint_ja_definitions());
         srcs
     }
 
@@ -1738,11 +1819,11 @@ mod tests {
         let area = label_area_of(nat, &l);
         let sub = l.rect("pri-1c");
         assert!(area.x > sub.x && area.x + area.w < sub.x + sub.w && area.y > sub.y, "{area:?} outside {sub:?}");
-        // Too long for any stretch on one line, so it goes on two, outside the VPC.
+        // Too long for any stretch on one line, so it goes on two, between the icon and the private subnet's side.
         let cw = get("edge-ecs-1c-to-cloudwatch");
         assert_eq!(cw.label, "ログ・メトリクス\n（全 AZ から）");
-        let (area, vpc) = (label_area_of(cw, &l), l.rect("vpc"));
-        assert!(area.x >= vpc.x + vpc.w && area.x + area.w <= l.rect("cloudwatch").x, "{area:?}");
+        let (area, ecs) = (label_area_of(cw, &l), l.rect("ecs-1c"));
+        assert!(area.x >= ecs.x + ecs.w && area.x + area.w < sub.x + sub.w && area.y > sub.y, "{area:?}");
         // A label nothing cuts stays where it was.
         assert_eq!(get("edge-ecs-1a-to-aurora-1a").label_at, None);
         assert_eq!(get("edge-igw-to-alb").label_at, None);

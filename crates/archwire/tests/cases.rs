@@ -107,7 +107,7 @@ fn case_list_is_what_the_plan_says() {
         .map(|e| e.unwrap().file_name().into_string().unwrap())
         .collect();
     names.sort();
-    assert_eq!(names, ["aux-to-side", "err-unknown-service", "err-unsupported", "hole-s3", "web-2az-en", "web-2az-ja", "web-3az-en", "web-3az-ja"]);
+    assert_eq!(names, ["aux-to-side", "endpoint-ja", "err-unknown-service", "err-unsupported", "hole-s3", "web-2az-en", "web-2az-ja", "web-3az-en", "web-3az-ja"]);
 }
 
 #[test]

@@ -279,7 +279,7 @@ mod tests {
         // Moved onto the stretch inside the private subnet, above it and centred.
         let nat = line("edge-ecs-1c-to-nat-1c");
         assert!(nat.contains("<mxGeometry x=\"") && nat.contains("align=center") && !nat.contains("spacingLeft"), "{nat}");
-        // Two lines, outside the VPC.
+        // Two lines, moved off the frame sides.
         let cw = line("edge-ecs-1c-to-cloudwatch");
         assert!(cw.contains("value=\"ログ・メトリクス&#xa;（全 AZ から）\"") && cw.contains("<mxGeometry x=\""), "{cw}");
         // Left where it was.

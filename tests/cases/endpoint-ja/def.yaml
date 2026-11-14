@@ -1,0 +1,6 @@
+flows:
+  - user -> alb -> ecs -> s3
+set:
+  lang: ja
+choose:
+  route.ecs.s3: endpoint
