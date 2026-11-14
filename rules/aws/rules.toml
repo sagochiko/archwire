@@ -1,7 +1,13 @@
-version = "2026.11.0"
+version = "2026.11.1"
 
 # kind = "constraint": states an AWS constraint; `source` (AWS documentation URL) is required.
 # kind = "default": a choice archwire makes when the definition is silent; `source` is optional.
+
+[[rule]]
+id = "resources-inside-aws-cloud-frame"
+kind = "default"
+reason_en = "AWS resources are drawn inside the AWS Cloud frame."
+reason_ja = "AWS のリソースは AWS Cloud の枠の中に描く。"
 
 [[rule]]
 id = "global-service-outside-region"

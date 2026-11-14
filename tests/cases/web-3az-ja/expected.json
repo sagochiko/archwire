@@ -1,9 +1,17 @@
 {
   "versions": {
     "archwire": "0.1.0",
-    "rules": "2026.11.0"
+    "rules": "2026.11.1"
   },
   "derived": [
+    {
+      "target": "aws-cloud",
+      "added": true,
+      "kind": "default",
+      "rule": "resources-inside-aws-cloud-frame",
+      "reason": "AWS のリソースは AWS Cloud の枠の中に描く。",
+      "source": null
+    },
     {
       "target": "region",
       "added": true,

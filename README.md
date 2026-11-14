@@ -26,7 +26,7 @@ The command writes `web.drawio` and prints a JSON report. The exit code is 0. Th
 
 Four lines of definition produced the VPC, the Internet Gateway, the public and private subnets, the second Availability Zone, the NAT gateways, and the Aurora writer and reader. None of them were written in the definition. Each has a reason in the report, and the same reason is stored on the part inside the `.drawio` file (see [Reading the report](#reading-the-report)).
 
-In this example these elements carry a reason: the Region frame, the VPC frame, both Availability Zone frames, all four subnet frames, the Internet Gateway, both NAT gateways, and the parts whose place archwire chose (CloudFront, ECS, Aurora, S3 and CloudWatch). The users, the load balancer and the outer AWS Cloud frame carry none.
+In this example these elements carry a reason: the AWS Cloud frame, the Region frame, the VPC frame, both Availability Zone frames, all four subnet frames, the Internet Gateway, both NAT gateways, and the parts whose place archwire chose (CloudFront, ECS, Aurora, S3 and CloudWatch). The users and the load balancer carry none.
 
 ## Install
 

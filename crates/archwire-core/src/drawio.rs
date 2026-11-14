@@ -40,7 +40,7 @@ pub fn write(model: &Model, layout: &Layout, wires: &[Wire], diag: &Diagnostics,
 
     for f in &layout.frames {
         let (style, target) = match f.kind {
-            FrameKind::Cloud => (CLOUD_STYLE, None),
+            FrameKind::Cloud => (CLOUD_STYLE, Some("aws-cloud")),
             FrameKind::Region => (REGION_STYLE, Some("region")),
             FrameKind::Vpc => (VPC_STYLE, Some("vpc")),
             FrameKind::Az => (AZ_STYLE, Some("az")),

@@ -116,3 +116,37 @@ fn error_cases_have_no_expected_diagram() {
         assert!(!cases_dir().join(name).join("expected.drawio").exists(), "{name}");
     }
 }
+
+/// The value of attribute `name` in one cell's opening tag, if it is there.
+fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let start = tag.find(&format!(" {name}=\""))? + name.len() + 3;
+    Some(&tag[start..start + tag[start..].find('"')?])
+}
+
+#[test]
+fn every_added_part_carries_a_reason_in_every_case() {
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(cases_dir()).unwrap().map(|e| e.unwrap().path()).collect();
+    dirs.sort();
+    let mut checked = 0;
+    for dir in dirs {
+        let Ok(drawio) = std::fs::read_to_string(dir.join("expected.drawio")) else { continue };
+        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+        let tags: Vec<&str> = drawio.split("<object ").skip(1).map(|s| s.split('>').next().unwrap()).collect();
+        let added: Vec<&str> = tags.iter().copied().filter(|t| t.contains(" added=\"1\"")).collect();
+        assert!(!added.is_empty(), "{name}");
+        for t in &added {
+            assert!(attribute(t, "rule").is_some() && attribute(t, "derived").is_some(), "case {name}: an added cell has no reason: {t}");
+        }
+        let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("expected.json")).unwrap()).unwrap();
+        for d in json["derived"].as_array().unwrap().iter().filter(|d| d["added"] == true) {
+            let rule = d["rule"].as_str().unwrap();
+            assert!(
+                added.iter().any(|t| attribute(t, "rule").is_some_and(|r| r.split(" | ").any(|r| r == rule))),
+                "case {name}: the reason {rule} for {} is on no added cell",
+                d["target"]
+            );
+        }
+        checked += 1;
+    }
+    assert!(checked >= 6, "{checked}");
+}

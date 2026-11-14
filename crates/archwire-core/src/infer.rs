@@ -434,6 +434,7 @@ fn build(def: &Definition, rules: &Rules, s: &Settings, routes: &[Route], diag: 
     // A target the definition did not write is something archwire added.
     let written: Vec<&str> = parts.iter().map(|(n, _)| *n).collect();
     let mut why = |target: &str, id: &str| diag.derived.push(derived(rules, lang, target, id, !written.contains(&target)));
+    why("aws-cloud", "resources-inside-aws-cloud-frame");
     if !def.set.contains_key("region") {
         why("region", "default-region");
     }
