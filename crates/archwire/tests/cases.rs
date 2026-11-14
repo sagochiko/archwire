@@ -44,6 +44,23 @@ fn exit_code_for(json: &str) -> i32 {
     }
 }
 
+/// Compiles one case's definition now and returns the printed diagnostics, the written diagram
+/// (if any) and the exit code. `tag` keeps the work folders of tests running side by side apart.
+fn compile_case(dir: &Path, tag: &str) -> (Vec<u8>, Option<Vec<u8>>, Option<i32>) {
+    let name = dir.file_name().unwrap().to_string_lossy();
+    let work = std::env::temp_dir().join(format!("archwire-case-{}-{tag}-{name}", std::process::id()));
+    std::fs::create_dir_all(&work).unwrap();
+    let out = work.join("out.drawio");
+    let _ = std::fs::remove_file(&out);
+    let run = Command::new(env!("CARGO_BIN_EXE_archwire"))
+        .args(["compile", dir.join("def.yaml").to_str().unwrap(), "-o", out.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let drawio = std::fs::read(&out).ok();
+    let _ = std::fs::remove_dir_all(&work);
+    (run.stdout, drawio, run.status.code())
+}
+
 #[test]
 fn every_case_matches_its_expected_output() {
     let bless = std::env::var("ARCHWIRE_BLESS").as_deref() == Ok("1");
@@ -52,17 +69,7 @@ fn every_case_matches_its_expected_output() {
     let mut failures = Vec::new();
     for dir in dirs {
         let name = dir.file_name().unwrap().to_string_lossy().into_owned();
-        let work = std::env::temp_dir().join(format!("archwire-case-{}-{name}", std::process::id()));
-        std::fs::create_dir_all(&work).unwrap();
-        let out = work.join("out.drawio");
-        let _ = std::fs::remove_file(&out);
-        let run = Command::new(env!("CARGO_BIN_EXE_archwire"))
-            .args(["compile", dir.join("def.yaml").to_str().unwrap(), "-o", out.to_str().unwrap()])
-            .output()
-            .unwrap();
-        let json = run.stdout;
-        let drawio = std::fs::read(&out).ok();
-        let _ = std::fs::remove_dir_all(&work);
+        let (json, drawio, code) = compile_case(&dir, "match");
         let (want_json, want_drawio) = (dir.join("expected.json"), dir.join("expected.drawio"));
 
         if bless {
@@ -84,7 +91,6 @@ fn every_case_matches_its_expected_output() {
             Ok(want) => failures.push(format!("case {name}: expected.json differs from the printed diagnostics; {}\n{fix}", first_difference(&want, &json))),
             Err(e) => failures.push(format!("case {name}: cannot read expected.json: {e}")),
         }
-        let code = run.status.code();
         let want_code = exit_code_for(&String::from_utf8_lossy(&json));
         if code != Some(want_code) {
             failures.push(format!("case {name}: exit code {code:?}, but the diagnostics call for {want_code}"));
@@ -123,28 +129,58 @@ fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     Some(&tag[start..start + tag[start..].find('"')?])
 }
 
+/// Whether the cell `id` is one of the parts a reason's `target` stands for: the part itself, or
+/// one of its per-zone copies (`nat` for `nat-1a`; `subnet` for the public and private subnets).
+fn cell_belongs_to(id: &str, target: &str) -> bool {
+    let copy_of = |group: &str| id.strip_prefix(group).is_some_and(|rest| rest.starts_with('-'));
+    id == target || copy_of(target) || (target == "subnet" && (copy_of("pub") || copy_of("pri")))
+}
+
+/// Compiles every case afresh rather than reading the stored files, so that a missing reason is
+/// caught in the same run that rewrites them.
 #[test]
 fn every_added_part_carries_a_reason_in_every_case() {
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(cases_dir()).unwrap().map(|e| e.unwrap().path()).collect();
     dirs.sort();
     let mut checked = 0;
     for dir in dirs {
-        let Ok(drawio) = std::fs::read_to_string(dir.join("expected.drawio")) else { continue };
         let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+        let (json, drawio, _) = compile_case(&dir, "reason");
+        let Some(drawio) = drawio else { continue };
+        let drawio = String::from_utf8(drawio).unwrap();
         let tags: Vec<&str> = drawio.split("<object ").skip(1).map(|s| s.split('>').next().unwrap()).collect();
         let added: Vec<&str> = tags.iter().copied().filter(|t| t.contains(" added=\"1\"")).collect();
         assert!(!added.is_empty(), "{name}");
-        for t in &added {
-            assert!(attribute(t, "rule").is_some() && attribute(t, "derived").is_some(), "case {name}: an added cell has no reason: {t}");
-        }
-        let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("expected.json")).unwrap()).unwrap();
-        for d in json["derived"].as_array().unwrap().iter().filter(|d| d["added"] == true) {
-            let rule = d["rule"].as_str().unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        let reasons: Vec<(&str, &str)> = json["derived"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|d| d["added"] == true)
+            .map(|d| (d["target"].as_str().unwrap(), d["rule"].as_str().unwrap()))
+            .collect();
+        // `attribute` looks for a leading space, and `id` is the first attribute of the tag.
+        let cells: Vec<(String, Vec<&str>)> = added
+            .iter()
+            .map(|t| {
+                assert!(attribute(t, "rule").is_some() && attribute(t, "derived").is_some(), "case {name}: an added cell has no reason: {t}");
+                let id = attribute(&format!(" {t}"), "id").unwrap().to_string();
+                (id, attribute(t, "rule").unwrap().split(" | ").collect())
+            })
+            .collect();
+        for (target, rule) in &reasons {
             assert!(
-                added.iter().any(|t| attribute(t, "rule").is_some_and(|r| r.split(" | ").any(|r| r == rule))),
-                "case {name}: the reason {rule} for {} is on no added cell",
-                d["target"]
+                cells.iter().any(|(id, rules)| cell_belongs_to(id, target) && rules.contains(rule)),
+                "case {name}: the reason {rule} for {target} is on no added cell of that part"
             );
+        }
+        for (id, rules) in &cells {
+            for rule in rules {
+                assert!(
+                    reasons.iter().any(|(target, r)| r == rule && cell_belongs_to(id, target)),
+                    "case {name}: the cell {id} carries the rule {rule}, which the diagnostics do not give for it"
+                );
+            }
         }
         checked += 1;
     }
