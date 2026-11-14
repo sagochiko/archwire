@@ -275,26 +275,6 @@ fn wire_text_width(text: &str) -> i32 {
     text.lines().map(|l| l.chars().map(char_width).sum::<i32>()).max().unwrap_or(0)
 }
 
-/// The parts broken into words where they must: each part on lines no wider than the widest word.
-fn word_lines(parts: &[String]) -> String {
-    let widest = parts.iter().flat_map(|p| p.split(' ')).map(wire_text_width).max().unwrap_or(0);
-    let mut lines: Vec<String> = Vec::new();
-    for part in parts {
-        let mut line = String::new();
-        for word in part.split(' ') {
-            if !line.is_empty() && wire_text_width(&format!("{line} {word}")) > widest {
-                lines.push(std::mem::take(&mut line));
-            }
-            if !line.is_empty() {
-                line.push(' ');
-            }
-            line.push_str(word);
-        }
-        lines.push(line);
-    }
-    lines.join("\n")
-}
-
 /// The area an icon's label takes: centred under the icon.
 fn label_area(i: &Icon) -> Rect {
     let half = (text_width(&i.label) + 1) / 2;
@@ -445,9 +425,20 @@ impl<'a> Scene<'a> {
     /// Whether the label of line `me` taking `area` stays `margin` off every frame side, icon, icon
     /// label, frame name, label already placed and other line. Its own line only touches its edge.
     fn label_clear(&self, area: Rect, margin: i32, paths: &[Vec<Pt>], me: usize, placed: &[Rect]) -> bool {
+        self.borders_under(area, margin) == 0 && self.label_clear_but_frames(area, margin, paths, me, placed)
+    }
+
+    /// How many frame sides come within `margin` of a label taking `area`.
+    fn borders_under(&self, area: Rect, margin: i32) -> usize {
         let wide = grow(area, margin);
-        self.borders.iter().all(|&(c, d)| !hits(c, d, wide))
-            && self.icons.iter().all(|i| !overlaps(i.rect, wide))
+        self.borders.iter().filter(|&&(c, d)| hits(c, d, wide)).count()
+    }
+
+    /// Like `label_clear`, but frame sides may run under the label: a frame side is drawn behind
+    /// the text and leaves it readable, where a line, an icon or other text does not.
+    fn label_clear_but_frames(&self, area: Rect, margin: i32, paths: &[Vec<Pt>], me: usize, placed: &[Rect]) -> bool {
+        let wide = grow(area, margin);
+        self.icons.iter().all(|i| !overlaps(i.rect, wide))
             && self.labels.iter().all(|&(_, r)| !overlaps(r, wide))
             && self.frame_names.iter().all(|&r| !overlaps(r, wide))
             && paths.iter().enumerate().all(|(i, p)| p.windows(2).all(|s| !hits(s[0], s[1], if i == me { area } else { wide })))
@@ -830,10 +821,12 @@ impl<'a> Ctx<'a> {
 
     /// The label at its usual spot (the middle, or a quarter along for `near_source`) if nothing
     /// cuts or covers it there. Otherwise the clear spot nearest the usual one along the line, on
-    /// one line if that fits anywhere, else one part per line, else each part broken into words; spots with room around them come
+    /// one line if that fits anywhere, else one part per line; spots with room around them come
     /// before tight ones, and spots on a 2-pixel grid before those between. A horizontal stretch
     /// carries the label centred above it, or below; a vertical one beside it on the right, or on
-    /// the left. If no spot is clear, the usual one stays.
+    /// the left. If no spot is clear, frame sides may run under the label: the spot clear of lines,
+    /// icons and text with the fewest frame sides under it, in the same order, on one line if that
+    /// fits anywhere, else one part per line. If there is none either, the usual spot stays.
     fn place_label(&self, parts: &[String], (paths, me): (&[Vec<Pt>], usize), level: bool, near_source: bool, placed: &[Rect]) -> LabelSpot {
         let path = &paths[me];
         let one = parts.join(" ");
@@ -850,42 +843,69 @@ impl<'a> Ctx<'a> {
         if parts.len() > 1 {
             texts.push(parts.join("\n"));
         }
-        // Parts broken into words only where no whole part fits anywhere.
-        let words = word_lines(parts);
-        let broken: Vec<String> = if texts.contains(&words) { Vec::new() } else { vec![words] };
         // The spots between the steps come last, for a label that fits only there.
         let mut tries = Vec::new();
-        for texts in [&texts, &broken] {
-            for between in [0, 1] {
-                for margin in [LABEL_ROOM, LABEL_MARGIN] {
-                    tries.extend(texts.iter().map(|t| (between, margin, t)));
+        for between in [0, 1] {
+            for margin in [LABEL_ROOM, LABEL_MARGIN] {
+                tries.extend(texts.iter().map(|t| (between, margin, t)));
+            }
+        }
+        let mut spots = Vec::new();
+        for &(between, margin, text) in &tries {
+            for (at, p, horizontal) in self.label_spots(path, usual, between) {
+                for flip in [false, true] {
+                    spots.push((margin, text, at, horizontal, flip, wire_label_area(text, p, horizontal, flip)));
                 }
             }
         }
-        for (between, margin, text) in tries {
-            for k in 0..=len / LABEL_STEP {
-                for d in [usual + k * LABEL_STEP + between, usual - k * LABEL_STEP - between] {
-                    if d < 0 || d > len {
-                        continue;
-                    }
-                    // The spot draw.io draws: it rounds the position written in thousandths of the length.
-                    let at = ((d as i64 * 1000 + len as i64 / 2) / len as i64) as u16;
-                    let d = label_distance(at, len);
-                    // Keep off the bends, where a label just past the bend would turn with the line.
-                    if near_bend(path, d) {
-                        continue;
-                    }
-                    let (p, horizontal) = point_along(path, d);
-                    for flip in [false, true] {
-                        let area = wire_label_area(text, p, horizontal, flip);
-                        if self.scene.label_clear(area, margin, paths, me, placed) {
-                            return LabelSpot { text: text.clone(), above: horizontal, flip, at: Some(at), area: Some(area), clear: true };
-                        }
-                    }
-                }
+        let spot = |&(_, text, at, horizontal, flip, area): &(i32, &String, u16, bool, bool, Rect)| LabelSpot {
+            text: text.clone(),
+            above: horizontal,
+            flip,
+            at: Some(at),
+            area: Some(area),
+            clear: true,
+        };
+        if let Some(s) = spots.iter().find(|s| self.scene.label_clear(s.5, s.0, paths, me, placed)) {
+            return spot(s);
+        }
+        // Over frame sides: the fewest of them, the first in the order above at a tie; one line
+        // before one part per line, since a label that reads on one line is the easier to read.
+        for text in &texts {
+            let best = spots
+                .iter()
+                .filter(|s| s.1 == text && self.scene.label_clear_but_frames(s.5, s.0, paths, me, placed))
+                .min_by_key(|s| self.scene.borders_under(s.5, s.0));
+            if let Some(s) = best {
+                return spot(s);
             }
         }
         LabelSpot { text: one, above: level, flip: false, at: None, area: Some(area), clear: false }
+    }
+
+    /// The spots along a path a label may take, nearest `usual` first (`between` shifts them off
+    /// the 2-pixel grid), as thousandths of the length, the point and whether the stretch is
+    /// horizontal.
+    fn label_spots(&self, path: &[Pt], usual: i32, between: i32) -> Vec<(u16, Pt, bool)> {
+        let len = path_length(path);
+        let mut out = Vec::new();
+        for k in 0..=len / LABEL_STEP {
+            for d in [usual + k * LABEL_STEP + between, usual - k * LABEL_STEP - between] {
+                if d < 0 || d > len {
+                    continue;
+                }
+                // The spot draw.io draws: it rounds the position written in thousandths of the length.
+                let at = ((d as i64 * 1000 + len as i64 / 2) / len as i64) as u16;
+                let d = label_distance(at, len);
+                // Keep off the bends, where a label just past the bend would turn with the line.
+                if near_bend(path, d) {
+                    continue;
+                }
+                let (p, horizontal) = point_along(path, d);
+                out.push((at, p, horizontal));
+            }
+        }
+        out
     }
 
     /// A line between two icons at the same height that leaves and enters sideways runs straight:
@@ -1650,27 +1670,64 @@ mod tests {
     }
 
     /// Three AZs in English, with the S3 line answered with `endpoint` and lines to the side column
-    /// on both sides of it: the three parts of the label fit no stretch even one per line.
+    /// on both sides of it: no stretch of the S3 line holds its label clear of every frame side.
     const ENDPOINT_3AZ_EN: &str = "flows:\n  - user -> alb -> ecs -> aurora\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n  - aurora ~> cloudwatch\n  - ecs -> internet\nset:\n  azs: 3\n  lang: en\n  nat: per-az\nchoose:\n  route.ecs.s3: endpoint\n";
 
     #[test]
-    fn a_label_too_wide_for_any_stretch_breaks_its_parts_into_words() {
+    fn a_label_with_no_spot_clear_of_frame_sides_lies_on_them_clear_of_lines_and_text() {
+        assert_eq!(violations(ENDPOINT_3AZ_EN), Vec::<String>::new());
         let (_, l, w, notes) = wires(ENDPOINT_3AZ_EN);
         assert!(notes.iter().all(|n| !n.contains("edge-")), "{notes:?}");
         let s3 = w.iter().find(|x| x.to == "s3").unwrap();
-        assert_eq!(s3.label, "Read/Write\n(via VPC\nendpoint)\n(all AZs)");
+        // Whole parts: on one line, or one part per line.
+        assert!(
+            ["Read/Write (via VPC endpoint) (all AZs)", "Read/Write\n(via VPC endpoint)\n(all AZs)"].contains(&s3.label.as_str()),
+            "{:?}",
+            s3.label
+        );
         let area = label_area_of(s3, &l);
-        for &(c, d) in &Scene::new(&l).borders {
-            assert!(!hits(c, d, area), "a frame side {c:?}-{d:?} cuts the label of {}", s3.id);
-        }
+        assert!(Scene::new(&l).borders.iter().any(|&(c, d)| hits(c, d, area)), "{area:?} is clear of frame sides, so the first search should have found it");
         for y in &w {
             for s in full_path(y, &l).windows(2) {
                 assert!(!hits(s[0], s[1], area), "{} runs through the label of {}", y.id, s3.id);
             }
         }
-        // A label that fits one part per line keeps its parts whole.
-        let (_, _, w, _) = wires(&ENDPOINT_JA.replace("lang: ja", "lang: en"));
-        assert_eq!(w.iter().find(|x| x.to == "s3").unwrap().label, "Read/Write\n(via VPC endpoint)\n(all AZs)");
+        for i in &l.icons {
+            assert!(!overlaps(i.rect, area) && !overlaps(label_area(i), area), "{} or its name is under the label", i.id);
+        }
+        // The same in Japanese.
+        let ja = ENDPOINT_3AZ_EN.replace("lang: en", "lang: ja");
+        assert_eq!(violations(&ja), Vec::<String>::new());
+        let (_, l, w, _) = wires(&ja);
+        let s3 = w.iter().find(|x| x.to == "s3").unwrap();
+        assert!(s3.label.starts_with("読み書き"), "{:?}", s3.label);
+        assert!(!s3.label.contains("（VPC\n"), "{:?}", s3.label);
+        let area = label_area_of(s3, &l);
+        for y in &w {
+            for s in full_path(y, &l).windows(2) {
+                assert!(!hits(s[0], s[1], area), "{} runs through the label of {}", y.id, s3.id);
+            }
+        }
+        // A label that fits one part per line clear of frame sides keeps that spot and shape.
+        let (_, l, w, _) = wires(&ENDPOINT_JA.replace("lang: ja", "lang: en"));
+        let s3 = w.iter().find(|x| x.to == "s3").unwrap();
+        assert_eq!(s3.label, "Read/Write\n(via VPC endpoint)\n(all AZs)");
+        let area = label_area_of(s3, &l);
+        assert!(Scene::new(&l).borders.iter().all(|&(c, d)| !hits(c, d, area)));
+    }
+
+    #[test]
+    fn a_label_with_no_spot_clear_of_lines_and_text_stays_at_its_usual_spot_and_is_not_clear() {
+        let (m, l, w, _) = wires(WEB2);
+        let r = Rules::builtin();
+        let ctx = Ctx { model: &m, layout: &l, rules: &r, scene: Scene::new(&l) };
+        let paths: Vec<Vec<Pt>> = w.iter().map(|x| full_path(x, &l)).collect();
+        let me = w.iter().position(|x| x.id == "edge-cloudfront-to-s3").unwrap();
+        // Labels already placed everywhere: no spot is clear even over frame sides.
+        let everywhere = Rect { x: -10_000, y: -10_000, w: 20_000, h: 20_000 };
+        let spot = ctx.place_label(&["Static files".to_string()], (&paths, me), false, false, &[everywhere]);
+        assert!(!spot.clear);
+        assert_eq!((spot.text.as_str(), spot.at), ("Static files", None));
     }
 
     /// Lines from the load balancer and the private parts all head for the side column.
@@ -1779,10 +1836,10 @@ mod tests {
     const HEAVY: &str = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - user -> alb\n  - cloudfront -> s3\n  - cloudfront ~> cloudwatch\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n  - ecs -> internet\n  - waf -- cloudfront\n  - acm -- cloudfront\nchoose:\n  route.ecs.s3: endpoint\n";
 
     /// Accepted definitions this version cannot draw without a fault: too many lines and labels
-    /// meet in one gap. In Japanese the S3 label of `ENDPOINT_3AZ_EN` has a word wider than any
-    /// stretch of its line. They are still drawn, and every line at fault must be named in a note.
+    /// meet in one gap. They are still drawn, and every line at fault must be named in a note.
+    /// None are known at present.
     fn crowded_definitions() -> Vec<String> {
-        vec![ENDPOINT_3AZ_EN.replace("lang: en", "lang: ja")]
+        Vec::new()
     }
 
     /// Accepted definitions beyond the acceptance cases: other settings, every allowed link, reversed and extra flows.

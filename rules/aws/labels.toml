@@ -98,8 +98,8 @@ en = "The line {line} could not avoid every icon, label and other line; check it
 ja = "{line} の線は、アイコン、ラベル、ほかの線のどれかを避けきれなかった。図で確かめること。"
 
 ["note.unplaced_label"]
-en = "The label of the line {line} could not be placed clear of every frame side, icon, text and other line; check it in the diagram."
-ja = "{line} の線のラベルは、枠線、アイコン、文字、ほかの線のどれかを避けて置けなかった。図で確かめること。"
+en = "The label of the line {line} could not be placed clear of every icon, text and other line; check it in the diagram."
+ja = "{line} の線のラベルは、アイコン、文字、ほかの線のどれかを避けて置けなかった。図で確かめること。"
 
 ["need.route"]
 en = "Route from {from} to {to}"
