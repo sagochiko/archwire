@@ -1,0 +1,13 @@
+flows:
+  - user -> alb -> ecs -> aurora
+  - ecs -> s3
+  - ecs ~> cloudwatch
+  - alb ~> cloudwatch
+  - aurora ~> cloudwatch
+  - ecs -> internet
+set:
+  azs: 3
+  lang: en
+  nat: per-az
+choose:
+  route.ecs.s3: endpoint

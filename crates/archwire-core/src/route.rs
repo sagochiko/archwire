@@ -248,16 +248,51 @@ fn text_width(text: &str) -> i32 {
         .unwrap_or(0)
 }
 
-/// Text width of a line's label, drawn at font size 11: Latin text at the generous width of the
-/// icon labels, other text at the width of a full-width character, and the full-width parentheses,
-/// which draw.io draws at half that width, at half plus a pixel.
+/// Width of a Latin character in a line's label at font size 11, a pixel or so over what draw.io
+/// draws: wide capitals and m, w; other capitals; most small letters and digits; the narrower small
+/// letters; and the narrow letters, punctuation and space.
+fn wire_latin_width(c: char) -> i32 {
+    match c {
+        'W' => 11,
+        'M' | 'm' => 10,
+        'G' | 'O' | 'Q' | 'w' => 9,
+        'A'..='Z' | '&' if !matches!(c, 'I' | 'J') => 8,
+        'c' | 'k' | 's' | 'v' | 'x' | 'y' | 'z' | 'J' => 6,
+        'f' | 'i' | 'j' | 'l' | 'r' | 't' | 'I' | '(' | ')' | '[' | ']' | '/' | '.' | ',' | ':' | ';' | '-' | '\'' | '!' | '|' | ' ' => 4,
+        _ => 7,
+    }
+}
+
+/// Text width of a line's label, drawn at font size 11: Latin text letter by letter, other text at
+/// the width of a full-width character, and the full-width parentheses, which draw.io draws at half
+/// that width, at half plus a pixel.
 fn wire_text_width(text: &str) -> i32 {
     let char_width = |c: char| match c {
-        c if c.is_ascii() => CHAR_ASCII,
+        c if c.is_ascii() => wire_latin_width(c),
         '（' | '）' => WIRE_CHAR_PAREN,
         _ => WIRE_CHAR_WIDE,
     };
     text.lines().map(|l| l.chars().map(char_width).sum::<i32>()).max().unwrap_or(0)
+}
+
+/// The parts broken into words where they must: each part on lines no wider than the widest word.
+fn word_lines(parts: &[String]) -> String {
+    let widest = parts.iter().flat_map(|p| p.split(' ')).map(wire_text_width).max().unwrap_or(0);
+    let mut lines: Vec<String> = Vec::new();
+    for part in parts {
+        let mut line = String::new();
+        for word in part.split(' ') {
+            if !line.is_empty() && wire_text_width(&format!("{line} {word}")) > widest {
+                lines.push(std::mem::take(&mut line));
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+        }
+        lines.push(line);
+    }
+    lines.join("\n")
 }
 
 /// The area an icon's label takes: centred under the icon.
@@ -795,7 +830,7 @@ impl<'a> Ctx<'a> {
 
     /// The label at its usual spot (the middle, or a quarter along for `near_source`) if nothing
     /// cuts or covers it there. Otherwise the clear spot nearest the usual one along the line, on
-    /// one line if that fits anywhere, else one part per line; spots with room around them come
+    /// one line if that fits anywhere, else one part per line, else each part broken into words; spots with room around them come
     /// before tight ones, and spots on a 2-pixel grid before those between. A horizontal stretch
     /// carries the label centred above it, or below; a vertical one beside it on the right, or on
     /// the left. If no spot is clear, the usual one stays.
@@ -815,11 +850,16 @@ impl<'a> Ctx<'a> {
         if parts.len() > 1 {
             texts.push(parts.join("\n"));
         }
+        // Parts broken into words only where no whole part fits anywhere.
+        let words = word_lines(parts);
+        let broken: Vec<String> = if texts.contains(&words) { Vec::new() } else { vec![words] };
         // The spots between the steps come last, for a label that fits only there.
         let mut tries = Vec::new();
-        for between in [0, 1] {
-            for margin in [LABEL_ROOM, LABEL_MARGIN] {
-                tries.extend(texts.iter().map(|t| (between, margin, t)));
+        for texts in [&texts, &broken] {
+            for between in [0, 1] {
+                for margin in [LABEL_ROOM, LABEL_MARGIN] {
+                    tries.extend(texts.iter().map(|t| (between, margin, t)));
+                }
             }
         }
         for (between, margin, text) in tries {
@@ -1198,6 +1238,17 @@ fn slots(n: usize) -> Vec<u8> {
 // shrunk by its blank margin, and two strokes this close together read as one.
 
 const AUDIT_CHAR_ASCII: i32 = 7;
+/// Latin letters in a line's label, widest first, by their width at font size 11.
+const AUDIT_WIRE_LATIN: [(&str, i32); 5] = [
+    ("W", 11),
+    ("Mm", 10),
+    ("GOQw", 9),
+    ("ABCDEFHKLNPRSTUVXYZ&", 8),
+    ("ckJsvxyz", 6),
+];
+const AUDIT_WIRE_NARROW: &str = "fijlrtI()[]/.,:;-'!| ";
+const AUDIT_WIRE_OTHER_LATIN: i32 = 7;
+const AUDIT_WIRE_NARROW_W: i32 = 4;
 const AUDIT_CHAR_WIDE: i32 = 12;
 const AUDIT_WIRE_WIDE: i32 = 11;
 const AUDIT_WIRE_PAREN: i32 = 6;
@@ -1210,11 +1261,17 @@ fn audit_text_width(text: &str) -> i32 {
     text.lines().map(|l| l.chars().map(|c| if c.is_ascii() { AUDIT_CHAR_ASCII } else { AUDIT_CHAR_WIDE }).sum()).max().unwrap_or(0)
 }
 
-/// A line's label is drawn at font size 11, where a full-width character is narrower and a
-/// full-width parenthesis is drawn at about half width.
+/// A line's label is drawn at font size 11, where Latin letters differ in width, a full-width
+/// character is narrower and a full-width parenthesis is drawn at about half width.
 fn audit_wire_text_width(text: &str) -> i32 {
+    let latin = |c: char| {
+        if AUDIT_WIRE_NARROW.contains(c) {
+            return AUDIT_WIRE_NARROW_W;
+        }
+        AUDIT_WIRE_LATIN.iter().find(|(set, _)| set.contains(c)).map_or(AUDIT_WIRE_OTHER_LATIN, |&(_, w)| w)
+    };
     let width = |c: char| match c {
-        c if c.is_ascii() => AUDIT_CHAR_ASCII,
+        c if c.is_ascii() => latin(c),
         '（' | '）' => AUDIT_WIRE_PAREN,
         _ => AUDIT_WIRE_WIDE,
     };
@@ -1579,11 +1636,41 @@ mod tests {
             let w = wire_text_width(text);
             assert!(w >= drawn && w <= drawn + 16, "{text}: estimated {w}, drawn {drawn}");
         }
-        // Latin text keeps a generous estimate.
-        for (text, drawn) in [("Read/Write", 54), ("(via VPC endpoint)", 92), ("HTTPS", 35), ("HTTP", 28)] {
+        // Latin text: wide capitals, narrow letters and punctuation, never under the drawn width
+        // and not much over it.
+        for (text, drawn) in [
+            ("Read/Write", 54), ("(via VPC endpoint)", 92), ("HTTPS", 35), ("HTTP", 28), ("(all AZs)", 40),
+            ("Logs and metrics", 83), ("Outbound", 48), ("Replication", 53), ("Route undecided", 82),
+            ("WWWWWWWWWW", 104), ("MMMMMMMMMM", 91), ("mmmmmmmmmm", 91), ("AAAAAAAAAA", 73), ("aaaaaaaaaa", 61),
+        ] {
             let w = wire_text_width(text);
-            assert!(w >= drawn, "{text}: estimated {w}, drawn {drawn}");
+            assert!(w >= drawn && w <= drawn + 16, "{text}: estimated {w}, drawn {drawn}");
+            assert_eq!(audit_wire_text_width(text), w, "{text}: the final check measures it the same way");
         }
+    }
+
+    /// Three AZs in English, with the S3 line answered with `endpoint` and lines to the side column
+    /// on both sides of it: the three parts of the label fit no stretch even one per line.
+    const ENDPOINT_3AZ_EN: &str = "flows:\n  - user -> alb -> ecs -> aurora\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n  - aurora ~> cloudwatch\n  - ecs -> internet\nset:\n  azs: 3\n  lang: en\n  nat: per-az\nchoose:\n  route.ecs.s3: endpoint\n";
+
+    #[test]
+    fn a_label_too_wide_for_any_stretch_breaks_its_parts_into_words() {
+        let (_, l, w, notes) = wires(ENDPOINT_3AZ_EN);
+        assert!(notes.iter().all(|n| !n.contains("edge-")), "{notes:?}");
+        let s3 = w.iter().find(|x| x.to == "s3").unwrap();
+        assert_eq!(s3.label, "Read/Write\n(via VPC\nendpoint)\n(all AZs)");
+        let area = label_area_of(s3, &l);
+        for &(c, d) in &Scene::new(&l).borders {
+            assert!(!hits(c, d, area), "a frame side {c:?}-{d:?} cuts the label of {}", s3.id);
+        }
+        for y in &w {
+            for s in full_path(y, &l).windows(2) {
+                assert!(!hits(s[0], s[1], area), "{} runs through the label of {}", y.id, s3.id);
+            }
+        }
+        // A label that fits one part per line keeps its parts whole.
+        let (_, _, w, _) = wires(&ENDPOINT_JA.replace("lang: ja", "lang: en"));
+        assert_eq!(w.iter().find(|x| x.to == "s3").unwrap().label, "Read/Write\n(via VPC endpoint)\n(all AZs)");
     }
 
     /// Lines from the load balancer and the private parts all head for the side column.
@@ -1692,13 +1779,10 @@ mod tests {
     const HEAVY: &str = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - user -> alb\n  - cloudfront -> s3\n  - cloudfront ~> cloudwatch\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n  - ecs -> internet\n  - waf -- cloudfront\n  - acm -- cloudfront\nchoose:\n  route.ecs.s3: endpoint\n";
 
     /// Accepted definitions this version cannot draw without a fault: too many lines and labels
-    /// meet in one gap. They are still drawn, and every line at fault must be named in a note.
+    /// meet in one gap. In Japanese the S3 label of `ENDPOINT_3AZ_EN` has a word wider than any
+    /// stretch of its line. They are still drawn, and every line at fault must be named in a note.
     fn crowded_definitions() -> Vec<String> {
-        vec![
-            format!("{HEAVY}set:\n  azs: 3\n"),
-            format!("{HEAVY}set:\n  lang: ja\n"),
-            SHOWCASE.replace("route.ecs.s3: nat", "route.ecs.s3: endpoint"),
-        ]
+        vec![ENDPOINT_3AZ_EN.replace("lang: en", "lang: ja")]
     }
 
     /// Accepted definitions beyond the acceptance cases: other settings, every allowed link, reversed and extra flows.
@@ -1719,6 +1803,7 @@ mod tests {
         ].map(String::from));
         srcs.extend(endpoint_ja_definitions());
         srcs.extend([SHOWCASE.to_string(), SHOWCASE.replace("route.ecs.s3: nat", "route.ecs.s3: endpoint")]);
+        srcs.extend([ENDPOINT_3AZ_EN.to_string(), ENDPOINT_3AZ_EN.replace("lang: en", "lang: ja")]);
         srcs
     }
 
