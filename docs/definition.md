@@ -1,6 +1,6 @@
 # Writing a definition
 
-A definition is a text file with up to three sections: `flows`, `set` and `choose`. Only `flows` is required. Only a small part of YAML is accepted, so that `archwire set` can change one place by editing a single line. There are no lists inside lists, no quoting, no multi-line values and no anchors. A `#` starts a comment that runs to the end of the line. Blank lines, tabs and Windows line endings are fine. Section headings start at the left edge, and the lines under them are indented.
+A definition is a text file with up to three sections: `flows`, `set` and `choose`. Only `flows` is required. Only a small part of YAML is accepted, so that `archwire set` can change one place by editing a single line. There are no lists inside lists, no quoting, no multi-line values and no anchors. A `#` starts a comment that runs to the end of the line. Blank lines and Windows line endings are fine. Section headings start at the left edge, and the lines under them are indented with spaces. archwire also reads a definition indented with tabs, but YAML does not allow tabs for indentation, so other YAML tools reject such a file.
 
 ```yaml
 flows:
@@ -101,13 +101,58 @@ choose:
 
 `choose` answers holes. The key is the hole id from the report, `route.<from>.<to>`, and the value is `endpoint` (the traffic goes through a VPC endpoint; archwire draws no endpoint icon, and the line's label adds "(via VPC endpoint)") or `nat` (it goes out through NAT gateways, which archwire adds). The id depends on the part names only, so adding or moving lines does not change it. `archwire set <definition> choose.route.ecs.s3 endpoint` writes the entry for you.
 
+### Answering with nat
+
+```yaml
+flows:
+  - user -> alb -> ecs -> s3
+choose:
+  route.ecs.s3: nat
+```
+
+`compile` exits with 0. archwire adds a NAT gateway in each public subnet, with a line from each ECS task to its NAT gateway and on to the Internet Gateway, all labelled "Outbound". The line to S3 is labelled "Read/Write" and "(all AZs)" on two lines. The report gives the reasons for the NAT gateways:
+
+```json
+{
+  "target": "nat-1a",
+  "added": true,
+  "kind": "constraint",
+  "rule": "private-egress-through-nat",
+  "reason": "Instances in a private subnet connect to the internet through a public NAT gateway, which is created in a public subnet.",
+  "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat-gateway.html"
+},
+```
+
+The same entry follows for `nat-1c`, and then `nat-per-az`, the default that puts one NAT gateway in each zone. `notes` is empty.
+
+### Answering with endpoint
+
+```yaml
+flows:
+  - user -> alb -> ecs -> s3
+set:
+  lang: ja
+choose:
+  route.ecs.s3: endpoint
+```
+
+`compile` exits with 0. archwire adds no NAT gateway and no endpoint icon. The line to S3 is labelled with one part per line: 「読み書き」, 「（VPC エンドポイント経由）」 and 「（全 AZ から）」. The report's `notes` says that endpoint icons are not drawn:
+
+```json
+"notes": [
+  "VPC エンドポイントのアイコンは描かない。"
+]
+```
+
+This definition and its expected output are the acceptance case `tests/cases/endpoint-ja`.
+
 ## Editing with set
 
 ```sh
 archwire set <definition> <place> <value>
 ```
 
-The place is `flows[i][j]`, `set.<key>` or `choose.<hole id>`. For `set` and `choose`, the section or the key is added if it is missing, and an existing value is replaced in place. An added line copies the indentation of the other lines in its section, or of the file's first indented line when the section is new, so a file indented with four spaces or tabs stays readable YAML. For `flows[i][j]`, the j-th part of the i-th flow line (both counting from 0, and only flow lines are counted) is replaced; the value may carry a kind, as in `ecs(fargate)`. The value must be one non-empty line without `#`. `set` does not check that the result is a valid definition. `compile` does.
+The place is `flows[i][j]`, `set.<key>` or `choose.<hole id>`. For `set` and `choose`, the section or the key is added if it is missing, and an existing value is replaced in place. An added line copies the indentation of the other lines in its section, or of the file's first indented line when the section is new, so a file keeps its own indentation. For `flows[i][j]`, the j-th part of the i-th flow line (both counting from 0, and only flow lines are counted) is replaced; the value may carry a kind, as in `ecs(fargate)`. The value must be one non-empty line without `#`. `set` does not check that the result is a valid definition. `compile` does.
 
 ## Errors
 
@@ -142,7 +187,7 @@ Here is a full report for a misspelled name, from `- user -> cloudfrnt -> alb ->
 {
   "versions": {
     "archwire": "0.1.0",
-    "rules": "2026.11.0"
+    "rules": "2026.11.1"
   },
   "derived": [],
   "holes": [],

@@ -94,8 +94,9 @@ const STROKES_APART: i32 = 3;
 /// Search costs on top of length.
 const BEND_COST: i64 = 100;
 const CROSS_COST: i64 = 30;
-/// Crossing a frame's side costs this much, so searched lines keep out of frames they do not need.
-const BORDER_COST: i64 = 40;
+/// Crossing a frame's side costs this much, so searched lines keep out of frames they do not need;
+/// little enough that a line between parts in one row runs inside the frames, not around below them.
+const BORDER_COST: i64 = 15;
 /// Searched lines keep at least this far from icons, labels and frame names.
 const CLEARANCE: i32 = 8;
 /// Search channels: the outermost lie this far beyond everything; wide gaps get two more lanes this far from the middle.
@@ -1685,6 +1686,9 @@ mod tests {
         named.into_iter().chain(f.into_iter().map(|(id, what)| format!("{id} {what}"))).collect()
     }
 
+    /// The example at the top of the definition guide.
+    const SHOWCASE: &str = "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\nset:\n  azs: 3\n  lang: ja\nchoose:\n  route.ecs.s3: nat\n";
+
     const HEAVY: &str = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - user -> alb\n  - cloudfront -> s3\n  - cloudfront ~> cloudwatch\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n  - ecs -> internet\n  - waf -- cloudfront\n  - acm -- cloudfront\nchoose:\n  route.ecs.s3: endpoint\n";
 
     /// Accepted definitions this version cannot draw without a fault: too many lines and labels
@@ -1693,7 +1697,7 @@ mod tests {
         vec![
             format!("{HEAVY}set:\n  azs: 3\n"),
             format!("{HEAVY}set:\n  lang: ja\n"),
-            "flows:\n  - user -> alb -> ecs -> aurora\n  - alb -> aurora\n  - aurora ~> cloudwatch\n  - alb ~> s3\nset:\n  azs: 3\n".to_string(),
+            SHOWCASE.replace("route.ecs.s3: nat", "route.ecs.s3: endpoint"),
         ]
     }
 
@@ -1714,6 +1718,7 @@ mod tests {
             "flows:\n  - user -> cloudfront -> alb -> ecs\n  - acm -- cloudfront\n  - waf -- cloudfront\n  - cloudfront -> s3\n  - cloudfront ~> cloudwatch\n",
         ].map(String::from));
         srcs.extend(endpoint_ja_definitions());
+        srcs.extend([SHOWCASE.to_string(), SHOWCASE.replace("route.ecs.s3: nat", "route.ecs.s3: endpoint")]);
         srcs
     }
 
@@ -1827,6 +1832,16 @@ mod tests {
         // A label nothing cuts stays where it was.
         assert_eq!(get("edge-ecs-1a-to-aurora-1a").label_at, None);
         assert_eq!(get("edge-igw-to-alb").label_at, None);
+    }
+
+    #[test]
+    fn the_replication_line_to_the_far_reader_stays_inside_the_zones() {
+        for src in acceptance_definitions().into_iter().filter(|s| s.contains("azs: 3")) {
+            let (_, l, w, _) = wires(&src);
+            let x = w.iter().find(|x| x.id == "edge-aurora-1a-to-aurora-1d").unwrap();
+            let bottom = ["az-1a", "az-1c", "az-1d"].map(|id| { let r = l.rect(id); r.y + r.h }).into_iter().min().unwrap();
+            assert!(full_path(x, &l).iter().all(|p| p.1 < bottom), "{:?} goes below the zones at {bottom} in\n{src}", x.points);
+        }
     }
 
     #[test]
