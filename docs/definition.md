@@ -110,7 +110,7 @@ choose:
   route.ecs.s3: nat
 ```
 
-`compile` exits with 0. archwire adds a NAT gateway in each public subnet, with a line from each ECS task to its NAT gateway and on to the Internet Gateway, all labelled "Outbound". The line to S3 is labelled "Read/Write" and "(all AZs)" on two lines. The report gives the reasons for the NAT gateways:
+`compile` exits with 0. archwire adds a NAT gateway in each public subnet, with a line from each ECS task to its NAT gateway and on to the Internet Gateway, all labelled "Outbound". The line to S3 is labelled "Read/Write (all AZs)" on one line. The report gives the reasons for the NAT gateways:
 
 ```json
 {

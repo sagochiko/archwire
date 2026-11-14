@@ -249,30 +249,42 @@ fn text_width(text: &str) -> i32 {
 }
 
 /// Width of a Latin character in a line's label at font size 11, a pixel or so over what draw.io
-/// draws: wide capitals and m, w; other capitals; most small letters and digits; the narrower small
-/// letters; and the narrow letters, punctuation and space.
+/// draws: wide capitals and m, w; other capitals; most small letters, digits and symbols; the
+/// narrower small letters; and the narrow letters, punctuation and space. A character not listed
+/// counts at the widest width, so it is never counted narrower than it is drawn.
 fn wire_latin_width(c: char) -> i32 {
     match c {
+        '@' => 12,
         'W' => 11,
-        'M' | 'm' => 10,
+        'M' | 'm' | '%' => 10,
         'G' | 'O' | 'Q' | 'w' => 9,
         'A'..='Z' | '&' if !matches!(c, 'I' | 'J') => 8,
+        'a' | 'b' | 'd' | 'e' | 'g' | 'h' | 'n' | 'o' | 'p' | 'q' | 'u' | '0'..='9' => 7,
+        '#' | '$' | '?' | '_' | '+' | '=' | '<' | '>' | '~' | '^' | '"' | '*' | '`' | '{' | '}' | '\\' => 7,
         'c' | 'k' | 's' | 'v' | 'x' | 'y' | 'z' | 'J' => 6,
         'f' | 'i' | 'j' | 'l' | 'r' | 't' | 'I' | '(' | ')' | '[' | ']' | '/' | '.' | ',' | ':' | ';' | '-' | '\'' | '!' | '|' | ' ' => 4,
-        _ => 7,
+        _ => 12,
     }
 }
 
 /// Text width of a line's label, drawn at font size 11: Latin text letter by letter, other text at
-/// the width of a full-width character, and the full-width parentheses, which draw.io draws at half
-/// that width, at half plus a pixel.
+/// the width of a full-width character. A full-width parenthesis is drawn at full width inside a
+/// line; an opening one at the start of a line and a closing one at its end show only half, and
+/// count at half plus a pixel.
 fn wire_text_width(text: &str) -> i32 {
-    let char_width = |c: char| match c {
-        c if c.is_ascii() => wire_latin_width(c),
-        '（' | '）' => WIRE_CHAR_PAREN,
-        _ => WIRE_CHAR_WIDE,
+    let line_width = |l: &str| {
+        let n = l.chars().count();
+        l.chars()
+            .enumerate()
+            .map(|(i, c)| match c {
+                c if c.is_ascii() => wire_latin_width(c),
+                '（' if i == 0 => WIRE_CHAR_PAREN,
+                '）' if i + 1 == n => WIRE_CHAR_PAREN,
+                _ => WIRE_CHAR_WIDE,
+            })
+            .sum::<i32>()
     };
-    text.lines().map(|l| l.chars().map(char_width).sum::<i32>()).max().unwrap_or(0)
+    text.lines().map(line_width).max().unwrap_or(0)
 }
 
 /// The area an icon's label takes: centred under the icon.
@@ -1258,16 +1270,19 @@ fn slots(n: usize) -> Vec<u8> {
 // shrunk by its blank margin, and two strokes this close together read as one.
 
 const AUDIT_CHAR_ASCII: i32 = 7;
-/// Latin letters in a line's label, widest first, by their width at font size 11.
-const AUDIT_WIRE_LATIN: [(&str, i32); 5] = [
+/// Latin letters in a line's label, widest first, by their width at font size 11. Characters not
+/// listed count at `AUDIT_WIRE_UNLISTED`.
+const AUDIT_WIRE_LATIN: [(&str, i32); 7] = [
+    ("@", 12),
     ("W", 11),
-    ("Mm", 10),
+    ("Mm%", 10),
     ("GOQw", 9),
     ("ABCDEFHKLNPRSTUVXYZ&", 8),
+    ("abdeghnopqu0123456789#$?_+=<>~^\"*`{}\\", 7),
     ("ckJsvxyz", 6),
 ];
 const AUDIT_WIRE_NARROW: &str = "fijlrtI()[]/.,:;-'!| ";
-const AUDIT_WIRE_OTHER_LATIN: i32 = 7;
+const AUDIT_WIRE_UNLISTED: i32 = 12;
 const AUDIT_WIRE_NARROW_W: i32 = 4;
 const AUDIT_CHAR_WIDE: i32 = 12;
 const AUDIT_WIRE_WIDE: i32 = 11;
@@ -1281,21 +1296,33 @@ fn audit_text_width(text: &str) -> i32 {
     text.lines().map(|l| l.chars().map(|c| if c.is_ascii() { AUDIT_CHAR_ASCII } else { AUDIT_CHAR_WIDE }).sum()).max().unwrap_or(0)
 }
 
-/// A line's label is drawn at font size 11, where Latin letters differ in width, a full-width
-/// character is narrower and a full-width parenthesis is drawn at about half width.
+/// A line's label is drawn at font size 11, where Latin letters differ in width and a full-width
+/// character is narrower; a full-width parenthesis shows only half its width where it opens a line
+/// or closes it.
 fn audit_wire_text_width(text: &str) -> i32 {
     let latin = |c: char| {
         if AUDIT_WIRE_NARROW.contains(c) {
             return AUDIT_WIRE_NARROW_W;
         }
-        AUDIT_WIRE_LATIN.iter().find(|(set, _)| set.contains(c)).map_or(AUDIT_WIRE_OTHER_LATIN, |&(_, w)| w)
+        AUDIT_WIRE_LATIN.iter().find(|(set, _)| set.contains(c)).map_or(AUDIT_WIRE_UNLISTED, |&(_, w)| w)
     };
-    let width = |c: char| match c {
-        c if c.is_ascii() => latin(c),
-        '（' | '）' => AUDIT_WIRE_PAREN,
-        _ => AUDIT_WIRE_WIDE,
-    };
-    text.lines().map(|l| l.chars().map(width).sum()).max().unwrap_or(0)
+    let mut widest = 0;
+    for line in text.lines() {
+        let chars: Vec<char> = line.chars().collect();
+        let mut sum = 0;
+        for (i, &c) in chars.iter().enumerate() {
+            let at_edge = (c == '（' && i == 0) || (c == '）' && i == chars.len() - 1);
+            sum += if c.is_ascii() {
+                latin(c)
+            } else if at_edge {
+                AUDIT_WIRE_PAREN
+            } else {
+                AUDIT_WIRE_WIDE
+            };
+        }
+        widest = widest.max(sum);
+    }
+    widest
 }
 
 /// True if the segment enters the inside of the box; touching its edge does not count.
@@ -1652,7 +1679,11 @@ mod tests {
     #[test]
     fn a_line_label_is_estimated_no_narrower_than_draw_io_draws_it_and_not_much_wider() {
         // Widths of the drawn text, read from draw.io's rendering at font size 11.
-        for (text, drawn) in [("読み書き", 42), ("（VPC エンドポイント経由）", 132), ("（全 AZ から）", 61), ("ログ・メトリクス", 86), ("ああああああああああ", 108)] {
+        for (text, drawn) in [
+            ("読み書き", 42), ("（VPC エンドポイント経由）", 132), ("（全 AZ から）", 61), ("ログ・メトリクス", 86), ("ああああああああああ", 108),
+            // Full-width parentheses inside a line are drawn at full width, at its ends at half.
+            ("読み書き （VPC エンドポイント経由） （全 AZ から）", 264), ("ログ・メトリクス （全 AZ から）", 158), ("あ（あ", 31), ("あ（あ）あ", 53),
+        ] {
             let w = wire_text_width(text);
             assert!(w >= drawn && w <= drawn + 16, "{text}: estimated {w}, drawn {drawn}");
         }
@@ -1667,6 +1698,23 @@ mod tests {
             assert!(w >= drawn && w <= drawn + 16, "{text}: estimated {w}, drawn {drawn}");
             assert_eq!(audit_wire_text_width(text), w, "{text}: the final check measures it the same way");
         }
+    }
+
+    #[test]
+    fn every_printable_latin_character_is_estimated_no_narrower_than_draw_io_draws_it() {
+        // Ten times the width of each character, read from draw.io's rendering at font size 11:
+        // the larger of ten in a row and ten more between two others.
+        let chars = r##"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~"##;
+        let drawn = [61, 54, 61, 61, 61, 61, 61, 61, 61, 61, 61, 61, 55, 61, 61, 29, 61, 61, 24, 24, 55, 24, 92, 61, 61, 61, 61, 37, 55, 31, 61, 55, 79, 55, 55, 55, 73, 73, 79, 79, 73, 67, 86, 79, 31, 55, 73, 61, 92, 79, 86, 73, 86, 79, 73, 67, 79, 73, 104, 73, 73, 67, 31, 39, 61, 61, 98, 73, 21, 37, 37, 43, 64, 31, 37, 31, 31, 31, 31, 64, 64, 64, 61, 112, 31, 31, 31, 52, 61, 37, 37, 29, 37, 64];
+        assert_eq!(chars.chars().count(), drawn.len());
+        for (c, d) in chars.chars().zip(drawn) {
+            let ten = c.to_string().repeat(10);
+            let w = wire_text_width(&ten);
+            assert!(w >= d, "{c:?}: estimated {w} for ten, drawn {d}");
+            assert_eq!(audit_wire_text_width(&ten), w, "{c:?}: the final check measures it the same way");
+        }
+        // Characters not measured count at the widest width, never narrower.
+        assert!(wire_text_width("\t") >= wire_text_width("@"));
     }
 
     /// Three AZs in English, with the S3 line answered with `endpoint` and lines to the side column
@@ -1835,11 +1883,18 @@ mod tests {
 
     const HEAVY: &str = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - user -> alb\n  - cloudfront -> s3\n  - cloudfront ~> cloudwatch\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n  - ecs -> internet\n  - waf -- cloudfront\n  - acm -- cloudfront\nchoose:\n  route.ecs.s3: endpoint\n";
 
+    /// Two AZs in Japanese with lines from ECS and Aurora to S3 and the side column: the label of
+    /// the line from ECS to S3 has no spot clear of lines and text even over frame sides.
+    const CROWDED_S3_JA: &str = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - cloudfront ~> cloudwatch\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - aurora ~> cloudwatch\n  - waf -- cloudfront\n  - acm -- cloudfront\n  - aurora -> s3\n  - alb ~> s3\nset:\n  azs: 2\n  lang: ja\n  nat: per-az\nchoose:\n  route.ecs.s3: endpoint\n  route.aurora.s3: nat\n";
+
+    /// Two AZs in English with lines from every part to S3 and CloudWatch: the labels of the lines
+    /// to CloudWatch have no spot clear of lines and text even over frame sides.
+    const CROWDED_SIDE_EN: &str = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - cloudfront -> s3\n  - cloudfront ~> cloudwatch\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n  - aurora ~> cloudwatch\n  - ecs -> internet\n  - waf -- cloudfront\n  - acm -- cloudfront\n  - user -> alb\n  - aurora -> s3\n  - alb ~> s3\n  - ecs ~> s3\nset:\n  azs: 2\n  lang: en\n  nat: per-az\nchoose:\n  route.aurora.s3: nat\n";
+
     /// Accepted definitions this version cannot draw without a fault: too many lines and labels
     /// meet in one gap. They are still drawn, and every line at fault must be named in a note.
-    /// None are known at present.
     fn crowded_definitions() -> Vec<String> {
-        Vec::new()
+        vec![CROWDED_S3_JA.to_string(), CROWDED_SIDE_EN.to_string()]
     }
 
     /// Accepted definitions beyond the acceptance cases: other settings, every allowed link, reversed and extra flows.
@@ -1861,6 +1916,7 @@ mod tests {
         srcs.extend(endpoint_ja_definitions());
         srcs.extend([SHOWCASE.to_string(), SHOWCASE.replace("route.ecs.s3: nat", "route.ecs.s3: endpoint")]);
         srcs.extend([ENDPOINT_3AZ_EN.to_string(), ENDPOINT_3AZ_EN.replace("lang: en", "lang: ja")]);
+        srcs.extend(crowded_definitions());
         srcs
     }
 
