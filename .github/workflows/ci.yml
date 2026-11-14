@@ -1,0 +1,20 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the tests, including the byte-for-byte comparison of every case
+        run: cargo test --workspace
+      - name: Run the self-test of the diagram checker
+        run: python3 tools/geocheck.py --self-test

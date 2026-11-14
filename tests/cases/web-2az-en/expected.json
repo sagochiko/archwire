@@ -1,0 +1,134 @@
+{
+  "versions": {
+    "archwire": "0.1.0",
+    "rules": "2026.11.0"
+  },
+  "derived": [
+    {
+      "target": "region",
+      "added": true,
+      "kind": "default",
+      "rule": "default-region",
+      "reason": "No Region was given, so ap-northeast-1 (Tokyo) is used.",
+      "source": null
+    },
+    {
+      "target": "vpc",
+      "added": true,
+      "kind": "constraint",
+      "rule": "load-balancer-in-vpc",
+      "reason": "An Application Load Balancer is created in subnets of a VPC, so a VPC is drawn.",
+      "source": "https://docs.aws.amazon.com/elasticloadbalancing/latest/application/create-application-load-balancer.html"
+    },
+    {
+      "target": "az",
+      "added": true,
+      "kind": "constraint",
+      "rule": "alb-spans-two-azs",
+      "reason": "An Application Load Balancer requires subnets in at least two Availability Zones.",
+      "source": "https://docs.aws.amazon.com/elasticloadbalancing/latest/application/application-load-balancers.html"
+    },
+    {
+      "target": "az",
+      "added": true,
+      "kind": "default",
+      "rule": "default-two-azs",
+      "reason": "No number of Availability Zones was given, so two are used, the minimum an Application Load Balancer accepts.",
+      "source": null
+    },
+    {
+      "target": "subnet",
+      "added": true,
+      "kind": "default",
+      "rule": "public-and-private-subnet-per-az",
+      "reason": "archwire gives each Availability Zone one public subnet and one private subnet.",
+      "source": null
+    },
+    {
+      "target": "cloudfront",
+      "added": false,
+      "kind": "constraint",
+      "rule": "global-service-outside-region",
+      "reason": "AWS lists Amazon CloudFront and AWS WAF for CloudFront among the global services, whose resources are not Region-specific. archwire draws global services inside the AWS Cloud frame and outside the Region frame.",
+      "source": "https://docs.aws.amazon.com/whitepapers/latest/aws-fault-isolation-boundaries/global-services.html"
+    },
+    {
+      "target": "ecs",
+      "added": false,
+      "kind": "default",
+      "rule": "compute-in-private",
+      "reason": "No subnet was given, so ECS is placed in private subnets; traffic reaches it through the load balancer.",
+      "source": null
+    },
+    {
+      "target": "aurora",
+      "added": false,
+      "kind": "default",
+      "rule": "database-in-private",
+      "reason": "No subnet was given, so Aurora is placed in private subnets so it is not reachable from the internet.",
+      "source": null
+    },
+    {
+      "target": "aurora",
+      "added": false,
+      "kind": "default",
+      "rule": "aurora-writer-reader",
+      "reason": "The Writer goes in the first Availability Zone and Readers in the remaining ones.",
+      "source": null
+    },
+    {
+      "target": "s3",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "Regional services that are not placed in a VPC subnet are drawn inside the Region frame and outside the VPC frame.",
+      "source": null
+    },
+    {
+      "target": "cloudwatch",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "Regional services that are not placed in a VPC subnet are drawn inside the Region frame and outside the VPC frame.",
+      "source": null
+    },
+    {
+      "target": "igw",
+      "added": true,
+      "kind": "constraint",
+      "rule": "internet-facing-alb-in-vpc-with-igw",
+      "reason": "With an internet-facing Application Load Balancer, only VPCs that have an Internet Gateway can be selected, so the VPC gets an Internet Gateway.",
+      "source": "https://docs.aws.amazon.com/elasticloadbalancing/latest/application/create-application-load-balancer.html"
+    },
+    {
+      "target": "nat-1a",
+      "added": true,
+      "kind": "constraint",
+      "rule": "private-egress-through-nat",
+      "reason": "Instances in a private subnet connect to the internet through a public NAT gateway, which is created in a public subnet.",
+      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat-gateway.html"
+    },
+    {
+      "target": "nat-1c",
+      "added": true,
+      "kind": "constraint",
+      "rule": "private-egress-through-nat",
+      "reason": "Instances in a private subnet connect to the internet through a public NAT gateway, which is created in a public subnet.",
+      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat-gateway.html"
+    },
+    {
+      "target": "nat",
+      "added": true,
+      "kind": "default",
+      "rule": "nat-per-az",
+      "reason": "One NAT gateway per Availability Zone keeps outbound traffic working when another zone fails.",
+      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/nat-gateway-scenarios.html"
+    }
+  ],
+  "holes": [],
+  "errors": [],
+  "warnings": [],
+  "notes": [
+    "Auxiliary flows (~>) are drawn as lines only; their network route is not handled."
+  ]
+}

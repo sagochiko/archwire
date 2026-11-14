@@ -1,0 +1,35 @@
+archwire
+Copyright 2026 sagochiko
+
+This software is licensed under the Apache License, Version 2.0 (see LICENSE).
+Parts of it are derived from the two works below, both licensed under the
+Apache License, Version 2.0.
+
+1. The drawio skill in the Claude Code plugin of
+   https://github.com/jgraph/drawio-mcp (plugins/claude-code),
+   Copyright 2025 JGraph Ltd. That repository has no NOTICE file.
+   Used in crates/archwire-core/src/drawio.rs: the rules for the structure of
+   the draw.io XML file and for keeping it well-formed.
+   Not carried over: Mermaid authoring, ELK and other auto-layout, browser
+   URL output, and the shared xml-reference.md. That reference recommends
+   rounded bends on orthogonal edges and discourages explicit connection
+   points, both of which archwire reverses.
+
+2. The architecture diagram skill in the deploy-on-aws plugin of
+   https://github.com/awslabs/agent-plugins.
+   Used in crates/archwire-core/src/drawio.rs: the group, service icon and
+   edge style strings. Used in rules/aws/services.toml: the shape names and
+   the category colors. They were changed afterwards to match the AWS
+   Architecture Icons package of 2026-07-31.
+   The NOTICE file of that repository reads:
+
+   Agent Plugins for AWS
+   Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+
+The style strings in crates/archwire-core/src/drawio.rs and the colors and
+shape names in rules/aws/services.toml were modified from the works above.
+The inference, layout, routing and rule data, and tools/geocheck.py, are
+original to the author of archwire.
+
+archwire is not an official AWS tool and is not affiliated with or endorsed
+by Amazon Web Services.

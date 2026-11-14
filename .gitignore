@@ -1,0 +1,12 @@
+# Build output
+/target/
+
+# Diagrams rendered while trying things out
+/out/
+*.drawio.png
+
+# Secrets and local settings
+.env
+.env.*
+.DS_Store
+__pycache__/

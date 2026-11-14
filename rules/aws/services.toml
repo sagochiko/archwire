@@ -1,0 +1,134 @@
+# Service properties. For `user` and `internet` the label is a key in labels.toml;
+# consumers resolve every label through Rules::text, which returns unknown keys unchanged.
+#
+# `flow_source = true` marks a global service that may start a main (->) or auxiliary (~>) flow.
+# `attach_to` makes a service an attachment: it carries no flows and may only be associated
+# (--) with the services listed there, written attachment first.
+
+[[service]]
+key = "user"
+scope = "outside"
+place = "single"
+icon = "resource"
+shape = "users"
+color = "#242F3E"
+label = "users"
+
+[[service]]
+key = "internet"
+scope = "outside"
+place = "single"
+icon = "resource"
+shape = "internet"
+color = "#242F3E"
+label = "internet"
+
+[[service]]
+key = "cloudfront"
+scope = "global"
+place = "single"
+icon = "service"
+shape = "cloudfront"
+color = "#8C4FFF"
+label = "Amazon CloudFront"
+in_label = "https"
+flow_source = true
+
+[[service]]
+key = "waf"
+scope = "global"
+place = "single"
+icon = "service"
+shape = "waf"
+color = "#DD344C"
+label = "AWS WAF"
+attach_to = ["cloudfront"]
+
+[[service]]
+key = "acm"
+scope = "global"
+place = "single"
+icon = "service"
+shape = "certificate_manager_3"
+color = "#DD344C"
+label = "AWS Certificate Manager"
+attach_to = ["cloudfront"]
+
+[[service]]
+key = "igw"
+scope = "vpc"
+place = "gateway"
+icon = "resource"
+shape = "internet_gateway"
+color = "#8C4FFF"
+label = "Internet Gateway"
+in_label = "https"
+derived_only = true
+
+[[service]]
+key = "alb"
+scope = "vpc"
+subnet = "public"
+place = "span"
+icon = "service"
+shape = "elastic_load_balancing"
+color = "#8C4FFF"
+label = "Application Load Balancer"
+in_label = "https"
+
+[[service]]
+key = "nat"
+scope = "vpc"
+subnet = "public"
+place = "per_az"
+icon = "resource"
+shape = "nat_gateway"
+color = "#8C4FFF"
+label = "NAT Gateway"
+in_label = "outbound"
+derived_only = true
+
+[[service]]
+key = "ecs"
+scope = "vpc"
+subnet = "private"
+place = "per_az"
+icon = "service"
+shape = "ecs"
+color = "#ED7100"
+label = "Amazon ECS"
+in_label = "http"
+
+[service.options.fargate]
+shape = "fargate"
+label = "Amazon ECS (Fargate)"
+
+[[service]]
+key = "aurora"
+scope = "vpc"
+subnet = "private"
+place = "writer_reader"
+icon = "service"
+shape = "aurora"
+color = "#C925D1"
+label = "Amazon Aurora"
+
+[[service]]
+key = "s3"
+scope = "regional"
+place = "single"
+icon = "service"
+shape = "s3"
+color = "#7AA116"
+label = "Amazon S3"
+in_label = "read_write"
+
+[[service]]
+key = "cloudwatch"
+scope = "regional"
+place = "single"
+icon = "service"
+shape = "cloudwatch_2"
+color = "#E7157B"
+label = "Amazon CloudWatch"
+in_label = "logs_metrics"

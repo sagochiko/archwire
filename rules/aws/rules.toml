@@ -1,0 +1,95 @@
+version = "2026.11.0"
+
+# kind = "constraint": states an AWS constraint; `source` (AWS documentation URL) is required.
+# kind = "default": a choice archwire makes when the definition is silent; `source` is optional.
+
+[[rule]]
+id = "global-service-outside-region"
+kind = "constraint"
+source = "https://docs.aws.amazon.com/whitepapers/latest/aws-fault-isolation-boundaries/global-services.html"
+reason_en = "AWS lists Amazon CloudFront and AWS WAF for CloudFront among the global services, whose resources are not Region-specific. archwire draws global services inside the AWS Cloud frame and outside the Region frame."
+reason_ja = "AWS は Amazon CloudFront と AWS WAF for CloudFront を、リソースがリージョンに属さないグローバルサービスに挙げている。archwire はグローバルサービスを AWS Cloud の枠の中、リージョンの枠の外に描く。"
+
+[[rule]]
+id = "cloudfront-certificate-in-us-east-1"
+kind = "constraint"
+source = "https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/cnames-and-https-requirements.html"
+reason_en = "To use an AWS Certificate Manager certificate with a CloudFront distribution, the certificate is requested or imported in US East (N. Virginia) (us-east-1). archwire draws it outside the Region frame and writes us-east-1 under its name."
+reason_ja = "CloudFront のディストリビューションで AWS Certificate Manager の証明書を使うには、証明書を米国東部（バージニア北部）（us-east-1）でリクエストまたはインポートする。archwire は証明書をリージョンの枠の外に描き、名前の下に us-east-1 と書く。"
+
+[[rule]]
+id = "regional-service-outside-vpc"
+kind = "default"
+reason_en = "Regional services that are not placed in a VPC subnet are drawn inside the Region frame and outside the VPC frame."
+reason_ja = "VPC のサブネットに置かないリージョンのサービスは、リージョンの枠の中、VPC の枠の外に描く。"
+
+[[rule]]
+id = "load-balancer-in-vpc"
+kind = "constraint"
+source = "https://docs.aws.amazon.com/elasticloadbalancing/latest/application/create-application-load-balancer.html"
+reason_en = "An Application Load Balancer is created in subnets of a VPC, so a VPC is drawn."
+reason_ja = "Application Load Balancer は VPC のサブネットに作るので、VPC を描く。"
+
+[[rule]]
+id = "alb-spans-two-azs"
+kind = "constraint"
+source = "https://docs.aws.amazon.com/elasticloadbalancing/latest/application/application-load-balancers.html"
+reason_en = "An Application Load Balancer requires subnets in at least two Availability Zones."
+reason_ja = "Application Load Balancer には、2つ以上のアベイラビリティゾーンのサブネットが要る。"
+
+[[rule]]
+id = "internet-facing-alb-in-vpc-with-igw"
+kind = "constraint"
+source = "https://docs.aws.amazon.com/elasticloadbalancing/latest/application/create-application-load-balancer.html"
+reason_en = "With an internet-facing Application Load Balancer, only VPCs that have an Internet Gateway can be selected, so the VPC gets an Internet Gateway."
+reason_ja = "インターネット向けの Application Load Balancer では、Internet Gateway のある VPC しか選べないので、VPC に Internet Gateway を置く。"
+
+[[rule]]
+id = "private-egress-through-nat"
+kind = "constraint"
+source = "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat-gateway.html"
+reason_en = "Instances in a private subnet connect to the internet through a public NAT gateway, which is created in a public subnet."
+reason_ja = "プライベートサブネットのリソースは、パブリックサブネットに作った NAT Gateway を通してインターネットへ接続する。"
+
+[[rule]]
+id = "nat-per-az"
+kind = "default"
+source = "https://docs.aws.amazon.com/vpc/latest/userguide/nat-gateway-scenarios.html"
+reason_en = "One NAT gateway per Availability Zone keeps outbound traffic working when another zone fails."
+reason_ja = "NAT Gateway をアベイラビリティゾーンごとに置くと、ほかのゾーンが止まっても外向きの通信が続く。"
+
+[[rule]]
+id = "default-two-azs"
+kind = "default"
+reason_en = "No number of Availability Zones was given, so two are used, the minimum an Application Load Balancer accepts."
+reason_ja = "AZ の数の指定が無いので、Application Load Balancer が受け付ける最小の2つにする。"
+
+[[rule]]
+id = "public-and-private-subnet-per-az"
+kind = "default"
+reason_en = "archwire gives each Availability Zone one public subnet and one private subnet."
+reason_ja = "archwire は、各アベイラビリティゾーンにパブリックサブネットとプライベートサブネットを1つずつ置く。"
+
+[[rule]]
+id = "compute-in-private"
+kind = "default"
+reason_en = "No subnet was given, so ECS is placed in private subnets; traffic reaches it through the load balancer."
+reason_ja = "サブネットの指定が無いので、ECS はプライベートサブネットに置く。外からの通信はロードバランサーが受ける。"
+
+[[rule]]
+id = "database-in-private"
+kind = "default"
+reason_en = "No subnet was given, so Aurora is placed in private subnets so it is not reachable from the internet."
+reason_ja = "サブネットの指定が無いので、Aurora はインターネットから届かないプライベートサブネットに置く。"
+
+[[rule]]
+id = "aurora-writer-reader"
+kind = "default"
+reason_en = "The Writer goes in the first Availability Zone and Readers in the remaining ones."
+reason_ja = "Writer を1つ目の AZ に、Reader を残りの AZ に置く。"
+
+[[rule]]
+id = "default-region"
+kind = "default"
+reason_en = "No Region was given, so ap-northeast-1 (Tokyo) is used."
+reason_ja = "リージョンの指定が無いので、ap-northeast-1（東京）にする。"

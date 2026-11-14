@@ -1,0 +1,28 @@
+{
+  "versions": {
+    "archwire": "0.1.0",
+    "rules": "2026.11.0"
+  },
+  "derived": [],
+  "holes": [],
+  "errors": [
+    {
+      "code": "UNSUPPORTED",
+      "at": "flows",
+      "got": null,
+      "allowed": [],
+      "rule": null,
+      "message": "v0.1 needs a main flow from user or cloudfront into alb, and from alb into ecs"
+    },
+    {
+      "code": "UNSUPPORTED",
+      "at": "flows[0]",
+      "got": "user -> s3",
+      "allowed": [],
+      "rule": null,
+      "message": "v0.1 does not support `user -> s3`"
+    }
+  ],
+  "warnings": [],
+  "notes": []
+}

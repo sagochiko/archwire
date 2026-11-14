@@ -1,0 +1,111 @@
+# Display words. Each entry has an English and a Japanese text.
+
+[users]
+en = "Users"
+ja = "利用者"
+
+[internet]
+en = "Internet"
+ja = "インターネット"
+
+[public_subnet]
+en = "Public subnet"
+ja = "パブリックサブネット"
+
+[private_subnet]
+en = "Private subnet"
+ja = "プライベートサブネット"
+
+[https]
+en = "HTTPS"
+ja = "HTTPS"
+
+[http]
+en = "HTTP"
+ja = "HTTP"
+
+[read_write]
+en = "Read/Write"
+ja = "読み書き"
+
+[read]
+en = "Read"
+ja = "読み取り"
+
+[replication]
+en = "Replication"
+ja = "レプリケーション"
+
+[logs_metrics]
+en = "Logs and metrics"
+ja = "ログ・メトリクス"
+
+[outbound]
+en = "Outbound"
+ja = "外向き通信"
+
+[static_files]
+en = "Static files"
+ja = "静的ファイル"
+
+[web_acl]
+en = "Web ACL"
+ja = "Web ACL を適用"
+
+[certificate]
+en = "Certificate"
+ja = "証明書"
+
+[undecided_route]
+en = "Route undecided"
+ja = "経路未定"
+
+[from_all_azs]
+en = "(all AZs)"
+ja = "（全 AZ から）"
+
+[via_endpoint]
+en = "(via VPC endpoint)"
+ja = "（VPC エンドポイント経由）"
+
+[writer]
+en = "Writer"
+ja = "Writer"
+
+[reader]
+en = "Reader"
+ja = "Reader"
+
+["region.ap-northeast-1"]
+en = "Tokyo (ap-northeast-1)"
+ja = "東京リージョン（ap-northeast-1）"
+
+# Sentences for diagnostics notes and hole needs. `{from}` and `{to}` are part names.
+["note.aux_not_routed"]
+en = "Auxiliary flows (~>) are drawn as lines only; their network route is not handled."
+ja = "補助の流れ（~>）は経路を扱わず、線だけを描く。"
+
+["note.endpoint_not_drawn"]
+en = "VPC endpoint icons are not drawn."
+ja = "VPC エンドポイントのアイコンは描かない。"
+
+["note.cross_az_merged"]
+en = "With three Availability Zones, lines between parts in different zones are not drawn: each line inside a zone stands for the lines from every zone into the same part."
+ja = "AZ が3つのときは AZ をまたぐ線を描かず、同じ AZ の中の1本で、各 AZ から同じ部品への線をまとめて表す。"
+
+["note.unrouted_line"]
+en = "The line {line} could not avoid every icon, label and other line; check it in the diagram."
+ja = "{line} の線は、アイコン、ラベル、ほかの線のどれかを避けきれなかった。図で確かめること。"
+
+["note.unplaced_label"]
+en = "The label of the line {line} could not be placed clear of every frame side, icon, text and other line; check it in the diagram."
+ja = "{line} の線のラベルは、枠線、アイコン、文字、ほかの線のどれかを避けて置けなかった。図で確かめること。"
+
+["need.route"]
+en = "Route from {from} to {to}"
+ja = "{from} から {to} への経路"
+
+# Service option labels are looked up by their English text.
+["Amazon ECS (Fargate)"]
+en = "Amazon ECS (Fargate)"
+ja = "Amazon ECS（Fargate）"

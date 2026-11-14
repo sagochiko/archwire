@@ -1,0 +1,31 @@
+{
+  "versions": {
+    "archwire": "0.1.0",
+    "rules": "2026.11.0"
+  },
+  "derived": [],
+  "holes": [],
+  "errors": [
+    {
+      "code": "UNKNOWN_SERVICE",
+      "at": "flows[0][1]",
+      "got": "cloudfrnt",
+      "allowed": [
+        "acm",
+        "alb",
+        "aurora",
+        "cloudfront",
+        "cloudwatch",
+        "ecs",
+        "internet",
+        "s3",
+        "user",
+        "waf"
+      ],
+      "rule": null,
+      "message": "unknown service `cloudfrnt`"
+    }
+  ],
+  "warnings": [],
+  "notes": []
+}

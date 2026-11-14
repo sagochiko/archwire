@@ -1,0 +1,5 @@
+flows:
+  - user -> cloudfront -> alb -> ecs(fargate) -> aurora
+  - cloudfront -> s3
+  - ecs -> internet
+  - ecs ~> cloudwatch
