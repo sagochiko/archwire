@@ -10,6 +10,15 @@ use crate::infer::{check_lang, check_names, check_region, derived};
 use crate::model::{Area, Edge, Model, Node};
 use crate::rules::{LinkRule, Rules, Scope};
 
+/// The rules this code names itself; the rest come from the data, which loading checks.
+pub(crate) const RULES: [&str; 5] = [
+    "resources-inside-aws-cloud-frame",
+    "resources-inside-region-frame",
+    "default-region",
+    "global-service-outside-region",
+    "regional-service-outside-vpc",
+];
+
 /// The only settings a definition without a VPC may write.
 const SETTINGS: [&str; 2] = ["lang", "region"];
 
@@ -38,6 +47,10 @@ pub fn infer(def: &Definition, rules: &Rules) -> (Option<Model>, Diagnostics) {
         versions: Versions { archwire: env!("CARGO_PKG_VERSION").to_string(), rules: rules.version.clone() },
         ..Default::default()
     };
+    diag.errors = rules.require(&RULES);
+    if !diag.errors.is_empty() {
+        return (None, diag);
+    }
     let errors = &mut diag.errors;
 
     let names_ok = check_names(def, rules, errors);
@@ -286,8 +299,9 @@ mod tests {
         assert_eq!(d.exit_code(), 0);
         let ids: Vec<_> = m.nodes.iter().map(|n| n.id.as_str()).collect();
         assert_eq!(ids, ["user","cloudfront","s3","apigateway","lambda","dynamodb","cognito","cloudwatch"]);
-        let area = |id: &str| m.nodes.iter().find(|n| n.id == id).unwrap().area;
-        assert_eq!((area("user"), area("cloudfront"), area("cognito")), (Some(Area::Outside), Some(Area::Cloud), Some(Area::Region)));
+        let areas: Vec<_> = m.nodes.iter().map(|n| (n.id.as_str(), n.area)).collect();
+        let (o, c, r) = (Some(Area::Outside), Some(Area::Cloud), Some(Area::Region));
+        assert_eq!(areas, [("user", o), ("cloudfront", c), ("s3", r), ("apigateway", r), ("lambda", r), ("dynamodb", r), ("cognito", r), ("cloudwatch", r)]);
         assert!(m.azs.is_empty());
         assert_eq!([label(&m,"user","apigateway"), label(&m,"apigateway","lambda"), label(&m,"lambda","dynamodb"), label(&m,"cloudfront","s3"), label(&m,"cognito","apigateway"), label(&m,"lambda","cloudwatch")],
                    ["https", "invoke", "read_write", "static_files", "jwt_authorizer", "logs_metrics"]);
@@ -299,6 +313,70 @@ mod tests {
         assert_eq!(rules_of(&d, "region"), ["resources-inside-region-frame", "default-region"]);
         assert!(["vpc", "az", "subnet"].iter().all(|t| rules_of(&d, t).is_empty()));
         assert!(d.notes.is_empty());
+        // The frames are added by archwire; the parts were written in the definition.
+        for x in &d.derived {
+            assert_eq!(x.added, ["aws-cloud", "region"].contains(&x.target.as_str()), "{} {}", x.target, x.rule);
+        }
+        assert!(d.derived.iter().any(|x| x.added) && d.derived.iter().any(|x| !x.added));
+    }
+
+    #[test]
+    fn an_authorizer_reason_goes_only_to_the_api_it_is_on() {
+        let (m, d) = run("flows:\n  - user -> apigateway(http) -> lambda\n  - user -> apigateway.admin(rest) -> lambda.admin\n  - cognito -- apigateway.admin\n");
+        let m = m.unwrap();
+        assert_eq!(rules_of(&d, "apigateway"), ["regional-service-outside-vpc"]);
+        assert_eq!(rules_of(&d, "apigateway.admin"), ["regional-service-outside-vpc", "rest-api-cognito-authorizer"]);
+        assert_eq!(label(&m, "cognito", "apigateway.admin"), "cognito_authorizer");
+        assert!(d.derived.iter().filter(|x| x.target.starts_with("apigateway")).all(|x| !x.added));
+    }
+
+    /// The built-in rules.toml without one rule.
+    fn rules_without(id: &str) -> Result<Rules, Vec<crate::diag::Problem>> {
+        let text = include_str!("../../../rules/aws/rules.toml");
+        let start = text.find(&format!("[[rule]]\nid = \"{id}\"")).unwrap();
+        let end = text[start + 1..].find("[[rule]]").map_or(text.len(), |e| start + 1 + e);
+        let rules = format!("{}{}", &text[..start], &text[end..]);
+        Rules::load(
+            include_str!("../../../rules/aws/services.toml"),
+            &rules,
+            include_str!("../../../rules/aws/labels.toml"),
+            include_str!("../../../rules/aws/links.toml"),
+        )
+    }
+
+    #[test]
+    fn a_rule_the_code_names_but_the_data_lacks_is_an_error_not_a_panic() {
+        type Infer = fn(&Definition, &Rules) -> (Option<Model>, Diagnostics);
+        let api = crate::def::parse(API).unwrap();
+        let web = crate::def::parse("flows:\n  - user -> alb -> ecs -> aurora\n  - ecs -> internet\n").unwrap();
+        let runs: [(&[&str], &Definition, Infer); 2] = [(&RULES, &api, infer), (&crate::infer::RULES, &web, crate::infer::infer)];
+        for (ids, def, run) in runs {
+            for id in ids {
+                match rules_without(id) {
+                    // The data names this rule too, so loading already stops.
+                    Err(e) => assert_eq!(e[0].code, "LINK_UNKNOWN_RULE", "{id}"),
+                    Ok(rules) => {
+                        let (m, d) = run(def, &rules);
+                        assert!(m.is_none(), "{id}");
+                        assert_eq!((d.errors[0].code.as_str(), d.errors[0].at.as_deref()), ("RULE_MISSING", Some(*id)));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_rule_lists_hold_every_rule_the_code_names() {
+        let r = Rules::builtin();
+        for (src, list) in [(include_str!("infer.rs"), &crate::infer::RULES[..]), (include_str!("flow_infer.rs"), &RULES[..])] {
+            let code = &src[..src.find("#[cfg(test)]").unwrap()];
+            for lit in code.split('"').skip(1).step_by(2) {
+                if r.require(&[lit]).is_empty() {
+                    assert!(list.contains(&lit), "`{lit}` is named in the code but missing from its RULES");
+                }
+            }
+            assert!(r.require(list).is_empty());
+        }
     }
 
     #[test]

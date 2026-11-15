@@ -24,6 +24,25 @@ const CERTIFICATE: &str = "acm";
 const CLOUDFRONT: &str = "cloudfront";
 const CLOUDFRONT_CERTIFICATE_REGION: &str = "us-east-1";
 
+/// The rules this code names itself.
+pub(crate) const RULES: [&str; 15] = [
+    "resources-inside-aws-cloud-frame",
+    "default-region",
+    "load-balancer-in-vpc",
+    "alb-spans-two-azs",
+    "default-two-azs",
+    "public-and-private-subnet-per-az",
+    "cloudfront-certificate-in-us-east-1",
+    "global-service-outside-region",
+    "regional-service-outside-vpc",
+    "compute-in-private",
+    "database-in-private",
+    "aurora-writer-reader",
+    "internet-facing-alb-in-vpc-with-igw",
+    "private-egress-through-nat",
+    "nat-per-az",
+];
+
 struct Settings {
     azs: usize,
     region: String,
@@ -57,6 +76,10 @@ pub fn infer(def: &Definition, rules: &Rules) -> (Option<Model>, Diagnostics) {
         versions: Versions { archwire: env!("CARGO_PKG_VERSION").to_string(), rules: rules.version.clone() },
         ..Default::default()
     };
+    diag.errors = rules.require(&RULES);
+    if !diag.errors.is_empty() {
+        return (None, diag);
+    }
 
     let names_ok = check_names(def, rules, &mut diag.errors);
     let untagged = check_no_tags(def, &mut diag.errors);

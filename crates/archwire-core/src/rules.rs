@@ -28,6 +28,7 @@ pub enum Lang { En, Ja }
 pub enum IconKind { Service, Resource }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServiceOption {
     pub shape: String,
     pub label: String,
@@ -36,6 +37,7 @@ pub struct ServiceOption {
 /// `label` is either a proper name ("Amazon S3") or a key of labels.toml; resolve it with `Rules::text`.
 /// `derived_only` services are added by inference only and may not be written in a definition.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Service {
     pub key: String,
     pub scope: Scope,
@@ -74,6 +76,7 @@ pub struct Service {
 
 /// The label and the reason a connection gets when its target has a given kind.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct KindNote {
     pub label: String,
     pub rule: String,
@@ -107,12 +110,14 @@ pub struct Rule {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ServicesFile {
     #[serde(default)]
     service: Vec<Service>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RuleRaw {
     id: String,
     kind: String,
@@ -123,6 +128,7 @@ struct RuleRaw {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RulesFile {
     version: String,
     #[serde(default)]
@@ -130,6 +136,7 @@ struct RulesFile {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LinkRaw {
     from: String,
     to: String,
@@ -148,12 +155,14 @@ struct LinkRaw {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LinksFile {
     #[serde(default)]
     link: Vec<LinkRaw>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LabelRaw {
     en: String,
     ja: String,
@@ -240,6 +249,12 @@ impl Rules {
             }
         }
 
+        for s in service_map.values() {
+            if let Some(id) = s.place_rule.as_ref().filter(|id| !rule_map.contains_key(*id)) {
+                problems.push(problem("SERVICE_UNKNOWN_RULE", &s.key, format!("place_rule `{id}` is not in rules.toml")));
+            }
+        }
+
         let raw_links = match toml::from_str::<LinksFile>(links) {
             Ok(f) => f.link,
             Err(e) => {
@@ -267,6 +282,15 @@ impl Rules {
     /// Panics on an unknown id: that is a bug in the program, not in the input.
     pub fn rule(&self, id: &str) -> &Rule {
         self.rules.get(id).unwrap_or_else(|| panic!("unknown rule id `{id}`"))
+    }
+
+    /// RULE_MISSING for every id that rules.toml does not have. Inference calls this with the ids
+    /// its code names, before it uses any of them, so missing data is an error instead of a panic.
+    pub fn require(&self, ids: &[&str]) -> Vec<Problem> {
+        ids.iter()
+            .filter(|id| !self.rules.contains_key(**id))
+            .map(|id| problem("RULE_MISSING", id, format!("rule `{id}` is not in rules.toml")))
+            .collect()
     }
 
     /// The accepted connection from one service to another, if there is one.
@@ -456,8 +480,14 @@ mod tests {
             (broken("rule = \"http-api-jwt-authorizer\"", "rule = \"http-api-jwt\""), "LINK_UNKNOWN_RULE"),
             (format!("{links}\n[[link]]\n{waf}"), "LINK_DUPLICATE"),
             (broken(&format!("{acm}from_region = \"us-east-1\"\n"), acm), "LINK_BAD_LIMIT"),
+            (broken("label = \"jwt_authorizer\"", "label = \"jwt_auth\""), "LINK_UNKNOWN_LABEL"),
+            (broken("max_rule = \"one-web-acl-per-resource\"", "max_rule = \"one-web-acl\""), "LINK_UNKNOWN_RULE"),
+            (broken("from_rule = \"cloudfront-certificate-in-us-east-1\"", "from_rule = \"cloudfront-certificate\""), "LINK_UNKNOWN_RULE"),
+            (broken("from_rule = \"cloudfront-certificate-in-us-east-1\"\n", ""), "LINK_BAD_LIMIT"),
+            (broken("max_from = 1\n", ""), "LINK_BAD_LIMIT"),
+            (broken("max_rule = \"one-web-acl-per-resource\"\n", ""), "LINK_BAD_LIMIT"),
         ];
-        assert_eq!(cases.len(), 7);
+        assert_eq!(cases.len(), 13);
         for (text, code) in &cases {
             let e = Rules::load(services, rules, labels, text).err().unwrap_or_else(|| panic!("{code} not reported"));
             assert_eq!(e[0].code, *code);
@@ -482,5 +512,56 @@ mod tests {
         let separate: Vec<_> = r.service_keys().into_iter().filter(|k| r.service(k).unwrap().separate_from_vpc).collect();
         assert_eq!(separate, ["apigateway", "cognito", "dynamodb", "lambda"]);
         assert!(!r.service("ecs").unwrap().kind_hole);
+    }
+
+    fn builtin_files() -> [&'static str; 4] {
+        [
+            include_str!("../../../rules/aws/services.toml"),
+            include_str!("../../../rules/aws/rules.toml"),
+            include_str!("../../../rules/aws/labels.toml"),
+            include_str!("../../../rules/aws/links.toml"),
+        ]
+    }
+
+    #[test]
+    fn a_place_rule_must_be_in_the_rules() {
+        let [services, rules, labels, links] = builtin_files();
+        let from = "place_rule = \"cognito-user-pool-in-one-region\"";
+        assert!(services.contains(from));
+        let broken = services.replacen(from, "place_rule = \"cognito-user-pool\"", 1);
+        let e = Rules::load(&broken, rules, labels, links).err().unwrap();
+        assert_eq!((e[0].code.as_str(), e[0].at.as_deref()), ("SERVICE_UNKNOWN_RULE", Some("cognito")));
+    }
+
+    #[test]
+    fn a_misspelt_field_is_a_load_error() {
+        let [services, rules, labels, links] = builtin_files();
+        let cases = [
+            (0, "\nto_kind.http =", "\nto_kinds.http =", "LINKS_PARSE"),
+            (0, "\nmax_from = 1", "\nmax_form = 1", "LINKS_PARSE"),
+            (1, "\nkind_hole = true", "\nkind_holes = true", "SERVICES_PARSE"),
+            (1, "\nplace_rule =", "\nplace_rules =", "SERVICES_PARSE"),
+            (1, "\nseparate_from_vpc = true", "\nseparate_from_vpcs = true", "SERVICES_PARSE"),
+            (1, "\norigin = true", "\norigins = true", "SERVICES_PARSE"),
+            (2, "\nreason_en =", "\nreason_eng =", "RULES_PARSE"),
+            (3, "ja = \"利用者\"", "jp = \"利用者\"", "LABELS_PARSE"),
+        ];
+        for (file, from, to, code) in cases {
+            let mut files = [links.to_string(), services.to_string(), rules.to_string(), labels.to_string()];
+            assert!(files[file].contains(from), "{from}");
+            files[file] = files[file].replacen(from, to, 1);
+            let [l, sv, r, lb] = &files;
+            let e = Rules::load(sv, r, lb, l).err().unwrap_or_else(|| panic!("{to} was accepted"));
+            assert_eq!(e[0].code, code, "{to}");
+        }
+    }
+
+    #[test]
+    fn require_lists_the_missing_rules() {
+        let r = Rules::builtin();
+        assert!(r.require(&["default-region"]).is_empty());
+        let e = r.require(&["default-region", "no-such-rule"]);
+        assert_eq!(e.len(), 1);
+        assert_eq!((e[0].code.as_str(), e[0].at.as_deref()), ("RULE_MISSING", Some("no-such-rule")));
     }
 }
