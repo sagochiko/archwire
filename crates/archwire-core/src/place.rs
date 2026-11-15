@@ -1200,7 +1200,7 @@ set:
         assert_eq!(placed(TARGET).1, p);
     }
 
-    /// Every definition the generator makes, with the axes the brief lists.
+    /// Every definition the generator makes.
     fn generated() -> Vec<String> {
         let mut out = Vec::new();
         let apis = ["apigateway(http)", "apigateway(rest)", "apigateway.public(http)"];

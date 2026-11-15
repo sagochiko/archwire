@@ -56,7 +56,7 @@ Every part archwire adds gets its reasons from these rules, in the report under 
 
 ## Loader errors
 
-The rules are checked when archwire starts. The built-in rules are valid, so a user of the released program does not see these. If you edit the files and make a mistake, the program stops with a panic message that lists the problems, each with one of these codes and the rule or file it is about.
+The rules are checked when archwire starts. The built-in rules are valid, so a user of the released program does not see these. If you edit the files and make a mistake, the program stops with a panic message that lists the problems, each with one of these codes and the rule or file it is about. One mistake is found later: a rule that the program itself names, and that no data file refers to, is checked when a definition is compiled. If it is missing, `compile` reports the error `RULE_MISSING` with the rule id and exits with 1, without a panic.
 
 | Code | Meaning |
 |---|---|
