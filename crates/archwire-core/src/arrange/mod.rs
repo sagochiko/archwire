@@ -151,11 +151,44 @@ fn parts(items: &[Item]) -> Vec<usize> {
 
 #[cfg(test)]
 mod tests {
+    use super::azgrid::tests::inputs;
     use super::layered::tests::{API_CASES, CHOICES};
     use super::*;
+    use crate::diag::Diagnostics;
 
-    /// With `ARCHWIRE_PROTO_OUT=<dir>`, writes each fixed API example laid out with lines running
-    /// down as `<dir>/<example>-down.drawio`, for the diagram checker. Without it, does nothing.
+    const SPAN_ROW_ON_BOUNDARY: Choices = Choices { span_row: SpanRow::OnBoundaryWithTwoZones, ..CHOICES };
+    const BLOCK_LAST: Choices = Choices { block_order: BlockOrder::Last, ..CHOICES };
+
+    /// The diagrams written for viewing: (file name stem, input name, choices). Each is written
+    /// with lines running right and with lines running down.
+    const SAMPLES: [(&str, &str, Choices); 21] = [
+        ("web-2az-ja", "web-2az-ja", CHOICES),
+        ("web-3az-ja", "web-3az-ja", CHOICES),
+        ("mix", "mix-min", CHOICES),
+        ("api-http-ja", "api-http-ja", CHOICES),
+        ("alb-above", "web-2az-ja", CHOICES),
+        ("alb-boundary", "web-2az-ja", SPAN_ROW_ON_BOUNDARY),
+        ("s3-after", "web-2az-ja", CHOICES),
+        ("s3-before", "web-2az-ja", BLOCK_LAST),
+        ("aux-to-side", "aux-to-side", CHOICES),
+        ("endpoint-3az-en", "endpoint-3az-en", CHOICES),
+        ("endpoint-3az-ja", "endpoint-3az-ja", CHOICES),
+        ("endpoint-ja", "endpoint-ja", CHOICES),
+        ("hole-s3", "hole-s3", CHOICES),
+        ("web-2az-en", "web-2az-en", CHOICES),
+        ("web-3az-en", "web-3az-en", CHOICES),
+        ("web-attach-en", "web-attach-en", CHOICES),
+        ("readers", "fewer-readers", CHOICES),
+        ("natsingle", "web-3az-ja-single", CHOICES),
+        ("samerow", "mix-same-row", CHOICES),
+        ("shared", "mix-shared", CHOICES),
+        ("longnames", "mix-long", CHOICES),
+    ];
+
+    // With the folder given, fails if a sample cannot be laid out or a line breaks or leaves its draft.
+    /// With `ARCHWIRE_PROTO_OUT=<dir>`, writes each sample as `<dir>/<name>-right.drawio` and
+    /// `<dir>/<name>-down.drawio`, for the diagram checker, and `<dir>/notes.tsv` with the router's
+    /// notes of each diagram. Without it, does nothing.
     #[test]
     fn prototype_samples() {
         let Some(dir) = std::env::var_os("ARCHWIRE_PROTO_OUT") else { return };
@@ -163,11 +196,27 @@ mod tests {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(dir);
         std::fs::create_dir_all(&dir).unwrap();
         let r = Rules::builtin();
+        let mut models: Vec<(String, Model, Diagnostics)> = inputs();
         for (name, src) in API_CASES {
             let (m, d) = crate::flow_infer::infer(&crate::def::parse(src).unwrap(), &r);
-            let (x, notes) = crate::arranged_drawio(&m.unwrap(), &d, &r, Axis::Down, CHOICES).unwrap_or_else(|e| panic!("{name}: {e:?}"));
-            assert!(notes.iter().all(|n| !n.contains("edge-")), "{name}: {notes:?}");
-            std::fs::write(dir.join(format!("{name}-down.drawio")), x).unwrap();
+            models.push((name.to_string(), m.unwrap_or_else(|| panic!("{name}: {:?}", d.errors)), d));
         }
+        let mut report = String::from("diagram\tnotes\tbroken\tall notes\n");
+        let mut broken_files = Vec::new();
+        for (stem, input, choices) in SAMPLES {
+            let (_, m, d) = models.iter().find(|(n, _, _)| n == input).unwrap_or_else(|| panic!("no input {input}"));
+            for (axis, way) in [(Axis::Right, "right"), (Axis::Down, "down")] {
+                let file = format!("{stem}-{way}");
+                let (x, notes) = crate::arranged_drawio(m, d, &r, axis, choices).unwrap_or_else(|e| panic!("{file}: {e:?}"));
+                let broken: Vec<&String> = notes.iter().filter(|n| n.contains("edge-")).collect();
+                report.push_str(&format!("{file}\t{}\t{}\t{notes:?}\n", notes.len(), broken.len()));
+                if !broken.is_empty() {
+                    broken_files.push(file.clone());
+                }
+                std::fs::write(dir.join(format!("{file}.drawio")), x).unwrap();
+            }
+        }
+        std::fs::write(dir.join("notes.tsv"), report).unwrap();
+        assert!(broken_files.is_empty(), "lines broken or off their drafts in {broken_files:?}");
     }
 }
