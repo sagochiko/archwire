@@ -402,7 +402,11 @@ mod tests {
     #[test]
     fn reports_where_the_syntax_broke() {
         let e = parse("flows:\n  - user => alb\n").unwrap_err();
-        assert_eq!((e[0].code.as_str(), e[0].at.as_deref()), ("BAD_SYNTAX", Some("flows[0]")));
+        assert_eq!((e[0].code.as_str(), e[0].at.as_deref(), e[0].got.as_deref()), ("BAD_SYNTAX", Some("flows[0]"), Some("user => alb")));
+        assert_eq!(
+            e[0].message,
+            "a flow line is `- a -> b ~> c -- d`; a part is service[.name][(kind)], with service and kind in [a-z0-9_] and name in [a-z0-9-], not starting or ending with a hyphen"
+        );
         let e = parse("flows:\n  - user -> alb\nextra:\n  x: 1\n").unwrap_err();
         assert_eq!(e[0].code, "UNKNOWN_SECTION");
         assert_eq!(e[0].allowed, vec!["choose", "flows", "set"]);

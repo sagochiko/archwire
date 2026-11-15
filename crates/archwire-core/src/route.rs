@@ -130,6 +130,11 @@ enum Dir { Up, Down, Left, Right }
 const DIRS: [Dir; 4] = [Dir::Up, Dir::Down, Dir::Left, Dir::Right];
 const ALL_SIDES: [Side; 4] = [Side::Top, Side::Bottom, Side::Left, Side::Right];
 
+/// The id of the line from one node to another: "edge-<from>-to-<to>".
+pub(crate) fn edge_id(from: &str, to: &str) -> String {
+    format!("edge-{from}-to-{to}")
+}
+
 fn outward(s: Side) -> Dir {
     match s {
         Side::Top => Dir::Up,
@@ -675,7 +680,7 @@ pub fn route(model: &Model, layout: &Layout, rules: &Rules) -> (Vec<Wire>, Vec<S
                     p
                 }
                 None => {
-                    notes.push(rules.text("note.unrouted_line", lang).replace("{line}", &format!("edge-{}-to-{}", s.from, s.to)));
+                    notes.push(rules.text("note.unrouted_line", lang).replace("{line}", &edge_id(&s.from, &s.to)));
                     best
                 }
             },
@@ -703,10 +708,10 @@ pub fn route(model: &Model, layout: &Layout, rules: &Rules) -> (Vec<Wire>, Vec<S
         let spot = spot.expect("every line has a label spot");
         let near_source = ctx.node(&s.from).service == IGW;
         if !spot.clear {
-            notes.push(rules.text("note.unplaced_label", lang).replace("{line}", &format!("edge-{}-to-{}", s.from, s.to)));
+            notes.push(rules.text("note.unplaced_label", lang).replace("{line}", &edge_id(&s.from, &s.to)));
         }
         wires.push(Wire {
-            id: format!("edge-{}-to-{}", s.from, s.to),
+            id: edge_id(&s.from, &s.to),
             from: s.from.clone(),
             to: s.to.clone(),
             style: match (s.hole, s.rel) {

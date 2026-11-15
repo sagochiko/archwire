@@ -64,9 +64,6 @@ pub fn set_value(text: &str, at: &str, value: &str) -> Result<String, Problem> {
     if value.trim().is_empty() || value.contains(['\n', '\r', '#']) {
         return Err(bad("BAD_VALUE", at, "a value must be one non-empty line without `#`".into()));
     }
-    if matches!(target, Target::Part(..)) && parse_part(value, at.into()).is_none() {
-        return Err(bad("BAD_VALUE", at, "a part is service[.name][(kind)]".into()));
-    }
     let mut lines: Vec<String> = text.split_inclusive('\n').map(str::to_string).collect();
     let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
 
@@ -109,6 +106,10 @@ pub fn set_value(text: &str, at: &str, value: &str) -> Result<String, Problem> {
                 let rest = code.trim_start().strip_prefix('-').ok_or_else(|| bad_path(at))?;
                 let (parts, _) = split_flow(rest);
                 let part = parts.get(j).filter(|_| parts.len() > 1).ok_or_else(|| bad_path(at))?;
+                // Checked once the place is known to exist, so a bad place is reported first.
+                if parse_part(value, at.into()).is_none() {
+                    return Err(bad("BAD_VALUE", at, "a part is service[.name][(kind)]".into()));
+                }
                 let new_body = replace_trimmed(body, part, value);
                 lines[idx] = format!("{new_body}{ending}");
                 return Ok(lines.concat());
@@ -251,6 +252,22 @@ mod tests {
         assert_eq!(out, "flows:\n  - user -> s3.a-b -> dynamodb\n");
         let out = set_value("flows:\n  - user -> apigateway.public\n", "choose.kind.apigateway.public", "http").unwrap();
         assert_eq!(out, "flows:\n  - user -> apigateway.public\nchoose:\n  kind.apigateway.public: http\n");
+    }
+
+    #[test]
+    fn a_value_with_a_flow_operator_is_not_a_part() {
+        let src = "flows:\n  - user -> alb\n";
+        let e = set_value(src, "flows[0][1]", "alb -> ecs").unwrap_err();
+        assert_eq!((e.code.as_str(), e.at.as_deref()), ("BAD_VALUE", Some("flows[0][1]")));
+    }
+
+    #[test]
+    fn a_bad_place_is_reported_before_a_bad_value() {
+        let src = "flows:\n  - user -> alb\n";
+        for at in ["flows[9][0]", "flows[0][5]"] {
+            let e = set_value(src, at, "ALB").unwrap_err();
+            assert_eq!((e.code.as_str(), e.at.as_deref()), ("BAD_PATH", Some(at)), "{at}");
+        }
     }
 
     #[test]

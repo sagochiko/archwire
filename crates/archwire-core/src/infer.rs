@@ -323,6 +323,11 @@ fn derived(rules: &Rules, lang: Lang, target: &str, id: &str, added: bool) -> De
     }
 }
 
+/// The id of the copy of a part in one Availability Zone, e.g. "ecs-1a" for "ecs" in ap-northeast-1a.
+pub(crate) fn copy_id(part: &str, suffix: &str) -> String {
+    format!("{part}-{suffix}")
+}
+
 /// `service` is both the service key and the written part: the VPC layout has no named parts.
 fn node(id: String, service: &str, option: Option<String>, az: Option<usize>, role: Option<&str>, added: bool) -> Node {
     Node {
@@ -392,19 +397,19 @@ fn build(def: &Definition, rules: &Rules, s: &Settings, routes: &[Route], diag: 
         nodes.push(node(name.into(), name, opt, None, None, false));
     }
     for &i in &nat_azs {
-        nodes.push(node(format!("nat-{}", suffix(i)), "nat", None, Some(i), None, true));
+        nodes.push(node(copy_id("nat", &suffix(i)), "nat", None, Some(i), None, true));
     }
     for (name, opt) in in_group(&is_private) {
         match svc(name).place {
             Place::PerAz => {
                 for i in 0..s.azs {
-                    nodes.push(node(format!("{name}-{}", suffix(i)), name, opt.clone(), Some(i), None, false));
+                    nodes.push(node(copy_id(name, &suffix(i)), name, opt.clone(), Some(i), None, false));
                 }
             }
             Place::WriterReader => {
                 for i in 0..=s.readers {
                     let role = if i == 0 { "writer" } else { "reader" };
-                    nodes.push(node(format!("{name}-{}", suffix(i)), name, opt.clone(), Some(i), Some(role), false));
+                    nodes.push(node(copy_id(name, &suffix(i)), name, opt.clone(), Some(i), Some(role), false));
                 }
             }
             Place::Single | Place::Gateway | Place::Span => nodes.push(node(name.into(), name, opt, None, None, false)),
@@ -455,11 +460,11 @@ fn build(def: &Definition, rules: &Rules, s: &Settings, routes: &[Route], diag: 
     for name in &egress {
         for from in instances(name) {
             let i = if s.nat_single { 0 } else { from.az.unwrap_or(0) };
-            add(&mut edges, from, find(&format!("nat-{}", suffix(i))), Rel::Main, None, false);
+            add(&mut edges, from, find(&copy_id("nat", &suffix(i))), Rel::Main, None, false);
         }
     }
     for &i in &nat_azs {
-        add(&mut edges, find(&format!("nat-{}", suffix(i))), find("igw"), Rel::Main, None, false);
+        add(&mut edges, find(&copy_id("nat", &suffix(i))), find("igw"), Rel::Main, None, false);
     }
 
     // Reasons for everything added, holes and notes.
@@ -497,7 +502,7 @@ fn build(def: &Definition, rules: &Rules, s: &Settings, routes: &[Route], diag: 
         why("igw", if entry { "internet-facing-alb-in-vpc-with-igw" } else { "private-egress-through-nat" });
     }
     for &i in &nat_azs {
-        why(&format!("nat-{}", suffix(i)), "private-egress-through-nat");
+        why(&copy_id("nat", &suffix(i)), "private-egress-through-nat");
     }
     if !nat_azs.is_empty() && !def.set.contains_key("nat") {
         why("nat", "nat-per-az");
@@ -790,6 +795,49 @@ mod tests {
         let part = |id: &str| m.nodes.iter().find(|n| n.id == id).unwrap().part.clone();
         assert_eq!([part("ecs-1a"), part("nat-1c"), part("alb"), part("igw")], ["ecs", "nat", "alb", "igw"]);
         assert!(m.nodes.iter().all(|n| n.tag.is_none() && n.area.is_none()));
+    }
+
+    #[test]
+    fn named_parts_never_share_an_id_with_a_copy_or_make_two_lines_alike() {
+        let src = "flows:\n  - user -> lambda.1a -> lambda\n  - lambda.a-to-b -> s3\n  - lambda.a -> b\n  - lambda.a -> b.to-s3\n  - s3.x-to-y -> lambda.a-to-b\n  - lambda.a-to-s3 -> s3.x\n";
+        let d = crate::def::parse(src).unwrap();
+        let links: Vec<_> = d.links.iter().map(|l| (l.from.name.as_str(), l.to.name.as_str())).collect();
+        assert_eq!(links, [
+            ("user", "lambda.1a"), ("lambda.1a", "lambda"), ("lambda.a-to-b", "s3"), ("lambda.a", "b"),
+            ("lambda.a", "b.to-s3"), ("s3.x-to-y", "lambda.a-to-b"), ("lambda.a-to-s3", "s3.x"),
+        ]);
+        // Every written part, and a copy per Availability Zone of every part without a name after the dot.
+        let mut ids: Vec<String> = Vec::new();
+        for r in d.links.iter().flat_map(|l| [&l.from, &l.to]) {
+            if !ids.contains(&r.name) {
+                ids.push(r.name.clone());
+            }
+            if r.tag.is_none() {
+                for suffix in ["1a", "1c", "1d"] {
+                    let copy = copy_id(&r.name, suffix);
+                    if !ids.contains(&copy) {
+                        ids.push(copy);
+                    }
+                }
+            }
+        }
+        assert!(ids.contains(&"lambda.1a".to_string()) && ids.contains(&"lambda-1a".to_string()));
+        let written = ids.iter().filter(|i| d.links.iter().any(|l| &l.from.name == *i || &l.to.name == *i)).count();
+        let copies = ids.len() - written;
+        assert_eq!((written, copies), (11, 12));
+        // A line id names exactly one ordered pair of nodes, so it points at the parts it joins.
+        for (from, to) in &links {
+            let id = crate::route::edge_id(from, to);
+            let pairs: Vec<_> = ids.iter().flat_map(|a| ids.iter().map(move |b| (a, b)))
+                .filter(|(a, b)| a != b && crate::route::edge_id(a, b) == id).collect();
+            assert_eq!(pairs.len(), 1, "{id}");
+            assert_eq!((pairs[0].0.as_str(), pairs[0].1.as_str()), (*from, *to), "{id}");
+        }
+        let mut lines: Vec<String> = ids.iter().flat_map(|a| ids.iter().filter(move |b| *b != a).map(move |b| crate::route::edge_id(a, b))).collect();
+        let n = lines.len();
+        lines.sort();
+        lines.dedup();
+        assert_eq!(lines.len(), n);
     }
 
     #[test]
