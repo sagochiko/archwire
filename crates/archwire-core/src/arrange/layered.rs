@@ -14,12 +14,14 @@
 //! size is kept in x and y and read as a length along each axis, and every frame keeps its own
 //! margin on each side.
 
-use super::Placement;
+use super::azgrid::Placed;
+use super::{Crossing, Lane, Placement};
 use crate::def::Rel;
 use crate::layout::{icon, Frame, FrameKind, Icon, Layout, Rect};
-use crate::measure::{frame_name_box, name_area, name_text_width, wire_label_area, wire_text_size};
+use crate::measure::{frame_name_box, name_area, name_text_width, wire_label_area, wire_text_size, wire_text_width};
 use crate::model::{Area, Axis, Model};
-use crate::route::{Bend, Keep, LinePlan, Side};
+use crate::path::opposite;
+use crate::route::{Bend, Keep, LinePlan, Side, Track};
 use crate::rules::Rules;
 
 /// The least distance between the centres of two neighbouring columns.
@@ -28,6 +30,9 @@ pub(crate) const COL_STEP: i32 = 220;
 pub(crate) const ROW_STEP: i32 = 160;
 /// The least distance between the centres of two side parts set side by side in the global rank, along the main axis.
 pub(crate) const SIDE_STEP: i32 = 160;
+/// The least room between the VPC's right side and the parts only the VPC's parts send to, for the
+/// labels of the lines into them.
+pub(super) const OUT_GAP: i32 = 140;
 
 const ICON: i32 = 60;
 /// Room between two neighbouring parts' icons and names across the main axis.
@@ -70,6 +75,10 @@ const CLOUD_NAME: &str = "AWS Cloud";
 
 /// From and to, along one axis, relative to an icon's left or top side.
 type Span = (i32, i32);
+/// A part's index in the flow and the model node a line ends at in it (itself, or a part inside the VPC).
+type Unit = (usize, usize);
+/// The other part of a main line, and how far across this part lies from it when the line's ends are level.
+type Link = (usize, i32);
 
 /// One frame's contents laid out in the frame's own coordinates.
 struct Block {
@@ -80,6 +89,15 @@ struct Block {
     ranks: Vec<i32>,
     /// How far into the frame across the main axis the parts' cross coordinate 0 lies.
     across: i32,
+    /// Where the VPC's top-left corner lies in the frame.
+    vpc: Option<(i32, i32)>,
+}
+
+/// The inside of a VPC laid out as one piece, and where it goes among the parts of its rank.
+pub(super) struct Piece<'a> {
+    pub(super) placed: &'a Placed,
+    /// The VPC comes first among the parts of its rank, else last.
+    pub(super) first: bool,
 }
 
 /// The Region's parts on a main flow and the main lines between them.
@@ -88,23 +106,38 @@ pub(super) struct Flow {
     pub(super) parts: Vec<usize>,
     /// The rank of each part, from 1.
     pub(super) col: Vec<usize>,
-    /// Indexes into `parts` of the Region parts each part's main lines come from and go to, in model order.
-    preds: Vec<Vec<usize>>,
-    succs: Vec<Vec<usize>>,
+    /// Indexes into `parts` of the Region parts each part's main lines come from and go to, in
+    /// model order, with how far across the part's own coordinate lies from the other's when the
+    /// two ends of the line are level: 0 between two parts, the end's place in the VPC for the VPC.
+    preds: Vec<Vec<Link>>,
+    succs: Vec<Vec<Link>>,
+    /// The VPC: its place in `parts`, its size across, and the room after it across.
+    block: Option<(usize, i32, i32)>,
+}
+
+impl Flow {
+    /// The least distance across from the start of part `a` to the start of part `b` after it.
+    fn step(&self, a: usize, r: i32) -> i32 {
+        match self.block {
+            Some((k, size, room)) if k == a => size + room,
+            _ => r,
+        }
+    }
 }
 
 /// `(x, y)` read along the main and the cross axis, `(u, v)`. The same swap turns `(u, v)` back into `(x, y)`.
-fn uv<T>(axis: Axis, (x, y): (T, T)) -> (T, T) {
+pub(super) fn uv<T>(axis: Axis, (x, y): (T, T)) -> (T, T) {
     match axis {
         Axis::Right => (x, y),
         Axis::Down => (y, x),
     }
 }
 
-/// The layout of a model without parts inside a VPC, with main lines running along `axis`.
-pub(super) fn layered(model: &Model, rules: &Rules, axis: Axis) -> Placement {
+/// The layout of a model with main lines running along `axis`, with the inside of its VPC as one
+/// piece if it has one.
+pub(super) fn layered(model: &Model, rules: &Rules, axis: Axis, piece: Option<&Piece>) -> Placement {
     let r = cross_step(model, rules, axis);
-    let block = lay_region(model, rules, axis);
+    let block = lay_region(model, rules, axis, piece);
     let nodes = &model.nodes;
     let index = |id: &str| nodes.iter().position(|n| n.id == id);
     let area = |i: usize| nodes[i].area;
@@ -124,7 +157,10 @@ pub(super) fn layered(model: &Model, rules: &Rules, axis: Axis) -> Placement {
     let (g_main, g_side): (Vec<usize>, Vec<usize>) = global.iter().partition(|&&i| on_main(model, &nodes[i].id));
     let mut before: Option<i32> = None;
     for &i in &g_main {
-        let want = mid(targets(i).into_iter().filter(|&t| area(t) == Area::Region).filter_map(|t| v[t]));
+        // A part sending into the VPC's entry gateway lines up with it, before the middle of its targets.
+        let ts: Vec<usize> = targets(i).into_iter().filter(|&t| in_region(area(t))).collect();
+        let entry: Vec<usize> = ts.iter().copied().filter(|&t| area(t) == Area::VpcEdge).collect();
+        let want = mid((if entry.is_empty() { ts } else { entry }).into_iter().filter_map(|t| v[t]));
         let at = after(before, want, 2 * r);
         v[i] = Some(at);
         before = Some(at);
@@ -183,7 +219,7 @@ pub(super) fn layered(model: &Model, rules: &Rules, axis: Axis) -> Placement {
         let mut at = global_u;
         for (k, &i) in parts.iter().enumerate() {
             if k > 0 {
-                at += gap(SIDE_STEP, main(parts[k - 1]), main(i));
+                at += gap_of(SIDE_STEP, main(parts[k - 1]), main(i));
             }
             u[i] = Some(at);
         }
@@ -211,7 +247,7 @@ pub(super) fn layered(model: &Model, rules: &Rules, axis: Axis) -> Placement {
     let (cloud_x, cloud_y) = uv(axis, (cloud_u, diagram_cross));
     // The Region frame is drawn only when a part is in it; else the AWS Cloud frame closes
     // around the global rank and its own name.
-    let has_region = nodes.iter().any(|n| n.area == Area::Region);
+    let has_region = nodes.iter().any(|n| n.area == Area::Region) || piece.is_some();
     let (inner_right, inner_bottom) = if has_region {
         (global_icons.iter().map(|i| extent(i).0 + REGION_RIGHT).fold(right(region), i32::max), bottom(region))
     } else {
@@ -226,7 +262,7 @@ pub(super) fn layered(model: &Model, rules: &Rules, axis: Axis) -> Placement {
     let mut icons: Vec<Icon> = Vec::new();
     for (i, n) in nodes.iter().enumerate() {
         let placed = match area(i) {
-            Area::Region => block.icons.iter().find(|b| b.id == n.id).map(|b| {
+            Area::Region | Area::VpcEdge | Area::Subnet(_) => block.icons.iter().find(|b| b.id == n.id).map(|b| {
                 let mut b = b.clone();
                 b.rect.x += region.x;
                 b.rect.y += region.y;
@@ -234,8 +270,6 @@ pub(super) fn layered(model: &Model, rules: &Rules, axis: Axis) -> Placement {
             }),
             Area::Cloud => global_icons.iter().find(|g| g.id == n.id).cloned(),
             Area::Outside => at(i).map(|r| icon_of(model, rules, i, r, None)),
-            // Inside a VPC, which this layout does not draw.
-            Area::VpcEdge | Area::Subnet(_) => None,
         };
         icons.extend(placed);
     }
@@ -250,25 +284,182 @@ pub(super) fn layered(model: &Model, rules: &Rules, axis: Axis) -> Placement {
     if has_region {
         frames.push(frame(REGION_FRAME, FrameKind::Region, region_name(model, rules), region, Some(CLOUD_FRAME)));
     }
+    // The VPC's frames, lines, gates and bands, moved from its own coordinates into the diagram's.
+    let origin = block.vpc.map(|(x, y)| (region.x + x, region.y + y));
+    if let (Some(p), Some(o)) = (piece, origin) {
+        frames.extend(p.placed.frames.iter().map(|f| Frame { rect: Rect { x: f.rect.x + o.0, y: f.rect.y + o.1, ..f.rect }, ..f.clone() }));
+    }
     let layout = Layout { frames, icons };
 
     let col_x: Vec<i32> = block.ranks.iter().map(|c| region_u + c).collect();
-    let lines = plans(model, &layout, &col_x, axis);
-    Placement { layout, lines, row_step: r, col_x, crossings: Vec::new(), lanes: Vec::new() }
+    let mut lines = plans(model, &layout, &col_x, axis);
+    let (mut crossings, mut lanes) = (Vec::new(), Vec::new());
+    if let (Some(p), Some(o)) = (piece, origin) {
+        let at = |q: (i32, i32)| (q.0 + o.0, q.1 + o.1);
+        for pl in &p.placed.inside {
+            let mut pl = pl.clone();
+            if let Bend::Points(ps) = &mut pl.bend {
+                ps.iter_mut().for_each(|q| *q = at(*q));
+            }
+            for t in &mut pl.tracks {
+                (t.from, t.to, t.at) = if t.horizontal { (t.from + o.0, t.to + o.0, t.at + o.1) } else { (t.from + o.1, t.to + o.1, t.at + o.0) };
+            }
+            lines.push(pl);
+        }
+        lanes = p
+            .placed
+            .lanes
+            .iter()
+            .map(|l| {
+                let (along, across) = if l.horizontal { o } else { (o.1, o.0) };
+                Lane { from: l.from + along, to: l.to + along, lo: l.lo + across, hi: l.hi + across, tracks: l.tracks.iter().map(|&(e, t)| (e, t + across)).collect(), ..l.clone() }
+            })
+            .collect();
+        let vpc = layout.rect(super::azgrid::VPC_FRAME);
+        for c in &p.placed.crossing {
+            let mut c = c.clone();
+            c.through.gate = at(c.through.gate);
+            c.through.inner.iter_mut().for_each(|q| *q = at(*q));
+            lines.push(crossing_plan(model, &layout, &c, vpc, &lanes, axis));
+            crossings.push(c);
+        }
+        lines.sort_by_key(|l| l.edge);
+    }
+    Placement { layout, lines, row_step: r, col_x, crossings, lanes }
 }
 
-/// The Region's contents, from the Region's parts and the lines between them alone.
-fn lay_region(model: &Model, rules: &Rules, axis: Axis) -> Block {
+/// The draft of a line through a gate in the VPC's side: its inner part as the VPC laid it out,
+/// and its outer part out of the side of the part outside that faces the gate, bending halfway.
+fn crossing_plan(model: &Model, layout: &Layout, c: &Crossing, vpc: Rect, lanes: &[Lane], axis: Axis) -> LinePlan {
+    let e = &model.edges[c.edge];
+    let t = &c.through;
+    let gate_side = if t.gate.0 == vpc.x {
+        Side::Left
+    } else if t.gate.0 == vpc.x + vpc.w {
+        Side::Right
+    } else if t.gate.1 == vpc.y {
+        Side::Top
+    } else {
+        Side::Bottom
+    };
+    let outer_id = if t.inner_is_start { &e.to } else { &e.from };
+    let outer = layout.icons.iter().find(|i| &i.id == outer_id).expect("the outer end is placed");
+    let mut side = opposite(gate_side);
+    let (cx, cy) = (outer.rect.x + ICON / 2, outer.rect.y + ICON / 2);
+    // A line out of the VPC's right side to a part with another part of its column between them
+    // passes right of that column and comes into the part's far side, so it does not cut the
+    // line into the part between.
+    let outer_index = model.nodes.iter().position(|n| &n.id == outer_id).expect("edge ends are nodes");
+    let (lo, hi) = (t.gate.1.min(cy), t.gate.1.max(cy));
+    let column: Vec<&Icon> = layout.icons.iter().filter(|i| i.rect.x == outer.rect.x && i.id != outer.id).collect();
+    let between = column.iter().any(|i| i.rect.y < hi && extent(i).1 > lo);
+    if t.inner_is_start && gate_side == Side::Right && only_inside(model, outer_index) && between {
+        let past = column.iter().chain([&outer]).map(|i| extent(i).0).max().expect("not empty") + NAME_ROOM;
+        side = Side::Right;
+        return LinePlan {
+            edge: c.edge,
+            from: e.from.clone(),
+            to: e.to.clone(),
+            exit: c.inner_side,
+            entry: side,
+            bend: Bend::AtX(past),
+            exit_pos: Some(c.inner_pos),
+            entry_pos: None,
+            keep: Keep::Inner(t.clone()),
+            tracks: inner_tracks(c, lanes),
+            axis,
+        };
+    }
+    let bend = match side {
+        Side::Top | Side::Bottom if cx == t.gate.0 => Bend::Straight,
+        Side::Left | Side::Right if cy == t.gate.1 => Bend::Straight,
+        Side::Bottom => Bend::AtY((extent(outer).1 + t.gate.1).div_euclid(2)),
+        Side::Top => Bend::AtY((outer.rect.y + t.gate.1).div_euclid(2)),
+        Side::Right => Bend::AtX((right(outer.rect) + t.gate.0).div_euclid(2)),
+        Side::Left => Bend::AtX((outer.rect.x + t.gate.0).div_euclid(2)),
+    };
+    let tracks = inner_tracks(c, lanes);
+    // A straight outer part asks for the middle of the outer side, so it stays straight.
+    let outer_pos = (bend == Bend::Straight).then_some(50);
+    let (exit, entry, exit_pos, entry_pos) =
+        if t.inner_is_start { (c.inner_side, side, Some(c.inner_pos), outer_pos) } else { (side, c.inner_side, outer_pos, Some(c.inner_pos)) };
+    LinePlan { edge: c.edge, from: e.from.clone(), to: e.to.clone(), exit, entry, bend, exit_pos, entry_pos, keep: Keep::Inner(t.clone()), tracks, axis }
+}
+
+/// The stretch of a crossing line's inner part along the track the VPC gave it, if any.
+fn inner_tracks(c: &Crossing, lanes: &[Lane]) -> Vec<Track> {
+    let t = &c.through;
+    let mut pts = t.inner.clone();
+    if t.inner_is_start {
+        pts.push(t.gate);
+    } else {
+        pts.insert(0, t.gate);
+    }
+    let mut tracks = Vec::new();
+    for l in lanes.iter().filter(|l| l.horizontal) {
+        for &(_, at) in l.tracks.iter().filter(|tr| tr.0 == c.edge) {
+            if let Some(s) = pts.windows(2).find(|s| s[0].1 == at && s[1].1 == at && s[0].0 != s[1].0) {
+                tracks.push(Track { horizontal: true, from: s[0].0.min(s[1].0), to: s[0].0.max(s[1].0), at });
+            }
+        }
+    }
+    tracks
+}
+
+/// The Region frame holds the parts inside the VPC too.
+fn in_region(a: Area) -> bool {
+    matches!(a, Area::Region | Area::VpcEdge | Area::Subnet(_))
+}
+
+fn inside(model: &Model, i: usize) -> bool {
+    matches!(model.nodes[i].area, Area::VpcEdge | Area::Subnet(_))
+}
+
+/// A Region part whose every line comes from or goes to a part inside the VPC.
+pub(super) fn only_inside(model: &Model, i: usize) -> bool {
+    let id = &model.nodes[i].id;
+    let others: Vec<usize> = model
+        .edges
+        .iter()
+        .filter_map(|e| match (&e.from == id, &e.to == id) {
+            (true, _) => model.nodes.iter().position(|n| n.id == e.to),
+            (_, true) => model.nodes.iter().position(|n| n.id == e.from),
+            _ => None,
+        })
+        .collect();
+    !others.is_empty() && others.iter().all(|&j| inside(model, j))
+}
+
+/// The Region's contents, from the Region's parts and the lines between them alone. The VPC, if
+/// there is one, takes a place in its rank like a part, with its own size.
+fn lay_region(model: &Model, rules: &Rules, axis: Axis, piece: Option<&Piece>) -> Block {
     let r = cross_step(model, rules, axis);
     let (least_main, _) = uv(axis, (COL_STEP, ROW_STEP));
     let (start_main, start_cross) = uv(axis, (REGION_LEFT, REGION_TOP));
-    let f = flow(model);
+    let vpc_id = model.nodes.len();
+    // The parts only the VPC's parts are joined to sit right of the VPC, past room for the labels.
+    let lone: Vec<usize> = match piece {
+        Some(_) => (0..model.nodes.len()).filter(|&i| model.nodes[i].area == Area::Region && only_inside(model, i)).collect(),
+        None => Vec::new(),
+    };
+    let gap = out_gap(model, rules, &lone).max(r - ICON);
+    let f = flow_of(model, piece, axis, gap);
     let vs = rows(&f, r, true);
 
     // Main ranks: their lengths come from the main parts alone, so side parts never move them.
     let named = |i: usize| icon_of(model, rules, i, icon_at(0, 0), None);
-    let main = |i: usize| uv(axis, spans(&named(i))).0;
-    let on_line = |i: usize| uv(axis, on_lines(&named(i))).0;
+    let lone_main = lone.iter().map(|&i| spans(&named(i)).0 .1).max();
+    let block_main = piece.map_or((0, 0), |p| {
+        let (w, h) = (p.placed.w, p.placed.h);
+        let extra = match (axis, lone_main) {
+            (Axis::Right, Some(end)) => gap + end,
+            _ => 0,
+        };
+        (0, uv(axis, (w, h)).0 + extra)
+    });
+    let main = |i: usize| if i == vpc_id { block_main } else { uv(axis, spans(&named(i))).0 };
+    let on_line = |i: usize| if i == vpc_id { block_main } else { uv(axis, on_lines(&named(i))).0 };
+    let off = |i: usize| inner_offset(model, piece, axis, i);
     let ranks = f.col.iter().copied().max().unwrap_or(0);
     let mut span = vec![(0, ICON); ranks + 1];
     let mut line = vec![(0, ICON); ranks + 1];
@@ -276,46 +467,52 @@ fn lay_region(model: &Model, rules: &Rules, axis: Axis) -> Block {
         span[f.col[k]] = widen(span[f.col[k]], main(i));
         line[f.col[k]] = widen(line[f.col[k]], on_line(i));
     }
-    let local = |id: &str| f.parts.iter().position(|&i| model.nodes[i].id == id);
+    let unit = |id: &str| {
+        let i = model.nodes.iter().position(|n| n.id == id)?;
+        let u = if piece.is_some() && inside(model, i) { vpc_id } else { i };
+        f.parts.iter().position(|&p| p == u).map(|k| (k, i))
+    };
     let mut u = vec![0; ranks + 1];
     if ranks > 0 {
         u[1] = start_main.max(FRAME_ROOM - span[1].0);
     }
     for c in 1..ranks {
         // The main lines from this rank into the next, and how many of them bend on the way.
-        let lines: Vec<(usize, usize, &str)> = model
+        let lines: Vec<(Unit, Unit, &str)> = model
             .edges
             .iter()
             .filter(|e| e.rel == Rel::Main)
-            .filter_map(|e| Some((local(&e.from)?, local(&e.to)?, e.label.as_str())))
-            .filter(|&(a, b, _)| f.col[a] == c && f.col[b] == c + 1)
+            .filter_map(|e| Some((unit(&e.from)?, unit(&e.to)?, e.label.as_str())))
+            .filter(|&(a, b, _)| f.col[a.0] == c && f.col[b.0] == c + 1)
             .collect();
         let label = lines.iter().map(|l| uv(axis, wire_text_size(&rules.text(l.2, model.lang))).0).max().unwrap_or(0);
-        let bending = lines.iter().filter(|&&(a, b, _)| vs[a] != vs[b]).count() as i32;
+        let bending = lines.iter().filter(|&&(a, b, _)| vs[a.0] + off(a.1) != vs[b.0] + off(b.1)).count() as i32;
         u[c + 1] = u[c] + rank_gap(least_main, (span[c].1, span[c + 1].0), (line[c].1, line[c + 1].0), label, bending);
     }
     // (model index, u, v) of every Region part.
-    let mut spots: Vec<(usize, i32, i32)> = f.parts.iter().enumerate().map(|(k, &i)| (i, u[f.col[k]], vs[k])).collect();
+    let block_at = f.parts.iter().position(|&i| i == vpc_id).map(|k| (u[f.col[k]], vs[k]));
+    let mut spots: Vec<(usize, i32, i32)> = f.parts.iter().enumerate().filter(|&(_, &i)| i != vpc_id).map(|(k, &i)| (i, u[f.col[k]], vs[k])).collect();
 
     // Side parts take one step across past the main parts, at the rank of the part their first
     // side line joins, or the next rank on where their names keep clear of the side parts placed
     // before them, or past the last rank.
-    let sides: Vec<usize> =
-        (0..model.nodes.len()).filter(|&i| model.nodes[i].area == Area::Region && !f.parts.contains(&i)).collect();
-    let side_v = vs.iter().max().map_or(0, |m| m + r);
+    let sides: Vec<usize> = (0..model.nodes.len())
+        .filter(|&i| model.nodes[i].area == Area::Region && !f.parts.contains(&i) && !lone.contains(&i))
+        .collect();
+    let side_v = f.parts.iter().enumerate().map(|(k, _)| vs[k] + f.step(k, r)).max().unwrap_or(0);
     let mut placed: Vec<(i32, Span)> = Vec::new();
     let mut extra: Vec<i32> = Vec::new();
     for &i in &sides {
         let si = main(i);
         let partner = partners(model, i).into_iter().next();
-        let want = partner.and_then(|p| f.parts.iter().position(|&j| j == p)).map_or(1, |k| f.col[k]);
-        let apart = |pu: i32, ps: Span, cu: i32| if cu >= pu { cu - pu >= gap(least_main, ps, si) } else { pu - cu >= gap(least_main, si, ps) };
+        let want = partner.and_then(|p| unit(&model.nodes[p].id)).map_or(1, |(k, _)| f.col[k]);
+        let apart = |pu: i32, ps: Span, cu: i32| if cu >= pu { cu - pu >= gap_of(least_main, ps, si) } else { pu - cu >= gap_of(least_main, si, ps) };
         let clear = |cu: i32| cu + si.0 >= FRAME_ROOM && placed.iter().all(|&(pu, ps)| apart(pu, ps, cu));
         let cu = match (want..=ranks).map(|c| u[c]).find(|&cu| clear(cu)) {
             Some(cu) => cu,
             None => {
                 let base = if ranks > 0 { u[ranks] + least_main } else { start_main };
-                placed.iter().map(|&(pu, ps)| pu + gap(least_main, ps, si)).chain([base, FRAME_ROOM - si.0]).max().expect("not empty")
+                placed.iter().map(|&(pu, ps)| pu + gap_of(least_main, ps, si)).chain([base, FRAME_ROOM - si.0]).max().expect("not empty")
             }
         };
         if ranks == 0 || cu > u[ranks] {
@@ -331,12 +528,19 @@ fn lay_region(model: &Model, rules: &Rules, axis: Axis) -> Block {
     let probe = Frame { id: REGION_FRAME.into(), kind: FrameKind::Region, label: region_name(model, rules), rect: icon_at(0, 0), parent: None };
     let name = frame_name_box(&probe);
     let name_across = uv(axis, (name.x + name.w, name.y + name.h)).1;
-    let across = spots
-        .iter()
-        .map(|&(i, _, at)| FRAME_ROOM - uv(axis, spans(&named(i))).1 .0 - at)
-        .fold(start_cross.max(name_across + FRAME_ROOM - ICON / 2), i32::max);
+    let named_rule = name_across + FRAME_ROOM - ICON / 2;
+    let across = match block_at {
+        None => spots.iter().map(|&(i, _, at)| FRAME_ROOM - uv(axis, spans(&named(i))).1 .0 - at).fold(start_cross.max(named_rule), i32::max),
+        // The VPC is entered through its gates, deep inside it, so only the parts keep clear of the name.
+        Some((_, bv)) => spots
+            .iter()
+            .map(|&(i, _, at)| (FRAME_ROOM - uv(axis, spans(&named(i))).1 .0).max(named_rule) - at)
+            .chain([start_cross, FRAME_ROOM - bv])
+            .max()
+            .expect("not empty"),
+    };
 
-    let icons: Vec<Icon> = spots
+    let mut icons: Vec<Icon> = spots
         .iter()
         .map(|&(i, cu, cv)| {
             let (x, y) = uv(axis, (cu, across + cv));
@@ -344,16 +548,95 @@ fn lay_region(model: &Model, rules: &Rules, axis: Axis) -> Block {
         })
         .collect();
     let (mut bw, mut bh) = (REGION_LEFT + ICON + REGION_RIGHT, REGION_TOP + ICON + REGION_BOTTOM);
+    let mut vpc = None;
+    if let (Some(p), Some((bu, bv))) = (piece, block_at) {
+        let (ox, oy) = uv(axis, (bu, across + bv));
+        vpc = Some((ox, oy));
+        icons.extend(p.placed.icons.iter().map(|i| Icon { rect: Rect { x: i.rect.x + ox, y: i.rect.y + oy, ..i.rect }, ..i.clone() }));
+        // Right of the VPC, level with the first private part sending to it, else the first part
+        // inside it joined to it; a row lower each time the place is taken.
+        let x = ox + p.placed.w + gap;
+        for &i in &lone {
+            let joined: Vec<usize> = partners_all(model, i).into_iter().filter(|&j| inside(model, j)).collect();
+            let sender = joined.iter().copied().find(|&j| matches!(model.nodes[j].area, Area::Subnet(crate::model::Tier::Private))).or(joined.first().copied());
+            let mut y = sender.and_then(|j| icons.iter().find(|ic| ic.id == model.nodes[j].id)).map_or(oy, |ic| ic.rect.y);
+            let mut ic = icon_of(model, rules, i, icon_at(x, y), Some(REGION_FRAME.into()));
+            while icons.iter().any(|o| boxes_meet(o, &ic)) {
+                y += ROW_STEP;
+                ic = icon_of(model, rules, i, icon_at(x, y), Some(REGION_FRAME.into()));
+            }
+            icons.push(ic);
+        }
+        bw = bw.max(ox + p.placed.w + REGION_RIGHT);
+        bh = bh.max(oy + p.placed.h + REGION_BOTTOM);
+    }
     if !icons.is_empty() {
-        bw = icons.iter().map(|i| extent(i).0).max().expect("not empty") + REGION_RIGHT;
-        bh = icons.iter().map(|i| extent(i).1).max().expect("not empty") + REGION_BOTTOM;
+        bw = bw.max(icons.iter().map(|i| extent(i).0).max().expect("not empty") + REGION_RIGHT);
+        bh = bh.max(icons.iter().map(|i| extent(i).1).max().expect("not empty") + REGION_BOTTOM);
+        if vpc.is_none() {
+            bw = icons.iter().map(|i| extent(i).0).max().expect("not empty") + REGION_RIGHT;
+            bh = icons.iter().map(|i| extent(i).1).max().expect("not empty") + REGION_BOTTOM;
+        }
     }
     // Wide enough for the frame's own name.
     bw = bw.max(FRAME_NAME_INDENT + name_text_width(&region_name(model, rules)) + FRAME_ROOM);
     let mut centres: Vec<i32> = u[1..].iter().copied().chain(extra).map(|c| c + ICON / 2).collect();
     centres.sort_unstable();
     centres.dedup();
-    Block { w: bw, h: bh, icons, ranks: centres, across }
+    Block { w: bw, h: bh, icons, ranks: centres, across, vpc }
+}
+
+/// Whether two parts' icons and names come within room of each other.
+fn boxes_meet(a: &Icon, b: &Icon) -> bool {
+    let grown = |r: Rect| Rect { x: r.x - ACROSS_ROOM, y: r.y - ACROSS_ROOM, w: r.w + 2 * ACROSS_ROOM, h: r.h + 2 * ACROSS_ROOM };
+    let meet = |p: Rect, q: Rect| p.x < q.x + q.w && q.x < p.x + p.w && p.y < q.y + q.h && q.y < p.y + p.h;
+    [a.rect, name_area(a)].iter().any(|&p| [b.rect, name_area(b)].iter().any(|&q| meet(grown(p), q)))
+}
+
+/// The room right of the VPC for the parts only its parts send to: the widest label of the lines
+/// into them, one part of it to a row, and room on both sides, and at least `OUT_GAP`.
+fn out_gap(model: &Model, rules: &Rules, lone: &[usize]) -> i32 {
+    let note = wire_text_width(&rules.text("from_all_azs", model.lang));
+    let widest = model
+        .edges
+        .iter()
+        .filter(|e| lone.iter().any(|&i| model.nodes[i].id == e.to || model.nodes[i].id == e.from))
+        .map(|e| wire_text_width(&rules.text(&e.label, model.lang)).max(note))
+        .max()
+        .unwrap_or(0);
+    OUT_GAP.max(widest + WIRE_ROOM)
+}
+
+/// How far across the VPC's own coordinate lies from part `i`'s inside it, for lines to be level;
+/// 0 for a part outside it.
+fn inner_offset(model: &Model, piece: Option<&Piece>, axis: Axis, i: usize) -> i32 {
+    match piece {
+        Some(p) if i < model.nodes.len() && inside(model, i) => {
+            p.placed.icons.iter().find(|ic| ic.id == model.nodes[i].id).map_or(0, |ic| uv(axis, (ic.rect.x, ic.rect.y)).1)
+        }
+        _ => 0,
+    }
+}
+
+/// Every part a part's lines join, main lines too, in model order, each once.
+fn partners_all(model: &Model, i: usize) -> Vec<usize> {
+    let id = &model.nodes[i].id;
+    let mut out: Vec<usize> = Vec::new();
+    for e in &model.edges {
+        let other = if &e.from == id {
+            &e.to
+        } else if &e.to == id {
+            &e.from
+        } else {
+            continue;
+        };
+        if let Some(j) = model.nodes.iter().position(|n| &n.id == other) {
+            if !out.contains(&j) {
+                out.push(j);
+            }
+        }
+    }
+    out
 }
 
 /// The step across the main axis: from the start of one part to the start of the next, past the
@@ -379,18 +662,45 @@ pub(super) fn cross_step(model: &Model, rules: &Rules, axis: Axis) -> i32 {
 
 /// The Region's parts on a main flow, each in the rank one past the furthest of its
 /// predecessors in the Region. Lines from outside the Region do not count.
+#[cfg(test)]
 pub(super) fn flow(model: &Model) -> Flow {
-    let parts: Vec<usize> = (0..model.nodes.len())
-        .filter(|&i| model.nodes[i].area == Area::Region && on_main(model, &model.nodes[i].id))
+    flow_of(model, None, Axis::Right, 0)
+}
+
+/// Like `flow`, with the VPC as one part, standing at the index one past the model's nodes, for
+/// every part inside it, and `room` across after it. Parts only the VPC's parts are joined to are
+/// left out: they sit right of the VPC.
+fn flow_of(model: &Model, piece: Option<&Piece>, axis: Axis, room: i32) -> Flow {
+    let vpc_id = model.nodes.len();
+    let mut parts: Vec<usize> = (0..model.nodes.len())
+        .filter(|&i| model.nodes[i].area == Area::Region && on_main(model, &model.nodes[i].id) && !(piece.is_some() && only_inside(model, i)))
         .collect();
-    let local = |id: &str| parts.iter().position(|&i| model.nodes[i].id == id);
+    let index = |id: &str| model.nodes.iter().position(|n| n.id == id);
+    if let Some(p) = piece {
+        let crosses = model.edges.iter().any(|e| {
+            let (Some(a), Some(b)) = (index(&e.from), index(&e.to)) else { return false };
+            e.rel == Rel::Main && inside(model, a) != inside(model, b)
+        });
+        if crosses {
+            if p.first {
+                parts.insert(0, vpc_id);
+            } else {
+                parts.push(vpc_id);
+            }
+        }
+    }
+    let unit = |i: usize| if piece.is_some() && inside(model, i) { vpc_id } else { i };
+    let local = |i: usize| parts.iter().position(|&p| p == unit(i));
+    let off = |i: usize| inner_offset(model, piece, axis, i);
     let n = parts.len();
-    let (mut preds, mut succs) = (vec![Vec::new(); n], vec![Vec::new(); n]);
+    let (mut preds, mut succs): (Vec<Vec<Link>>, Vec<Vec<Link>>) = (vec![Vec::new(); n], vec![Vec::new(); n]);
     for e in model.edges.iter().filter(|e| e.rel == Rel::Main) {
-        if let (Some(a), Some(b)) = (local(&e.from), local(&e.to)) {
-            if !succs[a].contains(&b) {
-                succs[a].push(b);
-                preds[b].push(a);
+        let (Some(ia), Some(ib)) = (index(&e.from), index(&e.to)) else { continue };
+        if let (Some(a), Some(b)) = (local(ia), local(ib)) {
+            let d = off(ia) - off(ib);
+            if a != b && !succs[a].contains(&(b, -d)) {
+                succs[a].push((b, -d));
+                preds[b].push((a, d));
             }
         }
     }
@@ -398,13 +708,15 @@ pub(super) fn flow(model: &Model) -> Flow {
     let mut col = vec![1usize; n];
     for _ in 0..n {
         for i in 0..n {
-            col[i] = preds[i].iter().map(|&p| col[p] + 1).max().unwrap_or(1);
+            col[i] = preds[i].iter().map(|&(p, _)| col[p] + 1).max().unwrap_or(1);
         }
     }
-    Flow { parts, col, preds, succs }
+    let block = parts.iter().position(|&i| i == vpc_id).zip(piece).map(|(k, p)| (k, uv(axis, (p.placed.w, p.placed.h)).1, room));
+    Flow { parts, col, preds, succs, block }
 }
 
-/// The cross coordinate of every part of `f`, a step `r` apart in each rank, with the smallest at 0.
+/// The cross coordinate of every part of `f`, a step `r` apart in each rank (more after the VPC),
+/// with the smallest at 0.
 pub(super) fn rows(f: &Flow, r: i32, sweep_back: bool) -> Vec<i32> {
     let last = f.col.iter().copied().max().unwrap_or(0);
     let in_rank = |c: usize| -> Vec<usize> { (0..f.parts.len()).filter(|&i| f.col[i] == c).collect() };
@@ -412,11 +724,11 @@ pub(super) fn rows(f: &Flow, r: i32, sweep_back: bool) -> Vec<i32> {
     // From the first rank: its parts one after another, every other part level with the middle
     // of its predecessors, and at least a step past the part before it.
     for c in 1..=last {
-        let mut before: Option<i32> = None;
+        let mut before: Option<usize> = None;
         for i in in_rank(c) {
-            let at = after(before, mid(f.preds[i].iter().map(|&p| v[p])), r);
+            let at = after(before.map(|b| v[b]), mid(f.preds[i].iter().map(|&(p, d)| v[p] + d)), before.map_or(r, |b| f.step(b, r)));
             v[i] = at;
-            before = Some(at);
+            before = Some(i);
         }
     }
     // From the last rank back: a part with two or more targets moves toward their middle, as far
@@ -425,15 +737,18 @@ pub(super) fn rows(f: &Flow, r: i32, sweep_back: bool) -> Vec<i32> {
         for c in (1..last).rev() {
             let rank = in_rank(c);
             for (k, &i) in rank.iter().enumerate() {
-                if f.succs[i].len() < 2 {
+                let mut targets: Vec<usize> = f.succs[i].iter().map(|s| s.0).collect();
+                targets.sort_unstable();
+                targets.dedup();
+                if targets.len() < 2 {
                     continue;
                 }
-                let mut at = mid(f.succs[i].iter().map(|&s| v[s])).expect("two or more targets");
+                let mut at = mid(f.succs[i].iter().map(|&(s, d)| v[s] + d)).expect("two or more targets");
                 if k > 0 {
-                    at = at.max(v[rank[k - 1]] + r);
+                    at = at.max(v[rank[k - 1]] + f.step(rank[k - 1], r));
                 }
                 if k + 1 < rank.len() {
-                    at = at.min(v[rank[k + 1]] - r);
+                    at = at.min(v[rank[k + 1]] - f.step(i, r));
                 }
                 v[i] = at;
             }
@@ -455,7 +770,12 @@ fn plans(model: &Model, layout: &Layout, col_u: &[i32], axis: Axis) -> Vec<LineP
     let ((main_end, cross_end), (main_start, cross_start)) = (uv(axis, (Side::Right, Side::Bottom)), uv(axis, (Side::Left, Side::Top)));
     let at = |i: &Icon| uv(axis, (i.rect.x, i.rect.y));
     let mut out = Vec::new();
+    let within = |id: &str| model.nodes.iter().position(|n| n.id == id).is_some_and(|i| inside(model, i));
     for (edge, e) in model.edges.iter().enumerate() {
+        // The VPC drafts the lines with an end inside it.
+        if within(&e.from) || within(&e.to) {
+            continue;
+        }
         let (Some(a), Some(b)) = (find(&e.from), find(&e.to)) else { continue };
         let ((au, av), (bu, bv)) = (at(a), at(b));
         let (exit, entry, bend) = if e.rel == Rel::Main {
@@ -524,7 +844,7 @@ pub(super) fn rank_gap(least: i32, parts: (i32, i32), on_line: (i32, i32), label
 
 /// The distance between the starts of two parts one after the other along the main axis: their
 /// names apart, and at least `least`.
-fn gap(least: i32, first: Span, second: Span) -> i32 {
+fn gap_of(least: i32, first: Span, second: Span) -> i32 {
     least.max(first.1 - second.0 + NAME_ROOM)
 }
 

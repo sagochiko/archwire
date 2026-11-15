@@ -5,6 +5,7 @@
 //! only decides at the end whether `(x, y)` is `(u, v)` or `(v, u)`. Names stay below their icons
 //! and frame names at their frames' top-left corners whichever way the lines run.
 
+mod azgrid;
 mod check;
 mod layered;
 mod tree;
@@ -103,22 +104,33 @@ pub enum BlockOrder {
     Last,
 }
 
-/// The layout, or LAYOUT_FAILED problems: for parts inside a VPC, which are not arranged yet, and
-/// when a must-hold condition fails after laying out.
+/// The layout, or LAYOUT_FAILED problems when a must-hold condition fails after laying out.
+///
+/// The inside of a VPC is laid out on its own and then placed as one piece among the parts
+/// outside it. Once every part has its place, the lines are gathered as the router gathers them,
+/// and each band keeps the tracks of the lines that are drawn; a line that is not drawn keeps no track.
 pub fn arrange(model: &Model, rules: &Rules, axis: Axis, choices: Choices) -> Result<Placement, Vec<Problem>> {
-    // The choices shape the inside of a VPC, which is not arranged yet.
-    let _ = choices;
     let mut inside: Vec<usize> = Vec::new();
     for item in tree::tree(model) {
         if let Item::Frame(f) = item {
-            inside.extend(parts(&f.items));
+            if f.arrange == Arrange::AzGrid {
+                inside.extend(parts(&f.items));
+            }
         }
     }
-    if !inside.is_empty() {
-        let id = |i: usize| model.nodes[i].id.clone();
-        return Err(inside.into_iter().map(|i| check::failed(&id(i), id(i), "a place")).collect());
+    let placed = (!inside.is_empty()).then(|| azgrid::lay_vpc(model, rules, &inside, axis, choices));
+    let piece = placed.as_ref().map(|p| layered::Piece { placed: p, first: matches!(choices.block_order, BlockOrder::First) });
+    let mut placement = layered::layered(model, rules, axis, piece.as_ref());
+    if placed.is_some() {
+        let reps: Vec<usize> = crate::lines::gather(model, &placement.layout, rules).0.iter().map(|l| l.rep).collect();
+        for lane in &mut placement.lanes {
+            lane.tracks.retain(|t| reps.contains(&t.0));
+        }
+        placement.lanes.retain(|l| !l.tracks.is_empty());
+        for pl in placement.lines.iter_mut().filter(|pl| !reps.contains(&pl.edge)) {
+            pl.tracks.clear();
+        }
     }
-    let placement = layered::layered(model, rules, axis);
     let problems = check::check(model, &placement);
     if !problems.is_empty() {
         return Err(problems);
@@ -141,22 +153,6 @@ fn parts(items: &[Item]) -> Vec<usize> {
 mod tests {
     use super::layered::tests::{API_CASES, CHOICES};
     use super::*;
-
-    // Fails if a model with parts inside a VPC is given a layout that leaves them out, instead of
-    // LAYOUT_FAILED for each of them.
-    #[test]
-    fn parts_inside_a_vpc_are_not_arranged_yet() {
-        let r = Rules::builtin();
-        let def = crate::def::parse("flows:\n  - user -> cloudfront -> alb -> ecs\n").unwrap();
-        let m = crate::infer::infer(&def, &r).0.unwrap();
-        for axis in [Axis::Right, Axis::Down] {
-            let got = arrange(&m, &r, axis, CHOICES).unwrap_err();
-            let inner: Vec<&str> = m.nodes.iter().filter(|n| matches!(n.area, crate::model::Area::VpcEdge | crate::model::Area::Subnet(_))).map(|n| n.id.as_str()).collect();
-            assert!(!inner.is_empty());
-            assert_eq!(got.iter().map(|e| e.at.as_deref().unwrap()).collect::<Vec<_>>(), inner);
-            assert!(got.iter().all(|e| e.code == "LAYOUT_FAILED" && e.message.contains("without a place")), "{got:?}");
-        }
-    }
 
     /// With `ARCHWIRE_PROTO_OUT=<dir>`, writes each fixed API example laid out with lines running
     /// down as `<dir>/<example>-down.drawio`, for the diagram checker. Without it, does nothing.
