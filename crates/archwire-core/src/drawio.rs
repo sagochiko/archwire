@@ -311,7 +311,7 @@ mod tests {
             region: None,
             part: id.into(),
             tag: tag.map(String::from),
-            area: None,
+            area: crate::model::Area::Region,
             undecided: false,
         };
         let model = Model {
@@ -320,6 +320,7 @@ mod tests {
             lang: Lang::En,
             nodes: vec![node("s3", None), node("s3.web", Some("web"))],
             edges: Vec::new(),
+            direction: None,
         };
         let icon = |id: &str, x: i32| Icon { id: id.into(), label: id.into(), lines: 1, rect: Rect { x, y: 0, w: 60, h: 60 }, parent: None };
         let layout = Layout { frames: Vec::new(), icons: vec![icon("s3", 0), icon("s3.web", 200)] };

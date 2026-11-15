@@ -9,6 +9,8 @@
 # `flow_source = true` marks a global service that may start a main (->) or auxiliary (~>) flow.
 # `attach_to` makes a service an attachment: it carries no flows and may only be associated
 # (--) with the services listed there, written attachment first.
+# `derived_role` names the part a service inference adds plays at the VPC's edge: `entry_gateway`
+# where traffic from outside comes in, `egress_nat` where private traffic goes out.
 
 [[service]]
 key = "user"
@@ -70,6 +72,7 @@ color = "#8C4FFF"
 label = "Internet Gateway"
 in_label = "https"
 derived_only = true
+derived_role = "entry_gateway"
 
 [[service]]
 key = "alb"
@@ -93,6 +96,7 @@ color = "#8C4FFF"
 label = "NAT Gateway"
 in_label = "outbound"
 derived_only = true
+derived_role = "egress_nat"
 
 [[service]]
 key = "ecs"

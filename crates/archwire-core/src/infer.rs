@@ -6,14 +6,15 @@
 
 use crate::def::{Definition, Link, Rel};
 use crate::diag::{Derived, Diagnostics, Hole, Problem, Versions};
-use crate::model::{Edge, Model, Node};
+use crate::model::{Area, Axis, Edge, Model, Node, Tier};
 use crate::rules::{Lang, Place, Rules, Scope, Service, Subnet};
 
-const SETTINGS: [&str; 5] = ["azs", "lang", "nat", "readers", "region"];
+const SETTINGS: [&str; 6] = ["azs", "direction", "lang", "nat", "readers", "region"];
 const AZ_COUNTS: [&str; 2] = ["2", "3"];
 const AZ_LETTERS: [&str; 3] = ["a", "c", "d"];
 const REGIONS: [&str; 1] = ["ap-northeast-1"];
 const LANGS: [&str; 2] = ["en", "ja"];
+const DIRECTIONS: [&str; 2] = ["down", "right"];
 const NAT_MODES: [&str; 2] = ["per-az", "single"];
 const ROUTE_CHOICES: [&str; 2] = ["endpoint", "nat"];
 /// Parts a main flow into the load balancer may start from.
@@ -49,6 +50,7 @@ struct Settings {
     readers: usize,
     nat_single: bool,
     lang: Lang,
+    direction: Option<Axis>,
 }
 
 /// A main flow from a private part to a Regional service: its route is a hole.
@@ -187,6 +189,32 @@ pub(crate) fn check_lang(def: &Definition, errors: &mut Vec<Problem>) -> Lang {
     }
 }
 
+/// `set.direction`: None when it is not written; a value other than `down` and `right` adds BAD_SETTING.
+pub(crate) fn check_direction(def: &Definition, errors: &mut Vec<Problem>) -> Option<Axis> {
+    match def.set.get("direction").map(String::as_str) {
+        None => None,
+        Some("down") => Some(Axis::Down),
+        Some("right") => Some(Axis::Right),
+        Some(v) => {
+            bad_setting(errors, "direction", v, strings(&DIRECTIONS));
+            None
+        }
+    }
+}
+
+/// The area a part of this service belongs to, from its scope, subnet and place in the rules data.
+pub(crate) fn area_of(service: &Service) -> Area {
+    match (service.scope, service.place, service.subnet) {
+        (Scope::Outside, _, _) => Area::Outside,
+        (Scope::Global, _, _) => Area::Cloud,
+        (Scope::Regional, _, _) => Area::Region,
+        (Scope::Vpc, Place::Gateway, _) => Area::VpcEdge,
+        (Scope::Vpc, _, Some(Subnet::Private)) => Area::Subnet(Tier::Private),
+        // Like the rows `build` lays out: a VPC part that is not private is in the public tier.
+        (Scope::Vpc, _, Some(Subnet::Public) | None) => Area::Subnet(Tier::Public),
+    }
+}
+
 fn check_settings(def: &Definition, errors: &mut Vec<Problem>) -> Settings {
     let get = |key: &str| def.set.get(key).map(String::as_str);
 
@@ -200,6 +228,7 @@ fn check_settings(def: &Definition, errors: &mut Vec<Problem>) -> Settings {
     };
     let region = check_region(def, errors);
     let lang = check_lang(def, errors);
+    let direction = check_direction(def, errors);
     let nat_single = match get("nat") {
         None | Some("per-az") => false,
         Some("single") => true,
@@ -221,7 +250,7 @@ fn check_settings(def: &Definition, errors: &mut Vec<Problem>) -> Settings {
     for key in def.set.keys().filter(|k| !SETTINGS.contains(&k.as_str())) {
         errors.push(problem("UNKNOWN_SETTING", &format!("set.{key}"), key, strings(&SETTINGS), format!("unknown setting `{key}`")));
     }
-    Settings { azs, region, readers, nat_single, lang }
+    Settings { azs, region, readers, nat_single, lang, direction }
 }
 
 fn find_routes(def: &Definition, rules: &Rules) -> Vec<Route> {
@@ -363,19 +392,19 @@ pub(crate) fn copy_id(part: &str, suffix: &str) -> String {
     format!("{part}-{suffix}")
 }
 
-/// `service` is both the service key and the written part: the VPC layout has no named parts.
-fn node(id: String, service: &str, option: Option<String>, az: Option<usize>, role: Option<&str>, added: bool) -> Node {
+/// The service key is also the written part: the VPC layout has no named parts.
+fn node(id: String, service: &Service, option: Option<String>, az: Option<usize>, role: Option<&str>, added: bool) -> Node {
     Node {
         id,
-        service: service.into(),
+        service: service.key.clone(),
         option,
         az,
         role: role.map(String::from),
         added,
         region: None,
-        part: service.into(),
+        part: service.key.clone(),
         tag: None,
-        area: None,
+        area: area_of(service),
         undecided: false,
     }
 }
@@ -420,39 +449,39 @@ fn build(def: &Definition, rules: &Rules, s: &Settings, routes: &[Route], diag: 
     // Nodes, in the order the diagram reads: outside, gateway, public, private rows, Regional.
     let mut nodes: Vec<Node> = Vec::new();
     for (name, opt) in in_group(&|v| matches!(v.scope, Scope::Outside | Scope::Global)) {
-        let mut n = node(name.into(), name, opt, None, None, false);
+        let mut n = node(name.into(), svc(name), opt, None, None, false);
         if name == CERTIFICATE && cloudfront_certificate {
             n.region = Some(CLOUDFRONT_CERTIFICATE_REGION.into());
         }
         nodes.push(n);
     }
     if igw {
-        nodes.push(node("igw".into(), "igw", None, None, None, true));
+        nodes.push(node("igw".into(), svc("igw"), None, None, None, true));
     }
     for (name, opt) in in_group(&|v| v.scope == Scope::Vpc && !is_private(v)) {
-        nodes.push(node(name.into(), name, opt, None, None, false));
+        nodes.push(node(name.into(), svc(name), opt, None, None, false));
     }
     for &i in &nat_azs {
-        nodes.push(node(copy_id("nat", &suffix(i)), "nat", None, Some(i), None, true));
+        nodes.push(node(copy_id("nat", &suffix(i)), svc("nat"), None, Some(i), None, true));
     }
     for (name, opt) in in_group(&is_private) {
         match svc(name).place {
             Place::PerAz => {
                 for i in 0..s.azs {
-                    nodes.push(node(copy_id(name, &suffix(i)), name, opt.clone(), Some(i), None, false));
+                    nodes.push(node(copy_id(name, &suffix(i)), svc(name), opt.clone(), Some(i), None, false));
                 }
             }
             Place::WriterReader => {
                 for i in 0..=s.readers {
                     let role = if i == 0 { "writer" } else { "reader" };
-                    nodes.push(node(copy_id(name, &suffix(i)), name, opt.clone(), Some(i), Some(role), false));
+                    nodes.push(node(copy_id(name, &suffix(i)), svc(name), opt.clone(), Some(i), Some(role), false));
                 }
             }
-            Place::Single | Place::Gateway | Place::Span => nodes.push(node(name.into(), name, opt, None, None, false)),
+            Place::Single | Place::Gateway | Place::Span => nodes.push(node(name.into(), svc(name), opt, None, None, false)),
         }
     }
     for (name, opt) in in_group(&|v| v.scope == Scope::Regional) {
-        nodes.push(node(name.into(), name, opt, None, None, false));
+        nodes.push(node(name.into(), svc(name), opt, None, None, false));
     }
 
     // Edges.
@@ -559,7 +588,7 @@ fn build(def: &Definition, rules: &Rules, s: &Settings, routes: &[Route], diag: 
         diag.notes.push(rules.text("note.endpoint_not_drawn", lang));
     }
 
-    Model { region: s.region.clone(), azs, lang: s.lang, nodes, edges }
+    Model { region: s.region.clone(), azs, lang: s.lang, nodes, edges, direction: s.direction }
 }
 
 /// A main flow from outside the VPC into a public part enters through the Internet Gateway.
@@ -830,7 +859,64 @@ mod tests {
         let m = run("flows:\n  - user -> alb -> ecs\n  - ecs -> internet\n").0.unwrap();
         let part = |id: &str| m.nodes.iter().find(|n| n.id == id).unwrap().part.clone();
         assert_eq!([part("ecs-1a"), part("nat-1c"), part("alb"), part("igw")], ["ecs", "nat", "alb", "igw"]);
-        assert!(m.nodes.iter().all(|n| n.tag.is_none() && n.area.is_none()));
+        assert!(m.nodes.iter().all(|n| n.tag.is_none()));
+    }
+
+    // Breaks when a node's area is not taken from its service, or a per-AZ copy is mixed up with a part spanning the AZs.
+    #[test]
+    fn every_node_has_the_area_its_service_gives() {
+        use crate::model::{Area, Tier};
+        let src = "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\nset:\n  lang: ja\n";
+        let m = run(src).0.unwrap();
+        let at = |id: &str| {
+            let n = m.nodes.iter().find(|n| n.id == id).unwrap_or_else(|| panic!("{id}"));
+            (n.area, n.az)
+        };
+        assert_eq!(at("user"), (Area::Outside, None));
+        assert_eq!(at("cloudfront"), (Area::Cloud, None));
+        assert_eq!(at("igw"), (Area::VpcEdge, None));
+        assert_eq!(at("alb"), (Area::Subnet(Tier::Public), None));
+        assert_eq!(at("nat-1a"), (Area::Subnet(Tier::Public), Some(0)));
+        assert_eq!(at("ecs-1c"), (Area::Subnet(Tier::Private), Some(1)));
+        assert_eq!(at("aurora-1a"), (Area::Subnet(Tier::Private), Some(0)));
+        assert_eq!(at("s3"), (Area::Region, None));
+        assert_eq!(at("cloudwatch"), (Area::Region, None));
+    }
+
+    // Breaks when the VPC layout does not read `set.direction`, or takes an unknown value as a default.
+    #[test]
+    fn direction_is_read_in_both_layouts() {
+        use crate::model::Axis;
+        const B: &str = "flows:\n  - user -> alb -> ecs\n";
+        let (m, d) = run(B);
+        assert!(d.errors.is_empty(), "{:?}", d.errors);
+        assert_eq!(m.unwrap().direction, None);
+        for (v, want) in [("right", Axis::Right), ("down", Axis::Down)] {
+            let (m, d) = run(&format!("{B}set:\n  direction: {v}\n"));
+            assert!(d.errors.is_empty(), "{v}: {:?}", d.errors);
+            assert_eq!(m.unwrap().direction, Some(want), "{v}");
+        }
+        for v in ["left", "Right", "up"] {
+            let (m, d) = run(&format!("{B}set:\n  direction: {v}\n"));
+            assert!(m.is_none(), "{v}");
+            assert_eq!(d.errors.len(), 1, "{v}: {:?}", d.errors);
+            let e = &d.errors[0];
+            assert_eq!((e.code.as_str(), e.at.as_deref(), e.got.as_deref()), ("BAD_SETTING", Some("set.direction"), Some(v)));
+            assert_eq!(e.allowed, ["down", "right"]);
+            assert_eq!(d.exit_code(), 1);
+        }
+        let (m, d) = run(&format!("{B}set:\n  colour: red\n"));
+        assert!(m.is_none());
+        assert_eq!(d.errors[0].code, "UNKNOWN_SETTING");
+        assert_eq!(d.errors[0].allowed, ["azs", "direction", "lang", "nat", "readers", "region"]);
+    }
+
+    // Breaks when `direction` is checked out of its place among the other settings.
+    #[test]
+    fn a_bad_direction_is_reported_after_lang_and_before_nat() {
+        let (_, d) = run("flows:\n  - user -> alb -> ecs\n  - ecs -> internet\nset:\n  nat: none\n  direction: up\n  lang: fr\n");
+        let at: Vec<_> = d.errors.iter().map(|e| e.at.as_deref().unwrap()).collect();
+        assert_eq!(at, ["set.lang", "set.direction", "set.nat"]);
     }
 
     #[test]

@@ -914,7 +914,7 @@ mod tests {
                 region: None,
                 part: id.to_string(),
                 tag: id.split_once('.').map(|(_, t)| t.to_string()),
-                area: Some(crate::model::Area::Region),
+                area: crate::model::Area::Region,
                 undecided: false,
             })
             .collect();
@@ -929,7 +929,7 @@ mod tests {
                 endpoint: false,
             })
             .collect();
-        let model = Model { region: "ap-northeast-1".to_string(), azs: Vec::new(), lang: crate::rules::Lang::En, nodes, edges };
+        let model = Model { region: "ap-northeast-1".to_string(), azs: Vec::new(), lang: crate::rules::Lang::En, nodes, edges, direction: None };
         let frames = vec![Frame {
             id: frame.to_string(),
             kind,

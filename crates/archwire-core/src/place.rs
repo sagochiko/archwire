@@ -117,11 +117,11 @@ pub fn place(model: &Model, rules: &Rules) -> Result<Placement, Vec<Problem>> {
 
     // The global column, after the Region. Its main parts go level with the middle of their
     // targets in the Region, two rows apart, so the row below each stays free for its side parts.
-    let global: Vec<usize> = (0..nodes.len()).filter(|&i| area(i) == Some(Area::Cloud)).collect();
+    let global: Vec<usize> = (0..nodes.len()).filter(|&i| area(i) == Area::Cloud).collect();
     let (g_main, g_side): (Vec<usize>, Vec<usize>) = global.iter().partition(|&&i| on_main(model, &nodes[i].id));
     let mut above: Option<i32> = None;
     for &i in &g_main {
-        let want = mid(targets(i).into_iter().filter(|&t| area(t) == Some(Area::Region)).filter_map(|t| y[t]));
+        let want = mid(targets(i).into_iter().filter(|&t| area(t) == Area::Region).filter_map(|t| y[t]));
         let v = below(above, want, 2 * r);
         y[i] = Some(v);
         above = Some(v);
@@ -154,7 +154,7 @@ pub fn place(model: &Model, rules: &Rules) -> Result<Placement, Vec<Problem>> {
     }
 
     // The users, after the global column: level with the middle of their main targets, a row apart.
-    let users: Vec<usize> = (0..nodes.len()).filter(|&i| area(i) == Some(Area::Outside)).collect();
+    let users: Vec<usize> = (0..nodes.len()).filter(|&i| area(i) == Area::Outside).collect();
     let mut above: Option<i32> = None;
     for &i in &users {
         let v = below(above, mid(targets(i).into_iter().filter_map(|t| y[t])), r);
@@ -201,7 +201,7 @@ pub fn place(model: &Model, rules: &Rules) -> Result<Placement, Vec<Problem>> {
     let region = Rect { x: region_x, y: region_y, w: block.w, h: block.h };
     // The Region frame is drawn only when a part is in it; else the AWS Cloud frame closes
     // around the global column and its own name.
-    let has_region = nodes.iter().any(|n| n.area == Some(Area::Region));
+    let has_region = nodes.iter().any(|n| n.area == Area::Region);
     let (inner_right, inner_bottom) = if has_region {
         (right(region), bottom(region))
     } else {
@@ -216,16 +216,16 @@ pub fn place(model: &Model, rules: &Rules) -> Result<Placement, Vec<Problem>> {
     let mut icons: Vec<Icon> = Vec::new();
     for (i, n) in nodes.iter().enumerate() {
         let placed = match area(i) {
-            Some(Area::Region) => block.icons.iter().find(|b| b.id == n.id).map(|b| {
+            Area::Region => block.icons.iter().find(|b| b.id == n.id).map(|b| {
                 let mut b = b.clone();
                 b.rect.x += region.x;
                 b.rect.y += region.y;
                 b
             }),
-            Some(Area::Cloud) => global_icons.iter().find(|g| g.id == n.id).cloned(),
-            Some(Area::Outside) => at(i).map(|r| icon_of(model, rules, i, r, None)),
-            // Not given a frame by inference: left unplaced, and the check names it.
-            None => None,
+            Area::Cloud => global_icons.iter().find(|g| g.id == n.id).cloned(),
+            Area::Outside => at(i).map(|r| icon_of(model, rules, i, r, None)),
+            // Inside a VPC, which this layout does not draw: left unplaced, and the check names it.
+            Area::VpcEdge | Area::Subnet(_) => None,
         };
         icons.extend(placed);
     }
@@ -292,10 +292,11 @@ pub(crate) fn check(model: &Model, layout: &Layout) -> Vec<Problem> {
     // The frame a part sits in is the one the model gives it.
     for n in &model.nodes {
         let want = match n.area {
-            Some(Area::Outside) => None,
-            Some(Area::Cloud) => Some(CLOUD_FRAME),
-            Some(Area::Region) => Some(REGION_FRAME),
-            None => continue,
+            Area::Outside => None,
+            Area::Cloud => Some(CLOUD_FRAME),
+            Area::Region => Some(REGION_FRAME),
+            // Parts inside a VPC never reach this layout.
+            Area::VpcEdge | Area::Subnet(_) => continue,
         };
         if let Some(i) = icons.iter().find(|i| i.id == n.id) {
             if i.parent.as_deref() != want {
@@ -370,7 +371,7 @@ fn lay_region(model: &Model, rules: &Rules, dir: Direction) -> Block {
     // line joins, or the next column to the right where their names keep clear of the side parts
     // placed before them, or past the last column.
     let sides: Vec<usize> =
-        (0..model.nodes.len()).filter(|&i| model.nodes[i].area == Some(Area::Region) && !f.parts.contains(&i)).collect();
+        (0..model.nodes.len()).filter(|&i| model.nodes[i].area == Area::Region && !f.parts.contains(&i)).collect();
     let side_y = ys.iter().max().map_or(0, |m| m + r);
     let mut placed: Vec<(i32, i32)> = Vec::new();
     let mut extra: Vec<i32> = Vec::new();
@@ -421,7 +422,7 @@ fn row_step(model: &Model, rules: &Rules) -> i32 {
 /// predecessors in the Region. Lines from outside the Region do not count.
 fn flow(model: &Model) -> Flow {
     let parts: Vec<usize> = (0..model.nodes.len())
-        .filter(|&i| model.nodes[i].area == Some(Area::Region) && on_main(model, &model.nodes[i].id))
+        .filter(|&i| model.nodes[i].area == Area::Region && on_main(model, &model.nodes[i].id))
         .collect();
     let local = |id: &str| parts.iter().position(|&i| model.nodes[i].id == id);
     let n = parts.len();

@@ -6,9 +6,9 @@
 
 use crate::def::{Definition, Link, Ref, Rel};
 use crate::diag::{Diagnostics, Hole, Problem, Versions};
-use crate::infer::{check_lang, check_names, check_region, derived};
-use crate::model::{Area, Edge, Model, Node};
-use crate::rules::{LinkRule, Rules, Scope};
+use crate::infer::{area_of, check_direction, check_lang, check_names, check_region, derived};
+use crate::model::{Area, Axis, Edge, Model, Node};
+use crate::rules::{Lang, LinkRule, Rules, Scope};
 
 /// The rules this code names itself; the rest come from the data, which loading checks.
 pub(crate) const RULES: [&str; 5] = [
@@ -20,7 +20,7 @@ pub(crate) const RULES: [&str; 5] = [
 ];
 
 /// The only settings a definition without a VPC may write.
-const SETTINGS: [&str; 2] = ["lang", "region"];
+const SETTINGS: [&str; 3] = ["direction", "lang", "region"];
 
 fn problem(code: &str, at: &str, got: &str, allowed: Vec<String>, message: String) -> Problem {
     Problem { code: code.into(), at: Some(at.into()), got: Some(got.into()), allowed, rule: None, message }
@@ -60,6 +60,7 @@ pub fn infer(def: &Definition, rules: &Rules) -> (Option<Model>, Diagnostics) {
     }
     let region = check_region(def, errors);
     let lang = check_lang(def, errors);
+    let direction = check_direction(def, errors);
 
     // Each part once, at its first mention.
     let mut parts: Vec<&Ref> = Vec::new();
@@ -110,7 +111,7 @@ pub fn infer(def: &Definition, rules: &Rules) -> (Option<Model>, Diagnostics) {
         return (None, diag);
     }
 
-    let model = build(def, rules, &parts, &accepted, &open, region, lang, &mut diag);
+    let model = build(def, rules, &parts, &accepted, &open, region, lang, direction, &mut diag);
     (Some(model), diag)
 }
 
@@ -192,7 +193,8 @@ fn build(
     accepted: &[(&Link, &LinkRule)],
     open: &[(String, &Ref)],
     region: String,
-    lang: crate::rules::Lang,
+    lang: Lang,
+    direction: Option<Axis>,
     diag: &mut Diagnostics,
 ) -> Model {
     let svc = |name: &str| rules.service(name).expect("names were checked");
@@ -203,12 +205,8 @@ fn build(
     let mut nodes: Vec<Node> = Vec::new();
     for r in parts {
         let s = svc(&r.service);
-        let area = match s.scope {
-            Scope::Outside => Area::Outside,
-            Scope::Global => Area::Cloud,
-            // No accepted connection has a VPC service, so `Vpc` never reaches here.
-            Scope::Regional | Scope::Vpc => Area::Region,
-        };
+        // No accepted connection has a VPC service, so every part is outside the VPC.
+        let area = area_of(s);
         nodes.push(Node {
             id: r.name.clone(),
             service: r.service.clone(),
@@ -219,7 +217,7 @@ fn build(
             region: moved(&r.name).and_then(|(_, rule)| rule.from_region.clone()),
             part: r.name.clone(),
             tag: r.tag.clone(),
-            area: Some(area),
+            area,
             undecided: open.iter().any(|(id, o)| o.name == r.name && !def.choose.contains_key(id)),
         });
     }
@@ -241,7 +239,7 @@ fn build(
     let mut why = |target: &str, id: &str, added: bool| diag.derived.push(derived(rules, lang, target, id, added));
     why("aws-cloud", "resources-inside-aws-cloud-frame", true);
     // The Region frame, and the Region chosen for it, only when a part is drawn inside it.
-    if nodes.iter().any(|n| n.area == Some(Area::Region)) {
+    if nodes.iter().any(|n| n.area == Area::Region) {
         why("region", "resources-inside-region-frame", true);
         if !def.set.contains_key("region") {
             why("region", "default-region", true);
@@ -279,7 +277,7 @@ fn build(
         });
     }
 
-    Model { region, azs: Vec::new(), lang, nodes, edges }
+    Model { region, azs: Vec::new(), lang, nodes, edges, direction }
 }
 
 #[cfg(test)]
@@ -304,7 +302,7 @@ mod tests {
         let ids: Vec<_> = m.nodes.iter().map(|n| n.id.as_str()).collect();
         assert_eq!(ids, ["user","cloudfront","s3","apigateway","lambda","dynamodb","cognito","cloudwatch"]);
         let areas: Vec<_> = m.nodes.iter().map(|n| (n.id.as_str(), n.area)).collect();
-        let (o, c, r) = (Some(Area::Outside), Some(Area::Cloud), Some(Area::Region));
+        let (o, c, r) = (Area::Outside, Area::Cloud, Area::Region);
         assert_eq!(areas, [("user", o), ("cloudfront", c), ("s3", r), ("apigateway", r), ("lambda", r), ("dynamodb", r), ("cognito", r), ("cloudwatch", r)]);
         assert!(m.azs.is_empty());
         assert_eq!([label(&m,"user","apigateway"), label(&m,"apigateway","lambda"), label(&m,"lambda","dynamodb"), label(&m,"cloudfront","s3"), label(&m,"cognito","apigateway"), label(&m,"lambda","cloudwatch")],
@@ -485,16 +483,51 @@ mod tests {
     }
 
     #[test]
-    fn only_lang_and_region_may_be_set() {
+    fn only_direction_lang_and_region_may_be_set() {
         for (k, v) in [("azs", "2"), ("nat", "2"), ("readers", "2"), ("colour", "2")] {
             let (m, d) = run(&format!("{B}set:\n  {k}: {v}\n"));
             assert!(m.is_none(), "{k}");
             assert_eq!(d.errors.len(), 1, "{k}: {:?}", d.errors);
-            assert_eq!((d.errors[0].code.as_str(), d.errors[0].allowed.clone()), ("UNKNOWN_SETTING", vec!["lang".to_string(), "region".to_string()]), "{k}");
+            assert_eq!((d.errors[0].code.as_str(), d.errors[0].allowed.clone()), ("UNKNOWN_SETTING", vec!["direction".to_string(), "lang".to_string(), "region".to_string()]), "{k}");
             assert_eq!(d.exit_code(), 1);
         }
         let (_, d) = run(&format!("{B}set:\n  region: us-east-1\n"));
         assert_eq!(d.errors[0].code, "BAD_SETTING");
+    }
+
+    // Breaks when the layout without a VPC does not read `set.direction`, or takes an unknown value as a default.
+    #[test]
+    fn direction_is_read_in_both_layouts() {
+        use crate::model::Axis;
+        let (m, d) = run(B);
+        assert!(d.errors.is_empty(), "{:?}", d.errors);
+        assert_eq!(m.unwrap().direction, None);
+        for (v, want) in [("right", Axis::Right), ("down", Axis::Down)] {
+            let (m, d) = run(&format!("{B}set:\n  direction: {v}\n"));
+            assert!(d.errors.is_empty(), "{v}: {:?}", d.errors);
+            assert_eq!(m.unwrap().direction, Some(want), "{v}");
+        }
+        for v in ["left", "Right", "up"] {
+            let (m, d) = run(&format!("{B}set:\n  direction: {v}\n"));
+            assert!(m.is_none(), "{v}");
+            assert_eq!(d.errors.len(), 1, "{v}: {:?}", d.errors);
+            let e = &d.errors[0];
+            assert_eq!((e.code.as_str(), e.at.as_deref(), e.got.as_deref()), ("BAD_SETTING", Some("set.direction"), Some(v)));
+            assert_eq!(e.allowed, ["down", "right"]);
+            assert_eq!(d.exit_code(), 1);
+        }
+        let (m, d) = run(&format!("{B}set:\n  colour: red\n"));
+        assert!(m.is_none());
+        assert_eq!(d.errors[0].code, "UNKNOWN_SETTING");
+        assert_eq!(d.errors[0].allowed, ["direction", "lang", "region"]);
+    }
+
+    // Breaks when `direction` is checked out of its place among the other settings.
+    #[test]
+    fn a_bad_direction_is_reported_after_unknown_keys_region_and_lang() {
+        let (_, d) = run(&format!("{B}set:\n  direction: up\n  lang: fr\n  region: us-east-1\n  azs: 2\n"));
+        let at: Vec<_> = d.errors.iter().map(|e| e.at.as_deref().unwrap()).collect();
+        assert_eq!(at, ["set.azs", "set.region", "set.lang", "set.direction"]);
     }
 
     #[test]

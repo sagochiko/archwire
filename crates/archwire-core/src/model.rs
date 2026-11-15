@@ -4,12 +4,30 @@
 use crate::def::Rel;
 use crate::rules::Lang;
 
-/// The frame a part outside the VPC belongs to.
+/// The subnet tier of a part inside the VPC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tier {
+    Public,
+    Private,
+}
+
+/// The frame a part belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Area {
     Outside,
     Cloud,
     Region,
+    /// On the VPC's side where traffic from outside comes in: the Internet Gateway.
+    VpcEdge,
+    /// In a subnet tier: per AZ when `Node.az` is Some, spanning the AZs when None.
+    Subnet(Tier),
+}
+
+/// The way main lines run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Axis {
+    Right,
+    Down,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -32,8 +50,8 @@ pub struct Node {
     pub part: String,
     /// The name written after the dot, e.g. "web" for "s3.web".
     pub tag: Option<String>,
-    /// Which frame the node belongs to, decided by inference. None in the VPC layout.
-    pub area: Option<Area>,
+    /// Which frame the node belongs to, decided by inference from its service.
+    pub area: Area,
     /// The part has a hole the definition has not answered yet, such as its kind. Always false
     /// in the VPC layout, whose holes are routes.
     pub undecided: bool,
@@ -60,4 +78,6 @@ pub struct Model {
     pub lang: Lang,
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
+    /// `set.direction`; None when it is not written.
+    pub direction: Option<Axis>,
 }

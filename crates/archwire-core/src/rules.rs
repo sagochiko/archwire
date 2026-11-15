@@ -23,6 +23,11 @@ pub enum Place { Single, Gateway, Span, PerAz, WriterReader }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lang { En, Ja }
 
+/// The part a derived service plays where traffic enters or leaves the VPC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DerivedRole { EntryGateway, EgressNat }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IconKind { Service, Resource }
@@ -72,6 +77,9 @@ pub struct Service {
     /// The rule that gives the reason for where the part is drawn; without it the scope decides.
     #[serde(default)]
     pub place_rule: Option<String>,
+    /// For a service inference adds: the part it plays at the VPC's edge.
+    #[serde(default)]
+    pub derived_role: Option<DerivedRole>,
 }
 
 /// The label and the reason a connection gets when its target has a given kind.
@@ -512,6 +520,26 @@ mod tests {
         let separate: Vec<_> = r.service_keys().into_iter().filter(|k| r.service(k).unwrap().separate_from_vpc).collect();
         assert_eq!(separate, ["apigateway", "cognito", "dynamodb", "lambda"]);
         assert!(!r.service("ecs").unwrap().kind_hole);
+    }
+
+    // Breaks when a gateway loses its derived role in the data, or a misspelt `derived_role` is silently dropped.
+    #[test]
+    fn derived_roles_mark_the_gateways() {
+        let r = Rules::builtin();
+        let marked: Vec<_> = r
+            .service_keys()
+            .into_iter()
+            .filter_map(|k| r.service(&k).unwrap().derived_role.map(|role| (k, role)))
+            .collect();
+        assert_eq!(marked, [("igw".to_string(), DerivedRole::EntryGateway), ("nat".to_string(), DerivedRole::EgressNat)]);
+        assert!(marked.iter().all(|(k, _)| r.service(k).unwrap().derived_only));
+
+        let [services, rules, labels, links] = builtin_files();
+        let from = "\nderived_role = \"entry_gateway\"";
+        assert!(services.contains(from));
+        let broken = services.replacen(from, "\nderived_roles = \"entry_gateway\"", 1);
+        let e = Rules::load(&broken, rules, labels, links).err().expect("a misspelt field was accepted");
+        assert_eq!(e[0].code, "SERVICES_PARSE");
     }
 
     fn builtin_files() -> [&'static str; 4] {

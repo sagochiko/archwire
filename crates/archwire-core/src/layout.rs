@@ -428,7 +428,7 @@ mod tests {
             region: None,
             part: format!("{service}.web"),
             tag: Some("web".into()),
-            area: None,
+            area: crate::infer::area_of(r.service(service).unwrap()),
             undecided: false,
         };
         let at = Rect { x: 0, y: 0, w: ICON, h: ICON };
