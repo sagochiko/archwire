@@ -11,6 +11,13 @@ pub mod place;
 pub mod route;
 pub mod rules;
 
+mod audit;
+mod grid;
+mod labels;
+mod lines;
+mod measure;
+mod path;
+
 use diag::{Diagnostics, Problem, Versions};
 use engine::Engine;
 use model::Model;
@@ -279,7 +286,7 @@ mod tests {
             let p = place::place(&model, &rules).unwrap();
             let (wires, notes) = route::route_planned(&model, &p.layout, &rules, &p.lines);
             assert!(notes.iter().all(|n| !n.contains("edge-")), "{notes:?}");
-            if let Some((d, line, label)) = route::closest_line_to_label(&p.layout, &wires) {
+            if let Some((d, line, label)) = audit::closest_line_to_label(&p.layout, &wires) {
                 assert!(d >= 3, "{line} runs {d}px from the label of {label}\n{src}");
             }
         }

@@ -13,8 +13,9 @@
 use crate::def::Rel;
 use crate::diag::Problem;
 use crate::layout::{icon, Frame, FrameKind, Icon, Layout, Rect};
+use crate::measure::{frame_name_box, name_area, name_text_width, wire_text_width};
 use crate::model::{Area, Model};
-use crate::route::{frame_name_box, name_area, name_text_width, wire_text_width, Bend, LinePlan, Side};
+use crate::route::{Bend, LinePlan, Side};
 use crate::rules::Rules;
 
 /// The least distance between the centres of two neighbouring columns.
@@ -628,7 +629,8 @@ mod tests {
     use super::*;
     use crate::layout::Rect;
     use crate::layout::Icon;
-    use crate::route::{name_area, port_point, route_planned, Bend, Side, Wire, NAME_CHARS, NAME_DRAWN, NAME_WIDE_CHARS, NAME_WIDE_DRAWN};
+    use crate::measure::{name_area, NAME_CHARS, NAME_DRAWN, NAME_WIDE_CHARS, NAME_WIDE_DRAWN};
+    use crate::route::{port_point, route_planned, Bend, Side, Wire};
 
     fn placed(src: &str) -> (Model, Placement) {
         let r = Rules::builtin();
@@ -1379,7 +1381,7 @@ set:
                 failed.push(format!("route: {notes:?}\n{src}"));
             }
             // A line keeps at least 3 pixels from every other line's label.
-            if let Some((d, line, label)) = crate::route::closest_line_to_label(&p.layout, &wires).filter(|c| c.0 < 3) {
+            if let Some((d, line, label)) = crate::audit::closest_line_to_label(&p.layout, &wires).filter(|c| c.0 < 3) {
                 failed.push(format!("label: {line} runs {d}px from the label of {label}\n{src}"));
             }
         }
