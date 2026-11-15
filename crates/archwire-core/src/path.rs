@@ -5,7 +5,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 
 use crate::layout::{Icon, Layout, Rect};
-use crate::lines::Spec;
+use crate::lines::Line;
 use crate::measure::Measure;
 use crate::route::{port_point, Ctx, Port, Side, LEVEL, RANK_AUTO, RANK_MAIN};
 
@@ -436,7 +436,7 @@ pub(crate) fn draft(exit: Side, entry: Side, shape: Shape, rank: u8) -> Draft {
 impl<'a> Ctx<'a> {
     /// A line between two icons at the same height that leaves and enters sideways runs straight:
     /// the end alone on its side moves level with the other end.
-    pub(crate) fn straighten_level_lines(&self, specs: &[Spec], ports: &mut [(Port, Port)]) {
+    pub(crate) fn straighten_level_lines(&self, specs: &[Line], ports: &mut [(Port, Port)]) {
         let alone = |ports: &[(Port, Port)], me: usize, id: &str, side: Side| {
             !specs.iter().zip(ports).enumerate().any(|(j, (o, (e, n)))| {
                 j != me && ((o.from == id && e.side == side) || (o.to == id && n.side == side))
@@ -458,7 +458,7 @@ impl<'a> Ctx<'a> {
     }
 
     /// A path for the line with these ports: its shape if that is clear, else a search.
-    fn try_route(&self, s: &Spec, d: &Draft, (exit, entry): (Port, Port), placed: &[Vec<Pt>], search: bool) -> Option<Vec<Pt>> {
+    fn try_route(&self, s: &Line, d: &Draft, (exit, entry): (Port, Port), placed: &[Vec<Pt>], search: bool) -> Option<Vec<Pt>> {
         let ep = port_point(self.layout.rect(&s.from), exit);
         let np = port_point(self.layout.rect(&s.to), entry);
         let (out, inward) = (outward(exit.side), reverse(outward(entry.side)));
@@ -474,7 +474,7 @@ impl<'a> Ctx<'a> {
     }
 
     /// The final path, or Err with the best path there is when none is acceptable.
-    pub(crate) fn lay(&self, s: &Spec, d: &Draft, ports: (Port, Port), placed: &[Vec<Pt>]) -> Result<Vec<Pt>, Vec<Pt>> {
+    pub(crate) fn lay(&self, s: &Line, d: &Draft, ports: (Port, Port), placed: &[Vec<Pt>]) -> Result<Vec<Pt>, Vec<Pt>> {
         self.try_route(s, d, ports, placed, true).ok_or_else(|| {
             let ep = port_point(self.layout.rect(&s.from), ports.0);
             let np = port_point(self.layout.rect(&s.to), ports.1);
@@ -488,7 +488,7 @@ impl<'a> Ctx<'a> {
 
     /// For a line its planned sides cannot carry: a search between the middles of sides no other
     /// line uses, nearest the straight line first. Returns the path and the new ports.
-    pub(crate) fn on_free_sides(&self, specs: &[Spec], me: usize, ports: &[(Port, Port)], placed: &[Vec<Pt>]) -> Option<(Vec<Pt>, (Port, Port))> {
+    pub(crate) fn on_free_sides(&self, specs: &[Line], me: usize, ports: &[(Port, Port)], placed: &[Vec<Pt>]) -> Option<(Vec<Pt>, (Port, Port))> {
         let s = &specs[me];
         let taken = |id: &str, side: Side| {
             specs.iter().zip(ports).enumerate().any(|(j, (o, (e, n)))| {
@@ -506,13 +506,13 @@ impl<'a> Ctx<'a> {
     }
 
     /// Whether a draft can be drawn past the icons, labels and frame names, with its ports in the middle of their sides.
-    pub(crate) fn fits(&self, s: &Spec, d: &Draft) -> bool {
+    pub(crate) fn fits(&self, s: &Line, d: &Draft) -> bool {
         let exit = self.port(&s.from, d.exit, d.exit_pin.unwrap_or(50));
         let entry = self.port(&s.to, d.entry, d.entry_pin.unwrap_or(50));
         self.try_route(s, d, (exit, entry), &[], false).is_some()
     }
 
-    pub(crate) fn first_fit(&self, s: &Spec, candidates: Vec<Draft>) -> Draft {
+    pub(crate) fn first_fit(&self, s: &Line, candidates: Vec<Draft>) -> Draft {
         candidates.iter().find(|d| self.fits(s, d)).copied().unwrap_or(candidates[0])
     }
 
@@ -520,7 +520,7 @@ impl<'a> Ctx<'a> {
     /// any two sides, that fits off the sides the main lines in `drafts` use, else the first
     /// candidate that fits at all. The other lines keep off the main lines' sides, where they can,
     /// so those stay centred and straight.
-    pub(crate) fn plan_rest(&self, specs: &[Spec], rest: &[usize], drafts: &mut [Option<Draft>]) {
+    pub(crate) fn plan_rest(&self, specs: &[Line], rest: &[usize], drafts: &mut [Option<Draft>]) {
         let used: Vec<(&str, Side)> = specs
             .iter()
             .zip(drafts.iter())
@@ -568,7 +568,7 @@ impl<'a> Ctx<'a> {
     /// Positions on each side, from `slots`.
     /// Lines on a top or bottom side are ordered by where their other end lies left to right; on a
     /// left or right side, top to bottom, and the farther first among ends at the same height.
-    pub(crate) fn share_out(&self, specs: &[Spec], drafts: &[Draft]) -> Vec<(Port, Port)> {
+    pub(crate) fn share_out(&self, specs: &[Line], drafts: &[Draft]) -> Vec<(Port, Port)> {
         type Key = (i32, i32, usize);
         type Ends = Vec<(Key, usize, bool)>;
         let mut sides: BTreeMap<(&str, u8), Ends> = BTreeMap::new();

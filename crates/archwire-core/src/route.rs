@@ -16,7 +16,7 @@ use crate::def::Rel;
 use crate::grid::IGW;
 use crate::labels::{path_length, LabelSpot};
 use crate::layout::{Icon, Layout, Rect};
-use crate::lines::Spec;
+use crate::lines::{gather, label_parts, Line};
 use crate::measure::Measure;
 use crate::model::{Model, Node};
 use crate::path::{draft, outward, reverse, shape_path, Draft, Pt, Scene, Shape};
@@ -118,12 +118,7 @@ pub(crate) struct Ctx<'a> {
 /// usual `candidates`; `plan()` is never called. Reads only frames and icons the layout has.
 pub fn route_planned(model: &Model, layout: &Layout, rules: &Rules, plans: &[LinePlan]) -> (Vec<Wire>, Vec<String>) {
     let ctx = Ctx { model, layout, rules, scene: Scene::new(layout, Measure::Flow), measure: Measure::Flow };
-    let (mut specs, merged_across_azs) = ctx.group();
-    let mut notes = Vec::new();
-    if merged_across_azs {
-        notes.push(rules.text("note.cross_az_merged", model.lang));
-    }
-    ctx.bundle_side_lines(&mut specs, &mut notes);
+    let (specs, notes) = gather(model, layout, rules);
     let mut drafts: Vec<Option<Draft>> = specs
         .iter()
         .map(|s| {
@@ -161,7 +156,7 @@ pub fn route_planned(model: &Model, layout: &Layout, rules: &Rules, plans: &[Lin
 }
 
 /// Shares out the ports, lays every line, places the labels and runs the final check.
-pub(crate) fn draw(ctx: &Ctx, specs: &[Spec], drafts: &[Draft], mut notes: Vec<String>) -> (Vec<Wire>, Vec<String>) {
+pub(crate) fn draw(ctx: &Ctx, specs: &[Line], drafts: &[Draft], mut notes: Vec<String>) -> (Vec<Wire>, Vec<String>) {
     let (model, layout, rules, lang) = (ctx.model, ctx.layout, ctx.rules, ctx.model.lang);
     let mut ports = ctx.share_out(specs, drafts);
     ctx.straighten_level_lines(specs, &mut ports);
@@ -202,11 +197,11 @@ pub(crate) fn draw(ctx: &Ctx, specs: &[Spec], drafts: &[Draft], mut notes: Vec<S
         let level = (fr.y - tr.y).abs() <= LEVEL;
         // A line of no length was never laid, and its note already names it: there is no spot along it.
         if path_length(&paths[i]) == 0 {
-            let text = ctx.label_parts(s).join(" ");
+            let text = label_parts(s, model, rules).join(" ");
             spots[i] = Some(LabelSpot { text, above: level, flip: false, at: None, area: None, clear: true });
             continue;
         }
-        let spot = ctx.place_label(&ctx.label_parts(s), (&paths, i), level, near_source, &areas);
+        let spot = ctx.place_label(&label_parts(s, model, rules), (&paths, i), level, near_source, &areas);
         areas.extend(spot.area);
         spots[i] = Some(spot);
     }
@@ -221,7 +216,7 @@ pub(crate) fn draw(ctx: &Ctx, specs: &[Spec], drafts: &[Draft], mut notes: Vec<S
             id: edge_id(&s.from, &s.to),
             from: s.from.clone(),
             to: s.to.clone(),
-            style: match (s.hole, s.rel) {
+            style: match (s.hole.is_some(), s.rel) {
                 (true, _) => WireStyle::Hole,
                 (_, Rel::Main) => WireStyle::Main,
                 (_, Rel::Aux) => WireStyle::Aux,
@@ -1243,7 +1238,6 @@ mod tests {
 
     // Fails if a line already merged across AZs is counted again by the step that bundles side lines into one service, and dropped.
     #[test]
-    #[ignore = "fixed when lines are gathered in one step"]
     fn web_lines_merged_across_azs_survive_bundling() {
         let src = format!("{WEB2}set:\n  lang: ja\n");
         let r = Rules::builtin();

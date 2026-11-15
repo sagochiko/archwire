@@ -1,7 +1,7 @@
 //! Planning the lines of the layout with a VPC: the shapes it is read by, before the search.
 
 use crate::layout::{Layout, Rect};
-use crate::lines::Spec;
+use crate::lines::{gather, Line};
 use crate::measure::{label_area, Measure};
 use crate::model::{Model, Node};
 use crate::path::{center, draft, facing, opposite, Draft, Scene, Shape};
@@ -18,12 +18,7 @@ const RANK_NAT: u8 = 1;
 
 pub fn route(model: &Model, layout: &Layout, rules: &Rules) -> (Vec<Wire>, Vec<String>) {
     let ctx = Ctx { model, layout, rules, scene: Scene::new(layout, Measure::Grid), measure: Measure::Grid };
-    let lang = model.lang;
-    let (specs, merged_across_azs) = ctx.group();
-    let mut notes = Vec::new();
-    if merged_across_azs {
-        notes.push(rules.text("note.cross_az_merged", lang));
-    }
+    let (specs, notes) = gather(model, layout, rules);
     let drafts = ctx.plan(&specs);
     draw(&ctx, &specs, &drafts, notes)
 }
@@ -36,7 +31,7 @@ impl<'a> Ctx<'a> {
     }
 
     /// Sides and shape for every line.
-    fn plan(&self, specs: &[Spec]) -> Vec<Draft> {
+    fn plan(&self, specs: &[Line]) -> Vec<Draft> {
         let mut drafts: Vec<Option<Draft>> = vec![None; specs.len()];
         let (mut nat_in, mut nat_out, mut side, mut rest) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for (i, s) in specs.iter().enumerate() {
@@ -148,7 +143,7 @@ impl<'a> Ctx<'a> {
 
     /// Into the NAT gateway of the same AZ: sideways toward it and up into its bottom, or, if
     /// that passes over a frame name, up the gap between the AZ and subnet frames into its far side.
-    fn nat_in_variants(&self, s: &Spec) -> Vec<Draft> {
+    fn nat_in_variants(&self, s: &Line) -> Vec<Draft> {
         let (fr, tr) = (self.layout.rect(&s.from), self.layout.rect(&s.to));
         let h = facing(fr, tr);
         let mut v = vec![draft(h, Side::Bottom, Shape::Elbow, RANK_NAT)];
@@ -165,7 +160,7 @@ impl<'a> Ctx<'a> {
 
     /// From a NAT gateway to the Internet Gateway: up from its top and into the gateway's side,
     /// or, if that passes over a frame name, out its far side and up the gap between the VPC and AZ frames.
-    fn nat_out_variants(&self, s: &Spec) -> Vec<Draft> {
+    fn nat_out_variants(&self, s: &Line) -> Vec<Draft> {
         let (fr, tr) = (self.layout.rect(&s.from), self.layout.rect(&s.to));
         let h = facing(tr, fr);
         let mut v = vec![draft(Side::Top, h, Shape::Elbow, RANK_NAT)];
@@ -182,7 +177,7 @@ impl<'a> Ctx<'a> {
 
     /// Gives every member the first variant that fits for all of them, so AZs that mirror each
     /// other get mirrored lines; members no common variant fits get their own first fit.
-    fn choose_together(&self, specs: &[Spec], members: &[usize], drafts: &mut [Option<Draft>], variants: impl Fn(usize) -> Vec<Draft>) {
+    fn choose_together(&self, specs: &[Line], members: &[usize], drafts: &mut [Option<Draft>], variants: impl Fn(usize) -> Vec<Draft>) {
         let all: Vec<Vec<Draft>> = members.iter().map(|&i| variants(i)).collect();
         let common = (0..all.iter().map(Vec::len).min().unwrap_or(0))
             .find(|&v| members.iter().zip(&all).all(|(&i, vs)| self.fits(&specs[i], &vs[v])));

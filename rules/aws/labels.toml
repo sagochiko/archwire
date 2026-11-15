@@ -80,6 +80,11 @@ ja = "経路未定"
 en = "(all AZs)"
 ja = "（全 AZ から）"
 
+# `{azs}` is the last two characters of each AZ name the senders are in, joined by parts_separator.
+[from_azs]
+en = "(from {azs})"
+ja = "（{azs} から）"
+
 [via_endpoint]
 en = "(via VPC endpoint)"
 ja = "（VPC エンドポイント経由）"
@@ -127,6 +132,11 @@ en = "The label of the line {line} could not be placed clear of every icon, text
 ja = "{line} の線のラベルは、アイコン、文字、ほかの線のどれかを避けて置けなかった。図で確かめること。"
 
 # `{parts}` lists part names; it names the parts, not the line's id.
+# `{zone}` is the target's AZ, `{to}` the target, `{service}` the sending service, `{from}` the sender of the line drawn.
+["note.cross_az_fallback"]
+en = "In {zone}, {to} has no {service} in its own zone, so the line from {from} in another zone is drawn."
+ja = "{zone} の {to} には同じ AZ の {service} が無いので、別の AZ の {from} からの線を描く。"
+
 ["note.merged_side_lines"]
 en = "The line from {from} to {to} stands for the lines from {parts}."
 ja = "{from} から {to} への線は、{parts} からの線をまとめて表す。"
