@@ -4,6 +4,14 @@
 use crate::def::Rel;
 use crate::rules::Lang;
 
+/// The frame a part outside the VPC belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Area {
+    Outside,
+    Cloud,
+    Region,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Node {
     /// e.g. "cloudfront", "ecs-1a", "aurora-1c", "igw", "nat-1a".
@@ -20,6 +28,12 @@ pub struct Node {
     /// The Region the part lives in when it is not the diagram's Region, e.g. "us-east-1"
     /// for a certificate used by CloudFront.
     pub region: Option<String>,
+    /// The definition part this node stands for: "s3.web", "ecs" for "ecs-1a", the service key for added nodes.
+    pub part: String,
+    /// The name written after the dot, e.g. "web" for "s3.web".
+    pub tag: Option<String>,
+    /// Which frame the node belongs to, decided by inference. None in the VPC layout.
+    pub area: Option<Area>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

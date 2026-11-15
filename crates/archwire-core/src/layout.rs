@@ -293,10 +293,14 @@ pub fn layout(model: &Model, rules: &Rules) -> Layout {
     Layout { frames, icons }
 }
 
-/// The service (or kind) label, then the role word and a Region other than the diagram's, each on its own line.
-fn icon(n: &Node, s: &Service, rules: &Rules, lang: Lang, rect: Rect, parent: Option<String>) -> Icon {
+/// The service (or kind) label, then the name after the dot, the role word and a Region other
+/// than the diagram's, each on its own line.
+pub(crate) fn icon(n: &Node, s: &Service, rules: &Rules, lang: Lang, rect: Rect, parent: Option<String>) -> Icon {
     let key = n.option.as_ref().and_then(|o| s.options.get(o)).map_or(&s.label, |o| &o.label);
     let mut label = rules.text(key, lang);
+    if let Some(tag) = &n.tag {
+        label = format!("{label}\n{tag}");
+    }
     if let Some(role) = &n.role {
         label = format!("{label}\n{}", rules.text(role, lang));
     }
@@ -406,6 +410,28 @@ mod tests {
         assert!(cw.y + 60 < region.y + region.h && region.y + region.h < l.rect("aws-cloud").y + l.rect("aws-cloud").h);
         let aux = lay("flows:\n  - user -> alb -> ecs\n  - alb ~> cloudwatch\n");
         assert_eq!(aux.rect("cloudwatch").y, aux.rect("alb").y);
+    }
+
+    #[test]
+    fn an_icon_shows_the_name_after_the_dot_below_the_service() {
+        let r = Rules::builtin();
+        let n = |service: &str, role: Option<&str>| Node {
+            id: format!("{service}.web"),
+            service: service.into(),
+            option: None,
+            az: None,
+            role: role.map(String::from),
+            added: false,
+            region: None,
+            part: format!("{service}.web"),
+            tag: Some("web".into()),
+            area: None,
+        };
+        let at = Rect { x: 0, y: 0, w: ICON, h: ICON };
+        let s3 = icon(&n("s3", None), r.service("s3").unwrap(), &r, Lang::En, at, None);
+        assert_eq!((s3.label.as_str(), s3.lines), ("Amazon S3\nweb", 2));
+        let aurora = icon(&n("aurora", Some("writer")), r.service("aurora").unwrap(), &r, Lang::En, at, None);
+        assert_eq!((aurora.label.as_str(), aurora.lines), ("Amazon Aurora\nweb\nWriter", 3));
     }
 
     #[test]

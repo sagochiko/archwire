@@ -59,10 +59,11 @@ pub fn infer(def: &Definition, rules: &Rules) -> (Option<Model>, Diagnostics) {
     };
 
     let names_ok = check_names(def, rules, &mut diag.errors);
+    let untagged = check_no_tags(def, &mut diag.errors);
     let settings = check_settings(def, &mut diag.errors);
     let routes = find_routes(def, rules);
     check_choices(def, &routes, &mut diag.errors);
-    if names_ok {
+    if names_ok && untagged {
         check_shape(def, rules, &mut diag.errors);
     }
     if !diag.errors.is_empty() {
@@ -86,15 +87,15 @@ fn check_names(def: &Definition, rules: &Rules, errors: &mut Vec<Problem>) -> bo
             continue;
         }
         seen_at.push(&r.at);
-        match rules.service(&r.name).filter(|s| !s.derived_only) {
+        match rules.service(&r.service).filter(|s| !s.derived_only) {
             None => {
                 ok = false;
                 errors.push(problem(
                     "UNKNOWN_SERVICE",
                     &r.at,
-                    &r.name,
+                    &r.service,
                     writable.clone(),
-                    format!("unknown service `{}`", r.name),
+                    format!("unknown service `{}`", r.service),
                 ));
             }
             Some(s) => {
@@ -113,6 +114,26 @@ fn check_names(def: &Definition, rules: &Rules, errors: &mut Vec<Problem>) -> bo
         }
     }
     ok
+}
+
+/// The VPC layout draws one part per service, so a part with a name after the dot stops here,
+/// once per part. Returns false if any part has one.
+fn check_no_tags(def: &Definition, errors: &mut Vec<Problem>) -> bool {
+    let mut seen_at: Vec<&str> = Vec::new();
+    for r in def.links.iter().flat_map(|l| [&l.from, &l.to]).filter(|r| r.tag.is_some()) {
+        if seen_at.contains(&r.at.as_str()) {
+            continue;
+        }
+        seen_at.push(&r.at);
+        errors.push(problem(
+            "UNSUPPORTED",
+            &r.at,
+            &r.name,
+            Vec::new(),
+            "named parts such as `s3.web` are not supported together with VPC services yet".into(),
+        ));
+    }
+    seen_at.is_empty()
 }
 
 fn check_settings(def: &Definition, errors: &mut Vec<Problem>) -> Settings {
@@ -302,8 +323,20 @@ fn derived(rules: &Rules, lang: Lang, target: &str, id: &str, added: bool) -> De
     }
 }
 
+/// `service` is both the service key and the written part: the VPC layout has no named parts.
 fn node(id: String, service: &str, option: Option<String>, az: Option<usize>, role: Option<&str>, added: bool) -> Node {
-    Node { id, service: service.into(), option, az, role: role.map(String::from), added, region: None }
+    Node {
+        id,
+        service: service.into(),
+        option,
+        az,
+        role: role.map(String::from),
+        added,
+        region: None,
+        part: service.into(),
+        tag: None,
+        area: None,
+    }
 }
 
 fn build(def: &Definition, rules: &Rules, s: &Settings, routes: &[Route], diag: &mut Diagnostics) -> Model {
@@ -742,6 +775,21 @@ mod tests {
         assert!(d.errors.is_empty(), "{:?}", d.errors);
         assert!(m.is_some());
         assert_eq!(d.exit_code(), 0);
+    }
+
+    #[test]
+    fn named_parts_are_not_supported_with_vpc_services_yet() {
+        let (m, d) = run("flows:\n  - user -> cloudfront -> alb -> ecs\n  - cloudfront -> s3.web\n");
+        assert!(m.is_none());
+        assert_eq!((d.errors[0].code.as_str(), d.errors[0].at.as_deref(), d.errors[0].got.as_deref()), ("UNSUPPORTED", Some("flows[1][1]"), Some("s3.web")));
+    }
+
+    #[test]
+    fn every_node_knows_the_part_it_stands_for() {
+        let m = run("flows:\n  - user -> alb -> ecs\n  - ecs -> internet\n").0.unwrap();
+        let part = |id: &str| m.nodes.iter().find(|n| n.id == id).unwrap().part.clone();
+        assert_eq!([part("ecs-1a"), part("nat-1c"), part("alb"), part("igw")], ["ecs", "nat", "alb", "igw"]);
+        assert!(m.nodes.iter().all(|n| n.tag.is_none() && n.area.is_none()));
     }
 
     #[test]

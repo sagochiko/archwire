@@ -1,7 +1,7 @@
 //! Single-place edits of a definition, done as line operations so that every
 //! other line, comment and line ending stays byte for byte the same.
 
-use crate::def::split_flow;
+use crate::def::{parse_part, split_flow};
 use crate::diag::Problem;
 
 fn bad(code: &str, at: &str, message: String) -> Problem {
@@ -63,6 +63,9 @@ pub fn set_value(text: &str, at: &str, value: &str) -> Result<String, Problem> {
     let target = parse_at(at).ok_or_else(|| bad_path(at))?;
     if value.trim().is_empty() || value.contains(['\n', '\r', '#']) {
         return Err(bad("BAD_VALUE", at, "a value must be one non-empty line without `#`".into()));
+    }
+    if matches!(target, Target::Part(..)) && parse_part(value, at.into()).is_none() {
+        return Err(bad("BAD_VALUE", at, "a part is service[.name][(kind)]".into()));
     }
     let mut lines: Vec<String> = text.split_inclusive('\n').map(str::to_string).collect();
     let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
@@ -234,6 +237,20 @@ mod tests {
     fn a_flow_line_without_its_leading_dash_is_a_bad_path() {
         let src = "flows:\n  a -> b -> c\n";
         assert_eq!(set_value(src, "flows[0][0]", "x").unwrap_err().code, "BAD_PATH");
+    }
+
+    #[test]
+    fn a_replaced_part_must_be_a_part_name() {
+        let src = "flows:\n  - user -> s3.my-web\n";
+        assert_eq!(set_value(src, "flows[0][1]", "s3.uploads").unwrap(), "flows:\n  - user -> s3.uploads\n");
+        assert_eq!(set_value(src, "flows[0][1]", "apigateway.public(http)").unwrap(), "flows:\n  - user -> apigateway.public(http)\n");
+        for value in ["s3.foo--bar", "s3 -> lambda", "s3.web-", "s3.My"] {
+            assert_eq!(set_value(src, "flows[0][1]", value).unwrap_err().code, "BAD_VALUE", "{value}");
+        }
+        let out = set_value("flows:\n  - user -> s3.a-b -> lambda\n", "flows[0][2]", "dynamodb").unwrap();
+        assert_eq!(out, "flows:\n  - user -> s3.a-b -> dynamodb\n");
+        let out = set_value("flows:\n  - user -> apigateway.public\n", "choose.kind.apigateway.public", "http").unwrap();
+        assert_eq!(out, "flows:\n  - user -> apigateway.public\nchoose:\n  kind.apigateway.public: http\n");
     }
 
     #[test]

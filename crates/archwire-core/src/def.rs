@@ -13,9 +13,17 @@ pub enum Rel {
     Assoc,
 }
 
+/// The longest name a part may carry after the dot.
+pub const MAX_TAG: usize = 24;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ref {
+    /// As written, e.g. "s3.web" or "apigateway". A part is identified by this.
     pub name: String,
+    /// The part before the dot, e.g. "s3".
+    pub service: String,
+    /// The part after the dot, e.g. "web".
+    pub tag: Option<String>,
     pub option: Option<String>,
     /// Position of this part, e.g. `flows[0][1]`.
     pub at: String,
@@ -63,18 +71,40 @@ fn is_word(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
-/// `name` or `name(option)`.
-fn parse_part(text: &str, at: String) -> Option<Ref> {
+/// `[a-z0-9-]+`, not starting or ending with a hyphen. `--` is never part of a name: in a flow
+/// line it is always the association operator.
+fn is_tag(s: &str) -> bool {
+    !s.is_empty()
+        && !s.contains("--")
+        && !s.starts_with('-')
+        && !s.ends_with('-')
+        && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// `service[.tag][(kind)]`. The length of the tag is not checked here.
+pub(crate) fn parse_part(text: &str, at: String) -> Option<Ref> {
     let t = text.trim();
-    if let Some(open) = t.find('(') {
-        let name = &t[..open];
-        let option = t[open + 1..].strip_suffix(')')?;
-        if is_word(name) && is_word(option) {
-            return Some(Ref { name: name.into(), option: Some(option.into()), at });
-        }
+    let (base, option) = match t.find('(') {
+        Some(open) => (&t[..open], Some(t[open + 1..].strip_suffix(')')?)),
+        None => (t, None),
+    };
+    if option.is_some_and(|o| !is_word(o)) {
         return None;
     }
-    is_word(t).then(|| Ref { name: t.into(), option: None, at })
+    let (service, tag) = match base.split_once('.') {
+        Some((service, tag)) => (service, Some(tag)),
+        None => (base, None),
+    };
+    if !is_word(service) || tag.is_some_and(|g| !is_tag(g)) {
+        return None;
+    }
+    Some(Ref {
+        name: base.into(),
+        service: service.into(),
+        tag: tag.map(String::from),
+        option: option.map(String::from),
+        at,
+    })
 }
 
 /// Splits `a -> b ~> c` into parts and the operators between them.
@@ -110,7 +140,7 @@ fn parse_flow_line(body: &str, index: usize, errors: &mut Vec<Problem>) -> Vec<L
             &at,
             body,
             &[],
-            "a flow line is `- a -> b ~> c -- d` with parts named [a-z0-9_]+ or name(kind)".into(),
+            "a flow line is `- a -> b ~> c -- d`; a part is service[.name][(kind)], with service and kind in [a-z0-9_] and name in [a-z0-9-], not starting or ending with a hyphen".into(),
         ));
         Vec::new()
     };
@@ -124,6 +154,22 @@ fn parse_flow_line(body: &str, index: usize, errors: &mut Vec<Problem>) -> Vec<L
             Some(r) => refs.push(r),
             None => return bad(errors),
         }
+    }
+    let mut too_long = false;
+    for r in &refs {
+        if let Some(tag) = r.tag.as_deref().filter(|g| g.chars().count() > MAX_TAG) {
+            too_long = true;
+            errors.push(problem(
+                "NAME_TOO_LONG",
+                &r.at,
+                tag,
+                &[],
+                format!("a part name after the dot is at most {MAX_TAG} characters"),
+            ));
+        }
+    }
+    if too_long {
+        return Vec::new();
     }
     let mut links = Vec::new();
     for (k, rel) in rels.into_iter().enumerate() {
@@ -402,6 +448,40 @@ mod tests {
     fn option_reaches_earlier_and_later_bare_mentions() {
         let d = parse("flows:\n  - alb -> ecs(fargate)\n  - ecs -> aurora\n").unwrap();
         assert_eq!(d.links[1].from.option.as_deref(), Some("fargate"));
+    }
+
+    #[test]
+    fn named_parts_follow_the_grammar() {
+        let one = |part: &str| parse(&format!("flows:\n  - user -> {part}\n"));
+        let r = one("s3.web").unwrap().links[0].to.clone();
+        assert_eq!((r.name.as_str(), r.service.as_str(), r.tag.as_deref()), ("s3.web", "s3", Some("web")));
+        let r = one("apigateway.public(http)").unwrap().links[0].to.clone();
+        assert_eq!((r.service.as_str(), r.tag.as_deref(), r.option.as_deref()), ("apigateway", Some("public"), Some("http")));
+        assert_eq!(one("lambda.resize-1").unwrap().links[0].to.tag.as_deref(), Some("resize-1"));
+        let user = one("s3").unwrap().links[0].from.clone();
+        assert_eq!((user.service.as_str(), user.tag.as_deref()), ("user", None));
+        assert!(one("s3.abcdefghijklmnopqrstuvwx").is_ok());
+
+        for bad in ["s3.", "s3.-web", "s3.web-", "s3.Web", "s3.my_web", "s3.a.b", ".web", "S3.web", "s3.web-->x"] {
+            let e = one(bad).unwrap_err();
+            assert_eq!((e[0].code.as_str(), e[0].at.as_deref()), ("BAD_SYNTAX", Some("flows[0]")), "{bad}");
+            assert!(e[0].message.contains("[a-z0-9-]"), "{bad}");
+        }
+
+        let e = one("s3.abcdefghijklmnopqrstuvwxy").unwrap_err();
+        assert_eq!(
+            (e[0].code.as_str(), e[0].at.as_deref(), e[0].got.as_deref(), e[0].allowed.len()),
+            ("NAME_TOO_LONG", Some("flows[0][1]"), Some("abcdefghijklmnopqrstuvwxy"), 0)
+        );
+        assert_eq!(e[0].message, format!("a part name after the dot is at most {MAX_TAG} characters"));
+
+        let d = one("s3.foo--bar").unwrap();
+        assert_eq!(d.links.len(), 2);
+        let l = &d.links[1];
+        assert_eq!((l.from.name.as_str(), l.to.name.as_str(), l.rel), ("s3.foo", "bar", Rel::Assoc));
+
+        let d = parse("flows:\n  - user -> apigateway(http)\n  - user -> apigateway.admin(rest)\n").unwrap();
+        assert_eq!(d.links.len(), 2);
     }
 
     #[test]

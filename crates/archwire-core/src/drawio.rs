@@ -60,7 +60,7 @@ pub fn write(model: &Model, layout: &Layout, wires: &[Wire], diag: &Diagnostics,
             IconKind::Service => format!("fontColor=#16191F;fillColor={};strokeColor=#ffffff;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=12;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.{shape}", s.color),
             IconKind::Resource => format!("fontColor=#16191F;fillColor={};strokeColor=none;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=12;aspect=fixed;shape=mxgraph.aws4.{shape}", s.color),
         };
-        let reasons: Vec<&Derived> = diag.derived.iter().filter(|d| d.target == node.id || d.target == node.service).collect();
+        let reasons: Vec<&Derived> = diag.derived.iter().filter(|d| d.target == node.id || d.target == node.part).collect();
         vertex(&mut out, &i.id, &i.label, node.added, &reasons, &style, &i.parent, i.rect, origin(&i.parent));
     }
 
@@ -285,6 +285,50 @@ mod tests {
         // Left where it was.
         assert!(line("edge-igw-to-alb").contains("<mxGeometry x=\"-0.5\""));
         assert!(line("edge-ecs-1a-to-aurora-1a").contains("<mxGeometry relative=\"1\""));
+    }
+
+    #[test]
+    fn a_reason_reaches_only_the_part_it_names() {
+        use crate::diag::{Derived, Diagnostics};
+        use crate::layout::{Icon, Layout, Rect};
+        use crate::model::{Model, Node};
+        use crate::rules::{Lang, Rules};
+        let rules = Rules::builtin();
+        let node = |id: &str, tag: Option<&str>| Node {
+            id: id.into(),
+            service: "s3".into(),
+            option: None,
+            az: None,
+            role: None,
+            added: false,
+            region: None,
+            part: id.into(),
+            tag: tag.map(String::from),
+            area: None,
+        };
+        let model = Model {
+            region: "ap-northeast-1".into(),
+            azs: Vec::new(),
+            lang: Lang::En,
+            nodes: vec![node("s3", None), node("s3.web", Some("web"))],
+            edges: Vec::new(),
+        };
+        let icon = |id: &str, x: i32| Icon { id: id.into(), label: id.into(), lines: 1, rect: Rect { x, y: 0, w: 60, h: 60 }, parent: None };
+        let layout = Layout { frames: Vec::new(), icons: vec![icon("s3", 0), icon("s3.web", 200)] };
+        let r = rules.rule("regional-service-outside-vpc");
+        let why = Derived {
+            target: "s3".into(),
+            added: false,
+            kind: r.kind.clone(),
+            rule: "regional-service-outside-vpc".into(),
+            reason: r.reason_en.clone(),
+            source: r.source.clone(),
+        };
+        let diag = Diagnostics { derived: vec![why], ..Default::default() };
+        let x = super::write(&model, &layout, &[], &diag, &rules);
+        let cell = |id: &str| x.split("<object ").find(|s| s.starts_with(&format!("id=\"{id}\""))).unwrap().split('>').next().unwrap().to_string();
+        assert!(cell("s3").contains("rule=\"regional-service-outside-vpc\""));
+        assert!(!cell("s3.web").contains("rule="));
     }
 
     #[test]
