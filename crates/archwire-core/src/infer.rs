@@ -210,7 +210,8 @@ pub(crate) fn area_of(service: &Service) -> Area {
         (Scope::Regional, _, _) => Area::Region,
         (Scope::Vpc, Place::Gateway, _) => Area::VpcEdge,
         (Scope::Vpc, _, Some(Subnet::Private)) => Area::Subnet(Tier::Private),
-        // Like the rows `build` lays out: a VPC part that is not private is in the public tier.
+        // Loading the rules data stops a VPC service that is neither a gateway nor in a subnet,
+        // so `None` never reaches here.
         (Scope::Vpc, _, Some(Subnet::Public) | None) => Area::Subnet(Tier::Public),
     }
 }

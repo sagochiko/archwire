@@ -261,6 +261,14 @@ impl Rules {
             if let Some(id) = s.place_rule.as_ref().filter(|id| !rule_map.contains_key(*id)) {
                 problems.push(problem("SERVICE_UNKNOWN_RULE", &s.key, format!("place_rule `{id}` is not in rules.toml")));
             }
+            // A part in the VPC is drawn in a subnet tier unless it is a gateway on the VPC's edge.
+            let in_vpc = s.scope == Scope::Vpc;
+            if in_vpc && s.place != Place::Gateway && s.subnet.is_none() {
+                problems.push(problem("SERVICE_NO_SUBNET", &s.key, "a VPC service that is not a gateway needs `subnet`".into()));
+            }
+            if !in_vpc && s.subnet.is_some() {
+                problems.push(problem("SERVICE_SUBNET_OUTSIDE_VPC", &s.key, "only a VPC service may have `subnet`".into()));
+            }
         }
 
         let raw_links = match toml::from_str::<LinksFile>(links) {
@@ -559,6 +567,33 @@ mod tests {
         let broken = services.replacen(from, "place_rule = \"cognito-user-pool\"", 1);
         let e = Rules::load(&broken, rules, labels, links).err().unwrap();
         assert_eq!((e[0].code.as_str(), e[0].at.as_deref()), ("SERVICE_UNKNOWN_RULE", Some("cognito")));
+    }
+
+    // Breaks when a VPC part without a subnet tier is loaded, or a gateway is made to need one.
+    #[test]
+    fn a_vpc_service_outside_a_gateway_must_name_its_subnet() {
+        let [services, rules, labels, links] = builtin_files();
+        let r = Rules::load(services, rules, labels, links).expect("the builtin data loads");
+        let igw = r.service("igw").unwrap();
+        assert_eq!((igw.scope, igw.place, igw.subnet), (Scope::Vpc, Place::Gateway, None));
+        let from = "key = \"ecs\"\nscope = \"vpc\"\nsubnet = \"private\"\n";
+        assert!(services.contains(from));
+        let broken = services.replacen(from, "key = \"ecs\"\nscope = \"vpc\"\n", 1);
+        let e = Rules::load(&broken, rules, labels, links).err().expect("a VPC service without a subnet was accepted");
+        assert_eq!(e.len(), 1, "{e:?}");
+        assert_eq!((e[0].code.as_str(), e[0].at.as_deref()), ("SERVICE_NO_SUBNET", Some("ecs")));
+    }
+
+    // Breaks when a subnet tier written on a service outside the VPC is silently ignored.
+    #[test]
+    fn a_service_outside_the_vpc_may_not_name_a_subnet() {
+        let [services, rules, labels, links] = builtin_files();
+        let from = "key = \"s3\"\nscope = \"regional\"\n";
+        assert!(services.contains(from));
+        let broken = services.replacen(from, "key = \"s3\"\nscope = \"regional\"\nsubnet = \"private\"\n", 1);
+        let e = Rules::load(&broken, rules, labels, links).err().expect("a subnet outside the VPC was accepted");
+        assert_eq!(e.len(), 1, "{e:?}");
+        assert_eq!((e[0].code.as_str(), e[0].at.as_deref()), ("SERVICE_SUBNET_OUTSIDE_VPC", Some("s3")));
     }
 
     #[test]
