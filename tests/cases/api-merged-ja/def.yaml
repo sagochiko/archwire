@@ -1,0 +1,9 @@
+flows:
+  - user -> apigateway(http) -> lambda.orders -> dynamodb.orders
+  - apigateway -> lambda.users -> dynamodb.users
+  - apigateway -> lambda.search -> dynamodb.orders
+  - lambda.orders ~> cloudwatch
+  - lambda.users ~> cloudwatch
+  - lambda.search ~> cloudwatch
+set:
+  lang: ja

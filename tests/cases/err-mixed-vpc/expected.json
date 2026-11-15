@@ -1,0 +1,20 @@
+{
+  "versions": {
+    "archwire": "0.1.0",
+    "rules": "2026.11.2"
+  },
+  "derived": [],
+  "holes": [],
+  "errors": [
+    {
+      "code": "UNSUPPORTED",
+      "at": "flows[0][1]",
+      "got": "apigateway",
+      "allowed": [],
+      "rule": null,
+      "message": "`apigateway` cannot be drawn together with VPC services such as `aurora`; this is not supported yet"
+    }
+  ],
+  "warnings": [],
+  "notes": []
+}

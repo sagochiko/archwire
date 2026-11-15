@@ -1,0 +1,9 @@
+flows:
+  - user -> cloudfront -> s3
+  - user -> apigateway(rest) -> lambda -> dynamodb
+  - cognito -- apigateway
+  - lambda ~> cloudwatch
+  - waf -- cloudfront
+  - acm -- cloudfront
+set:
+  lang: en

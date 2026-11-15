@@ -1,0 +1,7 @@
+flows:
+  - user -> cloudfront -> s3
+  - user -> apigateway(http) -> lambda -> dynamodb
+  - cognito -- apigateway
+  - lambda ~> cloudwatch
+set:
+  lang: ja

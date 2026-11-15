@@ -1,0 +1,6 @@
+flows:
+  - user -> cloudfront -> s3.web
+  - user -> apigateway(http) -> lambda -> dynamodb
+  - lambda -> s3.uploads
+set:
+  lang: ja

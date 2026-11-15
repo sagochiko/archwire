@@ -113,12 +113,19 @@ fn case_list_is_what_the_plan_says() {
         .map(|e| e.unwrap().file_name().into_string().unwrap())
         .collect();
     names.sort();
-    assert_eq!(names, ["aux-to-side", "endpoint-3az-en", "endpoint-3az-ja", "endpoint-ja", "err-unknown-service", "err-unsupported", "hole-s3", "web-2az-en", "web-2az-ja", "web-3az-en", "web-3az-ja", "web-attach-en"]);
+    assert_eq!(
+        names,
+        [
+            "api-http-ja", "api-merged-ja", "api-min-en", "api-names-ja", "api-rest-en", "aux-to-side", "edge-waf-en",
+            "endpoint-3az-en", "endpoint-3az-ja", "endpoint-ja", "err-mixed-vpc", "err-unknown-service", "err-unsupported",
+            "hole-apigateway", "hole-s3", "web-2az-en", "web-2az-ja", "web-3az-en", "web-3az-ja", "web-attach-en",
+        ]
+    );
 }
 
 #[test]
 fn error_cases_have_no_expected_diagram() {
-    for name in ["err-unknown-service", "err-unsupported"] {
+    for name in ["err-mixed-vpc", "err-unknown-service", "err-unsupported"] {
         assert!(!cases_dir().join(name).join("expected.drawio").exists(), "{name}");
     }
 }

@@ -1,0 +1,3 @@
+flows:
+  - user -> apigateway -> lambda
+  - cognito -- apigateway

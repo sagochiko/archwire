@@ -1,18 +1,43 @@
 # Rules
 
-archwire's knowledge of AWS is data, not code. It lives in three TOML files under `rules/aws/`, which are compiled into the program. Changing them means rebuilding.
+archwire's knowledge of AWS is data, not code. It lives in four TOML files under `rules/aws/`, which are compiled into the program. Changing them means rebuilding.
 
-`services.toml` describes each service: its `key` (the name used in a definition), where it sits (`scope` is `outside`, `global`, `regional` or `vpc`, and for VPC services `subnet` is `public` or `private`), how many copies are drawn and where (`place`: `single` for one, `gateway` for one on the VPC's edge, `per_az` for one per Availability Zone, `span` for one spanning the zones, or `writer_reader` for Aurora's writer and readers), the icon (`icon`, `shape` and `color`), the `label`, the kinds a service can have (`options`), the label on lines into it (`in_label`), and `derived_only` for the services archwire adds by itself and that cannot be written in a definition (`igw`, `nat`). Two fields decide which connections a global service takes part in: `flow_source = true` marks one that may carry main and auxiliary flows (`cloudfront`), and `attach_to` makes a service an attachment that carries no flows and may only be associated with the services it lists (`waf` and `acm`, both with `["cloudfront"]`).
+`services.toml` describes each service: its `key` (the name used in a definition), where it sits (`scope` is `outside`, `global`, `regional` or `vpc`, and for VPC services `subnet` is `public` or `private`), how many copies are drawn and where (`place`: `single` for one, `gateway` for one on the VPC's edge, `per_az` for one per Availability Zone, `span` for one spanning the zones, or `writer_reader` for Aurora's writer and readers), the icon (`icon`, `shape` and `color`), the `label`, the kinds a service can have (`options`), the label on lines into it (`in_label`), and `derived_only` for the services archwire adds by itself and that cannot be written in a definition (`igw`, `nat`). Two fields decide which connections a global service takes part in: `flow_source = true` marks one that may carry main and auxiliary flows (`cloudfront`), and `attach_to` makes a service an attachment that carries no flows and may only be associated with the services it lists (`waf` and `acm`, both with `["cloudfront"]`). These two fields and `in_label` are used for definitions with a VPC.
+
+Four more fields are used for definitions without a VPC. `origin = true` marks where main flows start; every main flow must be reachable from such a part (`user`). `kind_hole = true` makes a part written without a kind a hole (`apigateway`, whose kinds are `http` and `rest`). `separate_from_vpc = true` marks a service that cannot be written together with VPC services yet (`apigateway`, `lambda`, `dynamodb` and `cognito`); such a definition stops with `UNSUPPORTED` before it is laid out. `place_rule` names the rule that explains where the part is drawn, instead of the rule its `scope` gives (`cognito` uses `cognito-user-pool-in-one-region`).
 
 `rules.toml` holds the reasons. Each rule has an `id`, a `kind`, an optional `source`, and a reason in English (`reason_en`) and Japanese (`reason_ja`). The file also carries `version`, which is printed in every report as `versions.rules`.
 
 `labels.toml` holds the display words, each in English and Japanese: subnet names, line labels such as HTTPS, and the sentences used in notes and holes.
 
+`links.toml` lists the connections accepted in a definition without a VPC, one `[[link]]` entry per pair of services and relation. Anything not listed stops with `UNSUPPORTED`. The fields are:
+
+| Field | Meaning |
+|---|---|
+| `from`, `to` | the service keys at the two ends |
+| `rel` | `main` for `->`, `aux` for `~>`, `assoc` for `--` |
+| `label` | the key in `labels.toml` of the line's label |
+| `to_kind.<kind>` | for each kind of `to`, the `label` used instead of `label`, and the `rule` whose reason is given to `to`. While the kind of `to` is a hole, the line keeps `label` |
+| `max_from`, `max_rule` | how many `from` parts one `to` part may have, and the rule that says why. More is `TOO_MANY_ATTACHED` |
+| `from_region`, `from_rule` | the Region the `from` part is drawn in, and the rule that says why |
+
+For example, the entry for Cognito and API Gateway:
+
+```toml
+[[link]]
+from = "cognito"
+to = "apigateway"
+rel = "assoc"
+label = "verify_token"
+to_kind.http = { label = "jwt_authorizer", rule = "http-api-jwt-authorizer" }
+to_kind.rest = { label = "cognito_authorizer", rule = "rest-api-cognito-authorizer" }
+```
+
 ## Constraints and defaults
 
 A rule's `kind` is `constraint` or `default`, and the difference is the point of the file.
 
-A constraint states something AWS requires or does, and it must have a `source`, the URL of the AWS documentation page that says so. A constraint without a source is rejected when the rules are loaded. A reason claims no more than its source says; where the reason also says how archwire draws the fact, that part is written as archwire's choice. The six constraints today are the following.
+A constraint states something AWS requires or does, and it must have a `source`, the URL of the AWS documentation page that says so. A constraint without a source is rejected when the rules are loaded. A reason claims no more than its source says; where the reason also says how archwire draws the fact, that part is written as archwire's choice. The eight constraints today are the following.
 
 | Rule | What it says |
 |---|---|
@@ -22,8 +47,10 @@ A constraint states something AWS requires or does, and it must have a `source`,
 | `alb-spans-two-azs` | an Application Load Balancer needs subnets in at least two Availability Zones |
 | `internet-facing-alb-in-vpc-with-igw` | an internet-facing Application Load Balancer can only use a VPC with an Internet Gateway |
 | `private-egress-through-nat` | a private subnet reaches the internet through a NAT gateway in a public subnet |
+| `cognito-user-pool-in-one-region` | an Amazon Cognito user pool is created in one AWS Region; archwire draws it inside the Region frame |
+| `one-web-acl-per-resource` | a resource can be associated with only one web ACL, and one web ACL can be associated with more than one CloudFront distribution; archwire stops a definition that attaches two WAFs to one CloudFront |
 
-A default is archwire's own choice for something the definition did not say. It is not an AWS requirement, and the report marks it `default` so nobody mistakes it for one. A source is optional. The nine defaults today are `resources-inside-aws-cloud-frame`, `regional-service-outside-vpc`, `nat-per-az`, `default-two-azs`, `public-and-private-subnet-per-az`, `compute-in-private`, `database-in-private`, `aurora-writer-reader` and `default-region`. `nat-per-az` cites an AWS page for its reasoning. It is still a default, because a single NAT gateway is also valid and `set.nat: single` asks for it.
+A default is archwire's own choice for something the definition did not say. It is not an AWS requirement, and the report marks it `default` so nobody mistakes it for one. A source is optional. The twelve defaults today are `resources-inside-aws-cloud-frame`, `resources-inside-region-frame`, `regional-service-outside-vpc`, `nat-per-az`, `default-two-azs`, `public-and-private-subnet-per-az`, `compute-in-private`, `database-in-private`, `aurora-writer-reader`, `default-region`, `rest-api-cognito-authorizer` and `http-api-jwt-authorizer`. `nat-per-az` cites an AWS page for its reasoning. It is still a default, because a single NAT gateway is also valid and `set.nat: single` asks for it. The two authorizer rules cite AWS pages for the facts they state (a REST API uses a Cognito user pool through a `COGNITO_USER_POOLS` authorizer; the JWT authorizer type is supported only for HTTP APIs), and are defaults because drawing `cognito -- apigateway` as that authorizer is archwire's choice.
 
 Every part archwire adds gets its reasons from these rules, in the report under `derived` and inside the `.drawio` file as the cell attributes `derived`, `rule`, `kind` and `source`. A reason can also be about a part the definition wrote, such as `compute-in-private` for ECS; the report tells the two apart with `added`, and the `.drawio` file marks only the cells archwire added with `added="1"`.
 
@@ -33,17 +60,25 @@ The rules are checked when archwire starts. The built-in rules are valid, so a u
 
 | Code | Meaning |
 |---|---|
-| `SERVICES_PARSE`, `LABELS_PARSE`, `RULES_PARSE` | the file is not valid TOML or does not have the expected fields |
+| `SERVICES_PARSE`, `LABELS_PARSE`, `RULES_PARSE`, `LINKS_PARSE` | the file is not valid TOML or does not have the expected fields |
 | `RULE_BAD_KIND` | a rule's `kind` is neither `constraint` nor `default` |
 | `RULE_WITHOUT_SOURCE` | a `constraint` has no `source` |
 | `RULE_DUPLICATE` | two rules have the same `id` |
 | `SERVICE_DUPLICATE` | two services have the same `key` |
+| `SERVICE_UNKNOWN_RULE` | a service's `place_rule` is not in `rules.toml` |
+| `LINK_UNKNOWN_SERVICE` | a link's `from` or `to` is not a service in `services.toml` |
+| `LINK_BAD_REL` | a link's `rel` is not `main`, `aux` or `assoc` |
+| `LINK_UNKNOWN_LABEL` | a link's `label`, or the `label` of one of its `to_kind` entries, is not in `labels.toml` |
+| `LINK_UNKNOWN_KIND` | a `to_kind` key is not one of the kinds (`options`) of the `to` service |
+| `LINK_UNKNOWN_RULE` | a `to_kind` `rule`, `max_rule` or `from_rule` is not in `rules.toml` |
+| `LINK_DUPLICATE` | two links have the same `from`, `to` and `rel` |
+| `LINK_BAD_LIMIT` | a link has only one of `max_from` and `max_rule`, or only one of `from_region` and `from_rule` |
 
-For example, deleting the `source` line of `private-egress-through-nat` and running any `compile` stops with `RULE_WITHOUT_SOURCE` at `private-egress-through-nat`.
+For example, deleting the `source` line of `private-egress-through-nat` and running any `compile` stops with `RULE_WITHOUT_SOURCE` at `private-egress-through-nat`. Changing `rel = "main"` to `rel = "flow"` in the `apigateway` to `lambda` entry of `links.toml` stops with `LINK_BAD_REL` at `apigateway flow lambda`.
 
 ## Adding or changing a rule
 
-A rule in `rules.toml` is the text and the source. Where it applies, and which part it is recorded against, is decided in `crates/archwire-core/src/infer.rs`, which looks a rule up by its `id` and stops if the id does not exist. So a new rule needs both: an entry in `rules.toml`, and the place in `infer.rs` that adds it to the report.
+A rule in `rules.toml` is the text and the source. Where it applies, and which part it is recorded against, is decided in one of two places. For definitions with a VPC it is `crates/archwire-core/src/infer.rs`, which looks a rule up by its `id` and stops if the id does not exist. For definitions without a VPC it is mostly data: a link's `to_kind` `rule`, `max_rule` and `from_rule`, and a service's `place_rule`, which the loader checks; the frame rules and the rules a service's `scope` gives are added in `crates/archwire-core/src/flow_infer.rs`. So a new rule needs both: an entry in `rules.toml`, and the code or the data that adds it to the report.
 
 Then check that nothing else moved.
 
@@ -63,4 +98,4 @@ git diff tests/cases
 sh tools/check_cases.sh
 ```
 
-`tools/check_cases.sh` needs the draw.io desktop command line (`drawio`) and Python with Pillow. It runs `tools/geocheck.py` on every expected diagram, which fails on a line over text, a line over an icon, or two lines on top of each other, and writes a picture of each case to `out/` for you to look at.
+`tools/check_cases.sh` needs the draw.io desktop command line (`drawio`) and Python with Pillow. It runs `tools/geocheck.py` on every expected diagram, which fails on a line over text, a line over an icon, two lines on top of each other, two icons or two texts overlapping, or an icon or its text outside its frame, and writes a picture of each case to `out/` for you to look at.

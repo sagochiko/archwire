@@ -118,3 +118,21 @@ fn set_that_cannot_read_or_write_prints_diagnostics_with_both_versions() {
     assert_eq!(code, Some(1));
     assert!(json.contains("BAD_PATH") && json.contains(rules_version), "{json}");
 }
+
+#[test]
+fn answering_the_kind_hole_with_set_turns_exit_2_into_0() {
+    let dir = std::env::temp_dir().join(format!("archwire-cli-kind-hole-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (def, out) = (dir.join("a.yaml"), dir.join("a.drawio"));
+    std::fs::write(&def, "flows:\n  - user -> apigateway -> lambda\n").unwrap();
+    let compile = || std::process::Command::new(env!("CARGO_BIN_EXE_archwire")).args(["compile", def.to_str().unwrap(), "-o", out.to_str().unwrap()]).output().unwrap();
+    let first = compile();
+    assert_eq!(first.status.code(), Some(2));
+    assert!(String::from_utf8(first.stdout).unwrap().contains("\"kind.apigateway\""));
+    let set = std::process::Command::new(env!("CARGO_BIN_EXE_archwire"))
+        .args(["set", def.to_str().unwrap(), "choose.kind.apigateway", "http"]).output().unwrap();
+    assert_eq!(set.status.code(), Some(0));
+    let second = compile();
+    assert_eq!(second.status.code(), Some(0), "{}", String::from_utf8_lossy(&second.stdout));
+    assert!(std::fs::read_to_string(&out).unwrap().contains("label=\"Amazon API Gateway&#xa;HTTP API\""));
+}
