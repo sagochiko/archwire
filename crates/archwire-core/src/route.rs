@@ -55,6 +55,23 @@ pub struct Wire {
     pub represents: Vec<(String, String)>,
 }
 
+/// How a planned line bends between its exit and its entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bend {
+    /// Exit and entry face each other on one line.
+    Straight,
+    /// Out, along a vertical channel at this x, then in.
+    AtX(i32),
+    /// Out, along a horizontal channel at this y, then in.
+    AtY(i32),
+    /// One bend where the exit's line meets the entry's line.
+    Elbow,
+}
+
+/// The sides and bend a line is tried with first; the router may still pick other bends or sides.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinePlan { pub from: String, pub to: String, pub exit: Side, pub entry: Side, pub bend: Bend }
+
 /// Where a port sits on an icon's rectangle.
 pub fn port_point(r: Rect, p: Port) -> (i32, i32) {
     let along = |len: i32| len * p.pos as i32 / 100;
@@ -276,7 +293,7 @@ fn wire_latin_width(c: char) -> i32 {
 /// the width of a full-width character. A full-width parenthesis is drawn at full width inside a
 /// line; an opening one at the start of a line and a closing one at its end show only half, and
 /// count at half plus a pixel.
-fn wire_text_width(text: &str) -> i32 {
+pub(crate) fn wire_text_width(text: &str) -> i32 {
     let line_width = |l: &str| {
         let n = l.chars().count();
         l.chars()
@@ -293,7 +310,7 @@ fn wire_text_width(text: &str) -> i32 {
 }
 
 /// The area an icon's label takes: centred under the icon.
-fn label_area(i: &Icon) -> Rect {
+pub(crate) fn label_area(i: &Icon) -> Rect {
     let half = (text_width(&i.label) + 1) / 2;
     Rect {
         x: i.rect.x + i.rect.w / 2 - half,
@@ -663,8 +680,42 @@ pub fn route(model: &Model, layout: &Layout, rules: &Rules) -> (Vec<Wire>, Vec<S
         notes.push(rules.text("note.cross_az_merged", lang));
     }
     let drafts = ctx.plan(&specs);
-    let mut ports = ctx.share_out(&specs, &drafts);
-    ctx.straighten_level_lines(&specs, &mut ports);
+    draw(&ctx, &specs, &drafts, notes)
+}
+
+/// Like `route`, with every line's first try taken from `plans`. A line with no plan gets the
+/// usual `candidates`; `plan()` is never called. Reads only frames and icons the layout has.
+pub fn route_planned(model: &Model, layout: &Layout, rules: &Rules, plans: &[LinePlan]) -> (Vec<Wire>, Vec<String>) {
+    let ctx = Ctx { model, layout, rules, scene: Scene::new(layout) };
+    let (specs, merged_across_azs) = ctx.group();
+    let mut notes = Vec::new();
+    if merged_across_azs {
+        notes.push(rules.text("note.cross_az_merged", model.lang));
+    }
+    let mut drafts: Vec<Option<Draft>> = specs
+        .iter()
+        .map(|s| {
+            let p = plans.iter().find(|p| p.from == s.from && p.to == s.to)?;
+            let shape = match p.bend {
+                Bend::Straight => Shape::Straight,
+                Bend::AtX(x) => Shape::ChannelX(x),
+                Bend::AtY(y) => Shape::ChannelY(y),
+                Bend::Elbow => Shape::Elbow,
+            };
+            Some(draft(p.exit, p.entry, shape, if s.rel == Rel::Main { RANK_MAIN } else { RANK_SIDE }))
+        })
+        .collect();
+    let rest: Vec<usize> = (0..specs.len()).filter(|&i| drafts[i].is_none()).collect();
+    ctx.plan_rest(&specs, &rest, &mut drafts);
+    let drafts: Vec<Draft> = drafts.into_iter().map(|d| d.expect("every line planned")).collect();
+    draw(&ctx, &specs, &drafts, notes)
+}
+
+/// Shares out the ports, lays every line, places the labels and runs the final check.
+fn draw(ctx: &Ctx, specs: &[Spec], drafts: &[Draft], mut notes: Vec<String>) -> (Vec<Wire>, Vec<String>) {
+    let (model, layout, rules, lang) = (ctx.model, ctx.layout, ctx.rules, ctx.model.lang);
+    let mut ports = ctx.share_out(specs, drafts);
+    ctx.straighten_level_lines(specs, &mut ports);
 
     let mut order: Vec<usize> = (0..specs.len()).collect();
     order.sort_by_key(|&i| (drafts[i].rank, i));
@@ -674,7 +725,7 @@ pub fn route(model: &Model, layout: &Layout, rules: &Rules) -> (Vec<Wire>, Vec<S
         let (s, d) = (&specs[i], &drafts[i]);
         let path = match ctx.lay(s, d, ports[i], &placed) {
             Ok(p) => p,
-            Err(best) => match ctx.on_free_sides(&specs, i, &ports, &placed) {
+            Err(best) => match ctx.on_free_sides(specs, i, &ports, &placed) {
                 Some((p, moved)) => {
                     ports[i] = moved;
                     p
@@ -1081,14 +1132,22 @@ impl<'a> Ctx<'a> {
             drafts[i] = Some(draft(Side::Right, Side::Left, Shape::ChannelX(x), RANK_SIDE));
         }
 
-        // The other lines keep off the sides the main lines use, where they can, so those stay centred and straight.
+        self.plan_rest(specs, &rest, &mut drafts);
+        drafts.into_iter().map(|d| d.expect("every line planned")).collect()
+    }
+
+    /// Sides for the lines in `rest`, which no shape covers: the first of `candidates`, then of
+    /// any two sides, that fits off the sides the main lines in `drafts` use, else the first
+    /// candidate that fits at all. The other lines keep off the main lines' sides, where they can,
+    /// so those stay centred and straight.
+    fn plan_rest(&self, specs: &[Spec], rest: &[usize], drafts: &mut [Option<Draft>]) {
         let used: Vec<(&str, Side)> = specs
             .iter()
-            .zip(&drafts)
+            .zip(drafts.iter())
             .filter_map(|(s, d)| d.filter(|d| d.rank == RANK_MAIN).map(|d| [(s.from.as_str(), d.exit), (s.to.as_str(), d.entry)]))
             .flatten()
             .collect();
-        for i in rest {
+        for &i in rest {
             let s = &specs[i];
             let (fr, tr) = (self.layout.rect(&s.from), self.layout.rect(&s.to));
             let candidates = self.candidates(fr, tr);
@@ -1103,7 +1162,6 @@ impl<'a> Ctx<'a> {
                     .unwrap_or_else(|| self.first_fit(s, candidates)),
             );
         }
-        drafts.into_iter().map(|d| d.expect("every line planned")).collect()
     }
 
     /// From above the Region (CloudFront) into a Regional service: down onto its top if nothing
@@ -2073,5 +2131,184 @@ mod tests {
         let (w, notes) = route(&m, &l, &r);
         assert!(w.iter().any(|x| x.id == "edge-cloudfront-to-s3"));
         assert_eq!(notes, ["The line edge-cloudfront-to-s3 could not avoid every icon, label and other line; check it in the diagram."]);
+    }
+
+    // Planned routes: a hand-built layout with only a Region frame, no VPC.
+
+    type IconSpec<'a> = (&'a str, i32, i32, &'a str);
+    type EdgeSpec<'a> = (&'a str, &'a str, Rel, &'a str);
+
+    fn scene(icons: &[IconSpec], edges: &[EdgeSpec]) -> (Model, Layout) {
+        let nodes = icons
+            .iter()
+            .map(|&(id, _, _, _)| Node {
+                id: id.to_string(),
+                service: "s3".to_string(),
+                option: None,
+                az: None,
+                role: None,
+                added: false,
+                region: None,
+                part: id.to_string(),
+                tag: None,
+                area: Some(crate::model::Area::Region),
+            })
+            .collect();
+        let edges = edges
+            .iter()
+            .map(|&(from, to, rel, label)| crate::model::Edge {
+                from: from.to_string(),
+                to: to.to_string(),
+                rel,
+                label: label.to_string(),
+                hole: None,
+                endpoint: false,
+            })
+            .collect();
+        let model = Model { region: "ap-northeast-1".to_string(), azs: Vec::new(), lang: crate::rules::Lang::En, nodes, edges };
+        let frames = vec![Frame {
+            id: "region".to_string(),
+            kind: FrameKind::Region,
+            label: "Asia Pacific (Tokyo)".to_string(),
+            rect: Rect { x: -100, y: -100, w: 1000, h: 600 },
+            parent: None,
+        }];
+        let icons = icons
+            .iter()
+            .map(|&(id, x, y, label)| Icon {
+                id: id.to_string(),
+                label: label.to_string(),
+                lines: label.lines().count() as u8,
+                rect: Rect { x, y, w: 60, h: 60 },
+                parent: Some("region".to_string()),
+            })
+            .collect();
+        (model, Layout { frames, icons })
+    }
+
+    fn plan(from: &str, to: &str, exit: Side, entry: Side, bend: Bend) -> LinePlan {
+        LinePlan { from: from.to_string(), to: to.to_string(), exit, entry, bend }
+    }
+
+    fn wire<'w>(w: &'w [Wire], from: &str, to: &str) -> &'w Wire {
+        w.iter().find(|x| x.from == from && x.to == to).unwrap_or_else(|| panic!("no line {from} -> {to}"))
+    }
+
+    const S3: &str = "Amazon S3";
+
+    fn three_in_a_row() -> (Model, Layout, Vec<LinePlan>) {
+        let (m, l) = scene(
+            &[("a", 0, 0, S3), ("b", 220, 0, S3), ("c", 440, 160, S3)],
+            &[("a", "b", Rel::Main, "https"), ("b", "c", Rel::Main, "read_write")],
+        );
+        let plans = vec![
+            plan("a", "b", Side::Right, Side::Left, Bend::Straight),
+            plan("b", "c", Side::Right, Side::Left, Bend::AtX(390)),
+        ];
+        (m, l, plans)
+    }
+
+    fn gateway_and_cognito() -> (Model, Layout, Vec<LinePlan>) {
+        let (mut m, l) = scene(
+            &[("g", 0, 0, "Amazon API Gateway\nHTTP API"), ("c", 0, 160, "Amazon Cognito")],
+            &[("c", "g", Rel::Assoc, "jwt_authorizer")],
+        );
+        m.lang = crate::rules::Lang::Ja;
+        (m, l, vec![plan("c", "g", Side::Top, Side::Bottom, Bend::Straight)])
+    }
+
+    fn two_into_one() -> (Model, Layout, Vec<LinePlan>) {
+        let (m, l) = scene(
+            &[("a", 0, 0, S3), ("b", 0, 160, S3), ("c", 220, 80, S3)],
+            &[("a", "c", Rel::Main, "https"), ("b", "c", Rel::Main, "https")],
+        );
+        let plans = vec![
+            plan("a", "c", Side::Right, Side::Left, Bend::AtX(150)),
+            plan("b", "c", Side::Right, Side::Left, Bend::AtX(150)),
+        ];
+        (m, l, plans)
+    }
+
+    #[test]
+    fn planned_lines_take_their_sides_and_bend_without_a_vpc() {
+        let (m, l, plans) = three_in_a_row();
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        let ab = wire(&w, "a", "b");
+        assert_eq!(ab.exit, Port { side: Side::Right, pos: 50, offset: 0 });
+        assert_eq!(ab.entry, Port { side: Side::Left, pos: 50, offset: 0 });
+        assert!(ab.points.is_empty(), "{:?}", ab.points);
+        assert_eq!(wire(&w, "b", "c").points, [(390, 30), (390, 190)]);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    #[test]
+    fn a_bottom_port_clears_a_multi_line_name_and_a_japanese_label_is_placed() {
+        let (m, l, plans) = gateway_and_cognito();
+        let r = Rules::builtin();
+        let (w, notes) = route_planned(&m, &l, &r, &plans);
+        let cg = wire(&w, "c", "g");
+        assert_eq!(cg.entry, Port { side: Side::Bottom, pos: 50, offset: 38 });
+        assert_eq!(cg.label, "JWT オーソライザー");
+        let unplaced = r.text("note.unplaced_label", crate::rules::Lang::Ja).replace("{line}", &cg.id);
+        assert!(!notes.contains(&unplaced), "{notes:?}");
+        let path = full_path(cg, &l);
+        let area = audit_wire_label(cg, &path).expect("the line has a label");
+        for icon in &l.icons {
+            assert!(!overlaps(area, label_area(icon)), "the line's label {area:?} covers the name of {}", icon.id);
+        }
+    }
+
+    #[test]
+    fn two_lines_into_one_side_share_it() {
+        let (m, l, plans) = two_into_one();
+        let (w, _) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        assert_eq!(wire(&w, "a", "c").entry.pos, 25);
+        assert_eq!(wire(&w, "b", "c").entry.pos, 75);
+    }
+
+    #[test]
+    fn a_planned_line_that_hits_an_icon_goes_around_it_on_the_same_side() {
+        let (m, l) = scene(&[("a", 0, 0, S3), ("x", 110, 0, S3), ("b", 220, 0, S3)], &[("a", "b", Rel::Main, "https")]);
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &[plan("a", "b", Side::Right, Side::Left, Bend::Straight)]);
+        let ab = wire(&w, "a", "b");
+        let x = l.rect("x");
+        let path = full_path(ab, &l);
+        assert!(path.windows(2).all(|s| !segment_hits_rect(s[0], s[1], x)), "{path:?}");
+        assert_eq!(ab.exit.side, Side::Right);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    #[test]
+    fn a_planned_side_that_is_closed_moves_to_another_side() {
+        let (m, l) = scene(&[("a", 0, 0, S3), ("w", 62, 0, S3), ("b", 300, 200, S3)], &[("a", "b", Rel::Main, "https")]);
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &[plan("a", "b", Side::Right, Side::Left, Bend::AtX(200))]);
+        let ab = wire(&w, "a", "b");
+        assert_ne!(ab.exit.side, Side::Right);
+        let wall = l.rect("w");
+        let path = full_path(ab, &l);
+        assert!(path.windows(2).all(|s| !segment_hits_rect(s[0], s[1], wall)), "{path:?}");
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    #[test]
+    fn every_semantic_edge_is_represented_once_in_a_planned_route() {
+        for (m, l, plans) in [three_in_a_row(), gateway_and_cognito(), two_into_one()] {
+            let (w, _) = route_planned(&m, &l, &Rules::builtin(), &plans);
+            let mut semantic: Vec<(String, String)> = m.edges.iter().map(|e| (e.from.clone(), e.to.clone())).collect();
+            let mut drawn: Vec<(String, String)> = w.iter().flat_map(|x| x.represents.clone()).collect();
+            semantic.sort();
+            drawn.sort();
+            assert_eq!(semantic, drawn);
+        }
+    }
+
+    #[test]
+    fn an_empty_plan_list_draws_every_line_without_a_vpc() {
+        let (m, l) = scene(
+            &[("a", 0, 0, S3), ("b", 220, 0, S3), ("c", 440, 0, S3)],
+            &[("a", "b", Rel::Main, "https"), ("b", "c", Rel::Main, "https")],
+        );
+        let (w, _) = route_planned(&m, &l, &Rules::builtin(), &[]);
+        assert_eq!(w.len(), 2);
     }
 }
