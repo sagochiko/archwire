@@ -174,22 +174,25 @@ pub(crate) fn closest_line_to_label(layout: &Layout, wires: &[Wire]) -> Option<(
     best
 }
 
-/// Drops a point repeating the one before; with `straight`, also a point in the middle of a straight run.
-fn audit_points(raw: &[(i32, i32)], straight: bool) -> Vec<(i32, i32)> {
+/// Drops a point repeating the one before; keeps every other point, a straight run's middle included.
+fn audit_points(raw: &[(i32, i32)]) -> Vec<(i32, i32)> {
     let mut out: Vec<(i32, i32)> = Vec::new();
     for &p in raw {
-        if out.last() == Some(&p) {
-            continue;
+        if out.last() != Some(&p) {
+            out.push(p);
         }
-        if straight && out.len() >= 2 {
-            let (a, b) = (out[out.len() - 2], out[out.len() - 1]);
-            if (a.0 == b.0 && b.0 == p.0) || (a.1 == b.1 && b.1 == p.1) {
-                out.pop();
-            }
-        }
-        out.push(p);
     }
     out
+}
+
+/// True if the path runs straight on and then back over itself somewhere: three points on one
+/// line, the middle one not between the others.
+fn audit_turns_back(path: &[(i32, i32)]) -> bool {
+    path.windows(3).any(|w| {
+        let (a, b, c) = (w[0], w[1], w[2]);
+        let between = |p: i32, q: i32, r: i32| p.min(r) <= q && q <= p.max(r);
+        (a.0 == b.0 && b.0 == c.0 && !between(a.1, b.1, c.1)) || (a.1 == b.1 && b.1 == c.1 && !between(a.0, b.0, c.0))
+    })
 }
 
 /// True if `want` appears in `path` in order, other points allowed between.
@@ -222,9 +225,10 @@ fn audit_on_track(path: &[(i32, i32)], t: &Track) -> bool {
     reached >= hi
 }
 
-/// True if the line keeps its draft: a line kept whole has the draft's ends and waypoints; a line
-/// kept inside has its inner end where the draft puts it and passes the gate and the inner points
-/// in order; every track's stretch lies on its band.
+/// True if the line keeps its draft: a line kept whole has the draft's ends and every corner of
+/// its draft, compared as written; a line kept inside has its inner end where the draft puts it
+/// and passes the gate and the inner points in order; a kept line never turns back over itself;
+/// every track's stretch lies on its band.
 fn audit_keeps_draft(w: &Wire, p: &LinePlan, layout: &Layout) -> bool {
     let at = |port: Port, side: Side, pos: Option<u8>| port.side == side && port.pos == pos.unwrap_or(50);
     let written = audit_written(w, layout);
@@ -232,18 +236,18 @@ fn audit_keeps_draft(w: &Wire, p: &LinePlan, layout: &Layout) -> bool {
         Keep::Free => true,
         Keep::Whole => {
             let (ep, np) = (written[0], written[written.len() - 1]);
-            let (bend, straight): (Vec<(i32, i32)>, bool) = match &p.bend {
-                Bend::Straight => (Vec::new(), true),
-                Bend::AtX(x) => (vec![(*x, ep.1), (*x, np.1)], true),
-                Bend::AtY(y) => (vec![(ep.0, *y), (np.0, *y)], true),
-                Bend::Elbow if matches!(p.exit, Side::Top | Side::Bottom) => (vec![(ep.0, np.1)], true),
-                Bend::Elbow => (vec![(np.0, ep.1)], true),
-                Bend::Points(v) => (v.clone(), false),
+            let bend: Vec<(i32, i32)> = match &p.bend {
+                Bend::Straight => Vec::new(),
+                Bend::AtX(x) => vec![(*x, ep.1), (*x, np.1)],
+                Bend::AtY(y) => vec![(ep.0, *y), (np.0, *y)],
+                Bend::Elbow if matches!(p.exit, Side::Top | Side::Bottom) => vec![(ep.0, np.1)],
+                Bend::Elbow => vec![(np.0, ep.1)],
+                Bend::Points(v) => v.clone(),
             };
             let mut planned = vec![ep];
             planned.extend(bend);
             planned.push(np);
-            at(w.exit, p.exit, p.exit_pos) && at(w.entry, p.entry, p.entry_pos) && audit_points(&written, straight) == audit_points(&planned, straight)
+            at(w.exit, p.exit, p.exit_pos) && at(w.entry, p.entry, p.entry_pos) && audit_points(&written) == audit_points(&planned)
         }
         Keep::Inner(t) => {
             let mut want: Vec<(i32, i32)> = Vec::new();
@@ -255,11 +259,12 @@ fn audit_keeps_draft(w: &Wire, p: &LinePlan, layout: &Layout) -> bool {
                 want.extend(t.inner.iter().copied());
             }
             let end = if t.inner_is_start { at(w.exit, p.exit, p.exit_pos) } else { at(w.entry, p.entry, p.entry_pos) };
-            end && audit_in_order(&audit_points(&written, false), &audit_points(&want, false))
+            end && audit_in_order(&audit_points(&written), &audit_points(&want))
         }
     };
     let path = audit_path(w, layout);
-    kept && p.tracks.iter().all(|t| audit_on_track(&path, t))
+    let turns_back = p.keep != Keep::Free && audit_turns_back(&audit_points(&path));
+    kept && !turns_back && p.tracks.iter().all(|t| audit_on_track(&path, t))
 }
 
 /// Lines that run over text (an icon's label, a frame's name, another line's label), over an

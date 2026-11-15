@@ -72,7 +72,10 @@ impl<'a> Ctx<'a> {
     /// icons and text with the fewest frame sides under it, in the same order, on one line if that
     /// fits anywhere, else one part per line. If there is none either, the usual spot stays.
     /// `level` puts the label at the usual spot above the line instead of beside it; `axis` is the
-    /// way the line's arrangement runs, which picks the stretch `label_where_it_leaves` looks at.
+    /// way the line's arrangement runs, which picks the stretch `label_on_axis_stretch` looks at.
+    /// Running down, when the usual spot is on a level stretch and the line has upright ones, the
+    /// spots on upright stretches (beside them on the right, then the left) are tried before it
+    /// and the level ones (above them, then below); running right, the order is as above.
     pub(crate) fn place_label(&self, parts: &[String], (paths, me): (&[Vec<Pt>], usize), level: bool, near_source: bool, axis: Axis, placed: &[Rect]) -> LabelSpot {
         let path = &paths[me];
         let one = parts.join(" ");
@@ -81,12 +84,8 @@ impl<'a> Ctx<'a> {
         }
         let len = path_length(path);
         let usual = if near_source { len / 4 } else { len / 2 };
-        if let Some(spot) = self.label_where_it_leaves(&one, (paths, me), axis, placed) {
+        if let Some(spot) = self.label_on_axis_stretch(&one, (paths, me), axis, placed) {
             return spot;
-        }
-        let area = wire_label_area(&one, point_along(path, usual).0, level, false);
-        if self.scene.label_clear(area, self.measure.label_margin(LABEL_MARGIN), paths, me, placed) {
-            return LabelSpot { text: one, above: level, flip: false, at: None, area: Some(area), clear: true };
         }
         let mut texts = vec![one.clone()];
         if parts.len() > 1 {
@@ -116,6 +115,17 @@ impl<'a> Ctx<'a> {
             area: Some(area),
             clear: true,
         };
+        let (usual_point, usual_level) = point_along(path, usual);
+        let upright = path.windows(2).any(|s| s[0].0 == s[1].0 && s[0].1 != s[1].1);
+        if axis == Axis::Down && usual_level && upright {
+            if let Some(s) = spots.iter().find(|s| !s.3 && self.scene.label_clear(s.5, s.0, paths, me, placed)) {
+                return spot(s);
+            }
+        }
+        let area = wire_label_area(&one, usual_point, level, false);
+        if self.scene.label_clear(area, self.measure.label_margin(LABEL_MARGIN), paths, me, placed) {
+            return LabelSpot { text: one, above: level, flip: false, at: None, area: Some(area), clear: true };
+        }
         if let Some(s) = spots.iter().find(|s| self.scene.label_clear(s.5, s.0, paths, me, placed)) {
             return spot(s);
         }
@@ -133,13 +143,14 @@ impl<'a> Ctx<'a> {
         LabelSpot { text: one, above: level, flip: false, at: None, area: Some(area), clear: false }
     }
 
-    /// In the layout without a VPC, a bent line's label goes first on one stretch, when no other
-    /// line runs along it: there it reads as this line's alone, where a label beside a channel
-    /// shared by bends can read as a neighbour's. Running right, the stretch the line leaves its
-    /// source by, when that is level, with the label centred above it, or below; running down,
-    /// the first upright stretch, with the label beside it on the right, or on the left. Within
-    /// the stretch and on one line; None if no spot there is clear.
-    fn label_where_it_leaves(&self, text: &str, (paths, me): (&[Vec<Pt>], usize), axis: Axis, placed: &[Rect]) -> Option<LabelSpot> {
+    /// In the layout without a VPC, a bent line's label goes first on its first stretch along
+    /// the arrangement's axis, when no other line runs along it: there it reads as this line's
+    /// alone, where a label beside a channel shared by bends can read as a neighbour's. Running
+    /// down, the first upright stretch, with the label beside it on the right, or on the left.
+    /// Running right, the first level stretch only when it is the one the line leaves its source
+    /// by (as lines running right have always been labelled), centred above it, or below.
+    /// Within the stretch and on one line; None if no spot there is clear.
+    fn label_on_axis_stretch(&self, text: &str, (paths, me): (&[Vec<Pt>], usize), axis: Axis, placed: &[Rect]) -> Option<LabelSpot> {
         let path = &paths[me];
         if self.measure != Measure::Flow || path.len() < 3 {
             return None;

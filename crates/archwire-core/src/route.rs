@@ -197,15 +197,16 @@ pub fn route_planned(model: &Model, layout: &Layout, rules: &Rules, plans: &[Lin
     let rest: Vec<usize> = (0..specs.len()).filter(|&i| drafts[i].is_none()).collect();
     ctx.plan_rest(&specs, &rest, &mut drafts);
     let drafts: Vec<Draft> = drafts.into_iter().map(|d| d.expect("every line planned")).collect();
-    // A side line drawn as planned between the middles of its sides (or its fixed spots), past
+    // A side line drawn as planned between the middles of its sides (or the spots its draft
+    // fixes or writes), past
     // every icon and name, is a barrier the other lines go round.
     let barriers: Vec<(String, String, Vec<Pt>)> = specs
         .iter()
         .zip(&drafts)
         .filter(|(s, _)| s.rel != Rel::Main)
         .filter_map(|(s, d)| {
-            let exit = ctx.port(&s.from, d.exit, d.exit_fixed.unwrap_or(50));
-            let entry = ctx.port(&s.to, d.entry, d.entry_fixed.unwrap_or(50));
+            let exit = ctx.port(&s.from, d.exit, d.exit_fixed.or(d.exit_want).unwrap_or(50));
+            let entry = ctx.port(&s.to, d.entry, d.entry_fixed.or(d.entry_want).unwrap_or(50));
             let path = ctx.draft_path(s, d, (exit, entry))?;
             let (out, inward) = (outward(d.exit), reverse(outward(d.entry)));
             ctx.scene.check(&path, &s.from, &s.to, out, inward, &[])?;
@@ -1487,7 +1488,7 @@ mod tests {
         (m, l, vec![p])
     }
 
-    // Fails if a line kept whole is searched again, moved to another side, or drawn over an icon without a note.
+    // Fails if a line kept whole whose entry is closed is moved to another side, or drawn over an icon without a note.
     #[test]
     fn a_whole_line_is_never_searched() {
         let (m, l, plans) = blocked_left(Keep::Whole);
@@ -1600,5 +1601,231 @@ mod tests {
     fn audit_ignores_drafts_on_the_old_path() {
         let (m, l, w, _) = wires(include_str!("../../../tests/cases/web-2az-ja/def.yaml"));
         assert_eq!(audit(&m, &l, &w, &[], Measure::Grid), Vec::<String>::new());
+    }
+
+    /// The note that a line could not be drawn clear, for this line id.
+    fn unrouted(id: &str) -> String {
+        Rules::builtin().text("note.unrouted_line", crate::rules::Lang::En).replace("{line}", id)
+    }
+
+    // Fails if a line kept inside whose exit, entry and gate are one point is drawn as a single point (and panics) or without a note.
+    #[test]
+    fn a_line_through_a_gate_of_no_length_is_kept_and_named() {
+        for inner_is_start in [false, true] {
+            let (m, l) = scene(&[("a", 0, 0, S3), ("b", 60, 0, S3)], &[("a", "b", Rel::Main, HTTPS)]);
+            let through = Through { gate: (60, 30), inner: Vec::new(), inner_is_start };
+            let p = keep_draft(&m, 0, Side::Right, Side::Left, Bend::Straight, Keep::Inner(through));
+            let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &[p]);
+            let ab = wire(&w, "a", "b");
+            assert_eq!((ab.exit.side, ab.entry.side), (Side::Right, Side::Left), "{inner_is_start}");
+            assert!(ab.points.is_empty(), "{inner_is_start}: {:?}", ab.points);
+            assert!(notes.contains(&unrouted("edge-a-to-b")), "{inner_is_start}: {notes:?}");
+        }
+    }
+
+    // Fails if a line kept whole whose draft turns back on itself is straightened, or passes without a note.
+    #[test]
+    fn a_whole_draft_that_turns_back_is_kept_and_named() {
+        let (m, l) = scene(&[("a", 0, 0, S3), ("b", 300, 0, S3)], &[("a", "b", Rel::Main, HTTPS)]);
+        let plans = vec![keep_draft(&m, 0, Side::Right, Side::Left, Bend::AtX(450), Keep::Whole)];
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        // Out of (60, 30), right to x = 450, then back left into (300, 30).
+        assert_eq!(drawn(wire(&w, "a", "b"), &l), [(60, 30), (450, 30), (300, 30)]);
+        assert!(notes.contains(&unrouted("edge-a-to-b")), "{notes:?}");
+        assert!(audit(&m, &l, &w, &plans, Measure::Flow).contains(&"edge-a-to-b".to_string()));
+    }
+
+    /// Out of (60, 30), 100 right, 10 down, 340 right, then 260 down into b's top at (500, 300).
+    fn short_drop_then_long() -> (Model, Layout, LinePlan) {
+        let (m, l) = scene(&[("a", 0, 0, S3), ("b", 470, 300, S3)], &[("a", "b", Rel::Main, HTTPS)]);
+        let p = keep_draft(&m, 0, Side::Right, Side::Top, Bend::Points(vec![(160, 30), (160, 40), (500, 40)]), Keep::Whole);
+        (m, l, p)
+    }
+
+    // Fails if a line running down, whose first upright stretch is too short for the label, puts it above a level stretch before trying the later upright one.
+    #[test]
+    fn running_down_a_label_tries_every_upright_stretch_first() {
+        let (m, l, mut p) = short_drop_then_long();
+        p.axis = Axis::Down;
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &[p]);
+        assert!(notes.is_empty(), "{notes:?}");
+        let ab = wire(&w, "a", "b");
+        assert_eq!(drawn(ab, &l), [(60, 30), (160, 30), (160, 40), (500, 40), (500, 300)]);
+        let path = full_path(ab, &l);
+        let at = label_distance(ab.label_at.expect("moved off the usual spot"), path_length(&path));
+        let (anchor, level) = point_along(&path, at);
+        assert!(!ab.horizontal_label && !level, "{ab:?}");
+        assert!(anchor.0 == 500 && anchor.1 > 40 && anchor.1 < 300, "{anchor:?}");
+    }
+
+    // Fails if the order of the label spots for a line running right changes with the new order for lines running down.
+    #[test]
+    fn running_right_a_label_still_takes_the_level_stretch_it_leaves_by() {
+        let (m, l, p) = short_drop_then_long();
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &[p]);
+        assert!(notes.is_empty(), "{notes:?}");
+        let ab = wire(&w, "a", "b");
+        let path = full_path(ab, &l);
+        let at = label_distance(ab.label_at.expect("on the stretch it leaves by"), path_length(&path));
+        let (anchor, _) = point_along(&path, at);
+        assert!(ab.horizontal_label, "{ab:?}");
+        assert!(anchor.1 == 30 && anchor.0 > 60 && anchor.0 < 160, "{anchor:?}");
+    }
+
+    // Fails if a position written for a free end is set aside without taking its spot, so it lands on a fixed end's spot.
+    #[test]
+    fn a_written_position_of_a_free_end_does_not_take_a_fixed_spot() {
+        let (m, l) = scene(
+            &[("a", 0, 100, S3), ("c", 0, 300, S3), ("b", 300, 100, S3)],
+            &[("a", "b", Rel::Main, HTTPS), ("c", "b", Rel::Main, HTTPS)],
+        );
+        let mut fixed = keep_draft(&m, 0, Side::Right, Side::Left, Bend::Straight, Keep::Whole);
+        fixed.entry_pos = Some(50);
+        let mut free = keep_draft(&m, 1, Side::Right, Side::Left, Bend::AtX(180), Keep::Free);
+        free.entry_pos = Some(50);
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &[fixed, free.clone()]);
+        assert_eq!(wire(&w, "a", "b").entry.pos, 50);
+        // slots(2) = [25, 75]; the fixed 50 takes 25 (the smaller at a tie); 50 is the fixed end's,
+        // so the free end takes the spot left nearest 50, which is 75.
+        assert_eq!(wire(&w, "c", "b").entry.pos, 75);
+        assert!(notes.is_empty(), "{notes:?}");
+        // Alone on its side, a free end with a written position takes it.
+        free.entry_pos = Some(30);
+        let (w, _) = route_planned(&m, &l, &Rules::builtin(), &[keep_draft(&m, 0, Side::Right, Side::Top, Bend::Elbow, Keep::Free), free]);
+        assert_eq!(wire(&w, "c", "b").entry.pos, 30);
+    }
+
+    /// `x` sits in the middle of the line from a to b, with room to go round it on the same sides.
+    fn icon_in_the_way(keep: Keep) -> (Model, Layout, Vec<LinePlan>) {
+        let (m, l) = scene(&[("a", 0, 100, S3), ("x", 150, 100, S3), ("b", 300, 100, S3)], &[("a", "b", Rel::Main, HTTPS)]);
+        let p = keep_draft(&m, 0, Side::Right, Side::Left, Bend::Straight, keep);
+        (m, l, vec![p])
+    }
+
+    // Fails if a line kept whole is searched round an icon in its way, or is drawn over it without the unrouted note.
+    #[test]
+    fn a_whole_line_is_not_searched_round_an_icon_in_its_way() {
+        let (m, l, plans) = icon_in_the_way(Keep::Free);
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        let ab = wire(&w, "a", "b");
+        assert_eq!((ab.exit.side, ab.entry.side), (Side::Right, Side::Left));
+        assert!(!ab.points.is_empty(), "a free line goes round x");
+        assert!(!notes.contains(&unrouted("edge-a-to-b")), "{notes:?}");
+        let (m, l, plans) = icon_in_the_way(Keep::Whole);
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        let ab = wire(&w, "a", "b");
+        assert_eq!(drawn(ab, &l), [(60, 130), (300, 130)]);
+        assert!(notes.contains(&unrouted("edge-a-to-b")), "{notes:?}");
+    }
+
+    /// `a` inside the frame `f`, whose right side is at x = 250; `b` outside it. The line leaves
+    /// through the gate (250, 130) after the inner point (150, 130).
+    fn leaving(icons: &[IconSpec]) -> (Model, Layout, Vec<LinePlan>) {
+        let mut all = vec![("a", 0, 100, S3), ("b", 450, 100, S3)];
+        all.extend_from_slice(icons);
+        let (m, mut l) = scene(&all, &[("a", "b", Rel::Main, HTTPS)]);
+        l.frames.push(Frame { id: "f".to_string(), kind: FrameKind::Vpc, label: "F".to_string(), rect: Rect { x: -50, y: -50, w: 300, h: 300 }, parent: Some("region".to_string()) });
+        l.icons[0].parent = Some("f".to_string());
+        let through = Through { gate: (250, 130), inner: vec![(150, 130)], inner_is_start: true };
+        let p = keep_draft(&m, 0, Side::Right, Side::Left, Bend::Straight, Keep::Inner(through));
+        (m, l, vec![p])
+    }
+
+    // Fails if a line leaving a frame does not run from its exit through the inner points and the gate, in that order.
+    #[test]
+    fn a_line_leaving_a_frame_runs_inner_points_then_gate() {
+        let (m, l, plans) = leaving(&[]);
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        assert_eq!(drawn(wire(&w, "a", "b"), &l), [(60, 130), (150, 130), (250, 130), (450, 130)]);
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(audit(&m, &l, &w, &plans, Measure::Flow), Vec::<String>::new());
+    }
+
+    /// The drawn path keeps the gate and the inner points in order, and stays clear of the icon `x`.
+    fn assert_kept_inner_round(w: &Wire, l: &Layout, kept: &[(i32, i32)]) {
+        let path = drawn(w, l);
+        let at = path.windows(kept.len()).position(|s| s == kept).unwrap_or_else(|| panic!("{kept:?} not in {path:?}"));
+        assert!(at > 0 || kept[0] == path[0], "{path:?}");
+        let x = l.rect("x");
+        let full = full_path(w, l);
+        assert!(full.windows(2).all(|s| !segment_hits_rect(s[0], s[1], x)), "{full:?}");
+    }
+
+    // Fails if the outer part of a line kept inside is not searched when its draft meets an icon, in either direction.
+    #[test]
+    fn the_outer_part_of_a_line_kept_inside_is_searched_round_an_icon() {
+        // Entering: x between a and the gate (200, 130).
+        let (m, mut l, plans) = crossing();
+        l.icons.push(Icon { id: "x".to_string(), label: String::new(), lines: 1, rect: Rect { x: 100, y: 100, w: 60, h: 60 }, parent: Some("region".to_string()) });
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        let ab = wire(&w, "a", "b");
+        assert_eq!((ab.exit.side, ab.entry.side, ab.entry.pos), (Side::Right, Side::Left, 50));
+        assert_kept_inner_round(ab, &l, &[(200, 130), (300, 130), (400, 130)]);
+        assert!(notes.is_empty(), "{notes:?}");
+        // Leaving: x between the gate (250, 130) and b.
+        let (m, l, plans) = leaving(&[("x", 330, 100, "")]);
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        let ab = wire(&w, "a", "b");
+        assert_eq!((ab.exit.side, ab.exit.pos, ab.entry.side), (Side::Right, 50, Side::Left));
+        assert_kept_inner_round(ab, &l, &[(60, 130), (150, 130), (250, 130)]);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    // Fails if the outer part of a line kept inside, which no search can draw, moves its outer end to another side or goes without a note.
+    #[test]
+    fn the_outer_part_no_search_can_draw_is_kept_as_planned_and_named() {
+        // Entering: w touches a's right side, where the outer part starts.
+        let (m, mut l, plans) = crossing();
+        l.icons.push(Icon { id: "w".to_string(), label: String::new(), lines: 1, rect: Rect { x: 60, y: 100, w: 60, h: 60 }, parent: Some("region".to_string()) });
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        assert_eq!(drawn(wire(&w, "a", "b"), &l), [(60, 130), (200, 130), (300, 130), (400, 130)]);
+        assert!(notes.contains(&unrouted("edge-a-to-b")), "{notes:?}");
+        // Leaving: w touches b's left side, where the outer part ends.
+        let (m, l, plans) = leaving(&[("w", 390, 100, "")]);
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        assert_eq!(drawn(wire(&w, "a", "b"), &l), [(60, 130), (150, 130), (250, 130), (450, 130)]);
+        assert!(notes.contains(&unrouted("edge-a-to-b")), "{notes:?}");
+    }
+
+    // Fails if straightening moves an end of a line whose ends are both fixed at different positions.
+    #[test]
+    fn straightening_leaves_a_line_fixed_at_both_ends() {
+        let (m, l) = scene(&[("a", 0, 0, S3), ("b", 300, 0, S3)], &[("a", "b", Rel::Main, HTTPS)]);
+        let mut p = keep_draft(&m, 0, Side::Right, Side::Left, Bend::Points(vec![(180, 15), (180, 45)]), Keep::Whole);
+        (p.exit_pos, p.entry_pos) = (Some(25), Some(75));
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &[p]);
+        let ab = wire(&w, "a", "b");
+        assert_eq!((ab.exit.pos, ab.entry.pos), (25, 75));
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    // Fails if the final check does not look at an upright track.
+    #[test]
+    fn audit_finds_a_line_off_an_upright_track() {
+        let (m, l) = scene(&[("a", 0, 0, S3), ("b", 300, 200, S3)], &[("a", "b", Rel::Main, HTTPS)]);
+        let mut p = keep_draft(&m, 0, Side::Right, Side::Left, Bend::Points(vec![(150, 30), (150, 230)]), Keep::Free);
+        p.tracks = vec![Track { horizontal: false, from: 50, to: 210, at: 150 }];
+        let plans = vec![p];
+        let (mut w, _) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        assert_eq!(drawn(&w[0], &l), [(60, 30), (150, 30), (150, 230), (300, 230)]);
+        assert_eq!(audit(&m, &l, &w, &plans, Measure::Flow), Vec::<String>::new());
+        w[0].points = vec![(160, 30), (160, 230)];
+        assert_eq!(audit(&m, &l, &w, &[], Measure::Flow), Vec::<String>::new(), "the moved line overlaps nothing");
+        assert!(audit(&m, &l, &w, &plans, Measure::Flow).contains(&"edge-a-to-b".to_string()));
+    }
+
+    // Fails if the final check takes a track as kept when the line leaves it and comes back, leaving a gap.
+    #[test]
+    fn audit_finds_a_gap_in_a_track() {
+        let (m, l) = scene(&[("a", 0, 0, S3), ("b", 300, 0, S3)], &[("a", "b", Rel::Main, HTTPS)]);
+        let mut p = keep_draft(&m, 0, Side::Right, Side::Left, Bend::Straight, Keep::Free);
+        p.tracks = vec![Track { horizontal: true, from: 80, to: 280, at: 30 }];
+        let plans = vec![p];
+        let (mut w, _) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        assert_eq!(audit(&m, &l, &w, &plans, Measure::Flow), Vec::<String>::new());
+        // At 30 from 60 to 100 and from 200 to 300: the band's 100 to 200 is left.
+        w[0].points = vec![(100, 30), (100, 80), (200, 80), (200, 30)];
+        assert_eq!(audit(&m, &l, &w, &[], Measure::Flow), Vec::<String>::new(), "the line overlaps nothing");
+        assert!(audit(&m, &l, &w, &plans, Measure::Flow).contains(&"edge-a-to-b".to_string()));
     }
 }

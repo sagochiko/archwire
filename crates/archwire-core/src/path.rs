@@ -412,7 +412,16 @@ impl<'a> Scene<'a> {
 
 /// The path a shape gives between two ports, or None for a shape left to the search. Waypoints
 /// are kept as written, even in a straight run; only a point repeating the one before is dropped.
+/// The corners of the other shapes are dropped where they lie on a straight run.
 pub(crate) fn shape_path(shape: &Shape, ep: Pt, np: Pt, out: Dir) -> Option<Vec<Pt>> {
+    let raw = shape_points(shape, ep, np, out)?;
+    Some(if matches!(shape, Shape::Points(_)) { raw } else { simplify(raw) })
+}
+
+/// Every corner a shape gives between two ports, in order, or None for a shape left to the
+/// search; only a point repeating the one before is dropped, so a shape that turns back on
+/// itself still shows it.
+pub(crate) fn shape_points(shape: &Shape, ep: Pt, np: Pt, out: Dir) -> Option<Vec<Pt>> {
     let raw = match shape {
         Shape::Straight => vec![ep, np],
         Shape::ChannelY(y) => vec![ep, (ep.0, *y), (np.0, *y), np],
@@ -423,11 +432,11 @@ pub(crate) fn shape_path(shape: &Shape, ep: Pt, np: Pt, out: Dir) -> Option<Vec<
             let mut raw = vec![ep];
             raw.extend(v.iter().copied());
             raw.push(np);
-            return Some(dedup(raw));
+            raw
         }
         Shape::Search => return None,
     };
-    Some(simplify(raw))
+    Some(dedup(raw))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -456,6 +465,9 @@ pub(crate) struct Draft {
     /// Positions the draft keeps: taken first, and the side's other ends shared out around them.
     pub(crate) exit_fixed: Option<u8>,
     pub(crate) entry_fixed: Option<u8>,
+    /// Positions the draft writes for an end it does not fix: taken next, after the fixed ends.
+    pub(crate) exit_want: Option<u8>,
+    pub(crate) entry_want: Option<u8>,
     pub(crate) shape: Shape,
     pub(crate) rank: u8,
     pub(crate) keep: Keep,
@@ -463,12 +475,34 @@ pub(crate) struct Draft {
 }
 
 pub(crate) fn draft(exit: Side, entry: Side, shape: Shape, rank: u8) -> Draft {
-    Draft { exit, entry, exit_pin: None, entry_pin: None, exit_fixed: None, entry_fixed: None, shape, rank, keep: Keep::Free, axis: Axis::Right }
+    Draft {
+        exit,
+        entry,
+        exit_pin: None,
+        entry_pin: None,
+        exit_fixed: None,
+        entry_fixed: None,
+        exit_want: None,
+        entry_want: None,
+        shape,
+        rank,
+        keep: Keep::Free,
+        axis: Axis::Right,
+    }
 }
 
 impl Draft {
-    /// The draft a line plan gives. A position the plan writes for an end it does not fix stays
-    /// where it is written, outside the sharing out.
+    /// Where the exit sits before the sharing out: fixed, written, pinned, else the middle.
+    pub(crate) fn exit_start(&self) -> u8 {
+        self.exit_fixed.or(self.exit_want).or(self.exit_pin).unwrap_or(50)
+    }
+
+    pub(crate) fn entry_start(&self) -> u8 {
+        self.entry_fixed.or(self.entry_want).or(self.entry_pin).unwrap_or(50)
+    }
+
+    /// The draft a line plan gives. A position the plan writes for an end it does not fix is
+    /// taken where it is written unless a fixed end has it (see `share_out`).
     pub(crate) fn from_plan(p: &LinePlan, rank: u8) -> Draft {
         let shape = match &p.bend {
             Bend::Straight => Shape::Straight,
@@ -481,10 +515,12 @@ impl Draft {
         Draft {
             exit: p.exit,
             entry: p.entry,
-            exit_pin: if exit_fixed.is_none() { p.exit_pos } else { None },
-            entry_pin: if entry_fixed.is_none() { p.entry_pos } else { None },
+            exit_pin: None,
+            entry_pin: None,
             exit_fixed,
             entry_fixed,
+            exit_want: if exit_fixed.is_none() { p.exit_pos } else { None },
+            entry_want: if entry_fixed.is_none() { p.entry_pos } else { None },
             shape,
             rank,
             keep: p.keep.clone(),
@@ -597,7 +633,10 @@ impl<'a> Ctx<'a> {
                 let outer = shape_path(&d.shape, sp.start.0, sp.goal.0, sp.start.1)?;
                 Some(sp.join(&outer))
             }
-            _ => shape_path(&d.shape, ep, np, out),
+            // Drawn as planned, corner for corner: a draft that turns back stays as it is and
+            // fails the check, instead of being straightened into a line that passes.
+            Keep::Whole => shape_points(&d.shape, ep, np, out),
+            Keep::Free => shape_path(&d.shape, ep, np, out),
         }
     }
 
@@ -624,8 +663,12 @@ impl<'a> Ctx<'a> {
             Keep::Inner(t) => {
                 let sp = split(t, ep, np, out, inward);
                 let ((a, leave), (b, arrive)) = (sp.start, sp.goal);
+                // Where the exit, the gate and the entry meet, the line still keeps both ends,
+                // and a line of no length is named.
+                let two = |p: Vec<Pt>| if p.len() < 2 { vec![ep, np] } else { p };
                 if a == b {
-                    return Ok(sp.join(&[a]));
+                    let p = sp.join(&[a]);
+                    return if p.len() < 2 { Err(two(p)) } else { Ok(p) };
                 }
                 let ids = (s.from.as_str(), s.to.as_str());
                 let planned = shape_path(&d.shape, a, b, leave).filter(|p| p.len() >= 2);
@@ -635,7 +678,7 @@ impl<'a> Ctx<'a> {
                 if let Some(p) = self.scene.search((a, leave), (b, arrive), ids, sp.own, placed) {
                     return Ok(sp.join(&p));
                 }
-                Err(sp.join(&planned.unwrap_or_else(|| vec![a, b])))
+                Err(two(sp.join(&planned.unwrap_or_else(|| vec![a, b]))))
             }
         }
     }
@@ -662,8 +705,8 @@ impl<'a> Ctx<'a> {
     /// Whether a draft can be drawn past the icons, labels and frame names, with its ports in the
     /// middle of their sides or where the draft fixes or pins them.
     pub(crate) fn fits(&self, s: &Line, d: &Draft) -> bool {
-        let exit = self.port(&s.from, d.exit, d.exit_fixed.or(d.exit_pin).unwrap_or(50));
-        let entry = self.port(&s.to, d.entry, d.entry_fixed.or(d.entry_pin).unwrap_or(50));
+        let exit = self.port(&s.from, d.exit, d.exit_start());
+        let entry = self.port(&s.to, d.entry, d.entry_start());
         self.try_route(s, d, (exit, entry), &[], false).is_some()
     }
 
@@ -725,10 +768,14 @@ impl<'a> Ctx<'a> {
     /// left or right side, top to bottom, and the farther first among ends at the same height.
     /// A side with ends the drafts fix takes `slots` for all its ends, takes out for each fixed
     /// end the spot nearest its position (the smaller at a tie), and gives the rest to the free
-    /// ends in that order, so no free end lands on a fixed one's spot. Pinned ends are left out.
+    /// ends in that order, so no free end lands on a fixed one's spot. An end with a position
+    /// written by its draft comes after the fixed ends: it keeps that position unless an end
+    /// before it on the side has it, and then takes the spot left nearest it (the smaller at a
+    /// tie); either way it takes out the spot nearest where it sits. Pinned ends are left out.
     pub(crate) fn share_out(&self, specs: &[Line], drafts: &[Draft]) -> Vec<(Port, Port)> {
         type Key = (i32, i32, usize);
-        type Ends = Vec<(Key, usize, bool, Option<u8>)>;
+        /// (order, line, is the exit, fixed position, written position)
+        type Ends = Vec<(Key, usize, bool, Option<u8>, Option<u8>)>;
         let mut sides: BTreeMap<(&str, u8), Ends> = BTreeMap::new();
         let side_index = |s: Side| s as u8;
         let key = |side: Side, this: Pt, other: Pt, i: usize| -> Key {
@@ -740,26 +787,32 @@ impl<'a> Ctx<'a> {
         for (i, (s, d)) in specs.iter().zip(drafts).enumerate() {
             let (fc, tc) = (center(self.layout.rect(&s.from)), center(self.layout.rect(&s.to)));
             if d.exit_fixed.is_some() || d.exit_pin.is_none() {
-                sides.entry((s.from.as_str(), side_index(d.exit))).or_default().push((key(d.exit, fc, tc, i), i, true, d.exit_fixed));
+                sides.entry((s.from.as_str(), side_index(d.exit))).or_default().push((key(d.exit, fc, tc, i), i, true, d.exit_fixed, d.exit_want));
             }
             if d.entry_fixed.is_some() || d.entry_pin.is_none() {
-                sides.entry((s.to.as_str(), side_index(d.entry))).or_default().push((key(d.entry, tc, fc, i), i, false, d.entry_fixed));
+                sides.entry((s.to.as_str(), side_index(d.entry))).or_default().push((key(d.entry, tc, fc, i), i, false, d.entry_fixed, d.entry_want));
             }
         }
-        let mut pos: Vec<(u8, u8)> = drafts
-            .iter()
-            .map(|d| (d.exit_fixed.or(d.exit_pin).unwrap_or(50), d.entry_fixed.or(d.entry_pin).unwrap_or(50)))
-            .collect();
+        let mut pos: Vec<(u8, u8)> = drafts.iter().map(|d| (d.exit_start(), d.entry_start())).collect();
+        let nearest = |spots: &[u8], to: u8| {
+            (0..spots.len()).min_by_key(|&k| ((spots[k] as i32 - to as i32).abs(), spots[k])).expect("slots gives a spot for every end")
+        };
         for (_, mut ends) in sides {
             ends.sort();
             let mut spots = slots(ends.len());
+            let mut taken: Vec<u8> = Vec::new();
             for fixed in ends.iter().filter_map(|e| e.3) {
-                let nearest = (0..spots.len())
-                    .min_by_key(|&k| ((spots[k] as i32 - fixed as i32).abs(), spots[k]))
-                    .expect("slots gives a spot for every end");
-                spots.remove(nearest);
+                spots.remove(nearest(&spots, fixed));
+                taken.push(fixed);
             }
-            for (k, &(_, i, is_exit, _)) in ends.iter().filter(|e| e.3.is_none()).enumerate() {
+            for &(_, i, is_exit, _, want) in ends.iter().filter(|e| e.3.is_none()) {
+                let Some(want) = want else { continue };
+                let at = if taken.contains(&want) { spots[nearest(&spots, want)] } else { want };
+                spots.remove(nearest(&spots, at));
+                taken.push(at);
+                if is_exit { pos[i].0 = at } else { pos[i].1 = at }
+            }
+            for (k, &(_, i, is_exit, _, _)) in ends.iter().filter(|e| e.3.is_none() && e.4.is_none()).enumerate() {
                 let p = spots[k];
                 if is_exit { pos[i].0 = p } else { pos[i].1 = p }
             }
