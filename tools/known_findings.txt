@@ -1,0 +1,1 @@
+# Known geocheck findings that do not fail tools/check_cases.sh, one per line: <case> <kind> <finding>

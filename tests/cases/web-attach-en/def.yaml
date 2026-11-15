@@ -1,0 +1,4 @@
+flows:
+  - user -> cloudfront -> alb -> ecs
+  - waf -- cloudfront
+  - acm -- cloudfront

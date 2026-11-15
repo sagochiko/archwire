@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Counts geometry faults in a .drawio diagram as draw.io actually renders it.
 
-    python3 tools/geocheck.py diagram.drawio [--json]
+    python3 tools/geocheck.py diagram.drawio [--json] [--known known_findings.txt]
 
 The diagram is exported to SVG with the draw.io desktop CLI (`drawio` on PATH). Line
 routes come from the rendered paths and text boxes from the pixels of the rendered labels,
@@ -10,11 +10,22 @@ so the counts describe the picture, not the coordinates written in the file.
 Only the first page is checked. One line per kind is printed, always in the same order,
 as `<kind>: <count>`, each followed by its findings indented by four spaces.
 
-Exit status: 1 if any blocking kind (line_over_text, line_over_icon, line_overlap) has a
-finding; 2 if the checker could not read the diagram: the file or the rendering is unreadable,
-`drawio` or Pillow is missing, or the rendering yields fewer text boxes, lines or icon boxes than
-the file has labelled cells, edges or icons (the missing ids are printed); else 0. The other
-kinds are reported but do not fail.
+The blocking kinds are line_over_text, line_over_icon, line_overlap, icon_overlap (two icon
+boxes, each shrunk by 2px, overlap), text_overlap (two text boxes, each shrunk by 1px, overlap;
+icon labels, line labels and frame names all count) and outside_frame (an icon's box or its
+label's box sticks out of the frame that is its parent). The other kinds are reported but do
+not fail.
+
+With `--known`, findings listed in that file are printed with ` (known)` and do not fail. Each
+line of the file is `<case> <kind> <finding>`, where the case is the name of the folder that holds
+the diagram; text from `#` to the end of a line is a comment. A listed finding for this case that
+is no longer found is printed as `stale known finding: <case> <kind> <finding>` and fails, so the
+list does not go out of date.
+
+Exit status: 1 if a blocking kind has a finding that is not in the known list, or a known finding
+is stale; 2 if the checker could not read the diagram or the known list: the file or the rendering
+is unreadable, `drawio` or Pillow is missing, or the rendering yields fewer text boxes, lines or
+icon boxes than the file has labelled cells, edges or icons (the missing ids are printed); else 0.
 
 Deliberately not counted: a line through the blank margin of an icon's 60x60 box (the icon's
 box is shrunk by 2px), a line over the icon at either of its own ends, and a line over its
@@ -22,7 +33,7 @@ own label.
 
     python3 tools/geocheck.py --self-test
 
-checks the read-coverage comparison without draw.io.
+checks the read-coverage comparison, the overlap and frame checks and the known list without draw.io.
 """
 import base64
 import io
@@ -46,8 +57,11 @@ KINDS = [
     "frame_over_text",
     "line_crossing",
     "port_position",
+    "icon_overlap",
+    "text_overlap",
+    "outside_frame",
 ]
-BLOCKING = {"line_over_text", "line_over_icon", "line_overlap"}
+BLOCKING = {"line_over_text", "line_over_icon", "line_overlap", "icon_overlap", "text_overlap", "outside_frame"}
 
 
 class CheckError(Exception):
@@ -286,6 +300,66 @@ def port_rule(cells):
     return bad
 
 
+def shrink(box, by):
+    return (box[0] + by, box[1] + by, box[2] - by, box[3] - by)
+
+
+def boxes_overlap(a, b):
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+def overlapping_pairs(boxes, by):
+    """Pairs of ids, in id order, whose boxes still overlap after each is shrunk by `by` px."""
+    ids = sorted(boxes)
+    small = {cid: shrink(boxes[cid], by) for cid in ids}
+    return [(a, b) for i, a in enumerate(ids) for b in ids[i + 1:] if boxes_overlap(small[a], small[b])]
+
+
+def icon_overlaps(icons):
+    """Icons drawn over each other; touching within 2px is not counted."""
+    return [f"{a} and {b}" for a, b in overlapping_pairs(icons, 2)]
+
+
+def text_overlaps(labels):
+    """Texts drawn over each other (icon labels, line labels and frame names); touching within 1px is not counted."""
+    return [f"the text of {a} and the text of {b}" for a, b in overlapping_pairs(labels, 1)]
+
+
+def inside(box, frame):
+    return frame[0] <= box[0] and frame[1] <= box[1] and box[2] <= frame[2] and box[3] <= frame[3]
+
+
+def outside_frames(cells, icons, labels, rects):
+    """Icons whose box or label box sticks out of the frame that is their parent cell."""
+    bad = []
+    for cid in sorted(icons):
+        cell = cells.get(cid) or {}
+        frame = rects.get(cell.get("parent"))
+        if frame is None:
+            continue
+        boxes = [icons[cid]] + ([labels[cid]] if cid in labels else [])
+        if not all(inside(b, frame) for b in boxes):
+            bad.append(f"{cid} outside {cell.get('parent')}")
+    return bad
+
+
+def read_known(path):
+    """The known findings, as `(case, kind, finding)`; each line is `<case> <kind> <finding>`.
+
+    Text from `#` to the end of a line is a comment; blank lines are skipped.
+    """
+    known = set()
+    for n, raw in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        parts = line.split(None, 2)
+        if len(parts) != 3 or parts[1] not in KINDS:
+            raise CheckError(f"{path}:{n}: expected `<case> <kind> <finding>` with a known kind, got {raw!r}")
+        known.add(tuple(parts))
+    return known
+
+
 def expected_parts(cells):
     """What the file says the rendering must contain: labelled cells, edges and icons."""
     groups = {cid for cid, c in cells.items() if c.get("vertex") == "1" and
@@ -378,6 +452,9 @@ def check(drawio):
                     if overlap(s, t):
                         found["line_overlap"].append(f"{a} and {b}")
     found["port_position"] = port_rule(cells)
+    found["icon_overlap"] = icon_overlaps(icons)
+    found["text_overlap"] = text_overlaps(labels)
+    found["outside_frame"] = outside_frames(cells, icons, labels, rects)
     return {k: sorted(set(found.get(k, []))) for k in KINDS}
 
 
@@ -443,9 +520,57 @@ def self_test():
         assert status == 0, status
     finally:
         check = real
+    # Icon boxes shrunk by 2px, text boxes shrunk by 1px, and parts outside their parent frame.
+    got = icon_overlaps({"a": (0, 0, 60, 60), "b": (50, 0, 110, 60), "c": (200, 0, 260, 60)})
+    assert got == ["a and b"], got
+    got = icon_overlaps({"a": (0, 0, 60, 60), "b": (59, 0, 119, 60)})
+    assert got == [], got
+    got = text_overlaps({"x": (0, 70, 80, 90), "y": (70, 75, 150, 95), "z": (0, 200, 10, 210)})
+    assert got == ["the text of x and the text of y"], got
+    frame_cells = {
+        "r": {"id": "r", "vertex": "1", "value": "Frame", "style": "group"},
+        "in": {"id": "in", "vertex": "1", "value": "In", "parent": "r"},
+        "out": {"id": "out", "vertex": "1", "value": "", "parent": "r"},
+    }
+    got = outside_frames(frame_cells, {"in": (10, 10, 70, 70), "out": (250, 10, 310, 70)},
+                         {"in": (0, 74, 80, 94)}, {"r": (0, 0, 300, 200)})
+    assert got == ["out outside r"], got
+    # Through main with a list of known findings: the case name is the diagram's folder name.
+    finding = "the text of a and the text of b"
+
+    def fake_found(_path):
+        out = {k: [] for k in KINDS}
+        out["text_overlap"] = [finding]
+        return out
+
+    def run_known(fake_check, known_text):
+        global check
+        with tempfile.TemporaryDirectory() as tmp:
+            known = Path(tmp) / "known.txt"
+            known.write_text(known_text)
+            err, out = io.StringIO(), io.StringIO()
+            check = fake_check
+            try:
+                with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+                    status = main(["geocheck.py", "cases/web-x/expected.drawio", "--known", str(known)])
+            finally:
+                check = real
+            return status, out.getvalue() + err.getvalue()
+    line = f"web-x text_overlap {finding}  # a comment\n"
+    status, text = run_known(fake_found, "# known findings\n" + line)
+    assert status == 0 and f"{finding} (known)" in text, (status, text)
+    status, text = run_known(fake_found, "")
+    assert status == 1, (status, text)
+    status, text = run_known(fake(ok), line)
+    assert status == 1 and f"stale known finding: web-x text_overlap {finding}" in text, (status, text)
+    # A finding listed for another case does not count for this one.
+    status, text = run_known(fake_found, f"web-y text_overlap {finding}\n")
+    assert status == 1 and "stale" not in text, (status, text)
     print("self-test: counts match -> exit 0; line e1 with 0 or 1 points -> exit 2 naming e1; flat boxes -> " + " | ".join(flat))
     print("self-test: short reads -> exit 2 with: " + " | ".join(short))
     print("self-test: m/l/h/v paths read, a curve is not read")
+    print("self-test: icons overlapping past 2px, texts past 1px, and parts outside their frame are found; "
+          "known findings pass, unlisted ones fail, stale ones fail")
     print("self-test: passed")
     return 0
 
@@ -453,12 +578,23 @@ def self_test():
 def main(argv):
     if "--self-test" in argv:
         return self_test()
-    args = [a for a in argv[1:] if not a.startswith("--")]
+    args, known_path, rest = [], None, iter(argv[1:])
+    for a in rest:
+        if a == "--known":
+            known_path = next(rest, None)
+            if known_path is None:
+                print(__doc__.strip(), file=sys.stderr)
+                return 2
+        elif not a.startswith("--"):
+            args.append(a)
     if len(args) != 1:
         print(__doc__.strip(), file=sys.stderr)
         return 2
+    diagram = Path(args[0])
+    case = diagram.parent.name
     try:
-        result = check(Path(args[0]))
+        known = {(k, f) for c, k, f in read_known(known_path) if c == case} if known_path else set()
+        result = check(diagram)
     except (CheckError, ET.ParseError, OSError, subprocess.TimeoutExpired) as e:
         print(f"geocheck: {e}", file=sys.stderr)
         return 2
@@ -468,8 +604,12 @@ def main(argv):
         for k in KINDS:
             print(f"{k}: {len(result[k])}")
             for x in result[k]:
-                print("   ", x)
-    return 1 if any(result[k] for k in BLOCKING) else 0
+                print("   ", x + (" (known)" if (k, x) in known else ""))
+    stale = sorted(kf for kf in known if kf[1] not in result.get(kf[0], []))
+    for k, f in stale:
+        print(f"stale known finding: {case} {k} {f}")
+    blocking = any(x for k in BLOCKING for x in result[k] if (k, x) not in known)
+    return 1 if blocking or stale else 0
 
 
 if __name__ == "__main__":

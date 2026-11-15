@@ -20,10 +20,10 @@ for expected in tests/cases/*/expected.drawio; do
     name=$(basename "$(dirname "$expected")")
     checked=$((checked + 1))
     echo "== $name"
-    python3 tools/geocheck.py "$expected"
+    python3 tools/geocheck.py "$expected" --known tools/known_findings.txt
     status=$?
     if [ "$status" -eq 1 ]; then
-        echo "check_cases: $name has a blocking fault in the diagram"
+        echo "check_cases: $name has a blocking fault in the diagram or a stale known finding"
         failed="$failed $name"
     elif [ "$status" -ne 0 ]; then
         echo "check_cases: the checker could not read $name (status $status); this says nothing about the diagram itself" >&2
