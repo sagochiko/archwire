@@ -40,6 +40,16 @@ if [ "$checked" -eq 0 ]; then
     echo "check_cases: no case under tests/cases has an expected.drawio" >&2
     exit 1
 fi
+# A known finding for a case that was not checked here (a removed case, a misspelt name) would
+# never be reported as stale by geocheck, so every case name in the list must be a checked case.
+known_cases=$(sed -e 's/#.*//' tools/known_findings.txt | awk 'NF { print $1 }' | sort -u)
+for k in $known_cases; do
+    if [ ! -e "tests/cases/$k/expected.drawio" ]; then
+        echo "check_cases: tools/known_findings.txt lists case '$k', which has no tests/cases/$k/expected.drawio" >&2
+        failed="$failed known:$k"
+    fi
+done
+
 if [ -n "$failed" ]; then
     echo "check_cases: failed:$failed"
     exit 1

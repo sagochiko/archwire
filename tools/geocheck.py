@@ -12,20 +12,21 @@ as `<kind>: <count>`, each followed by its findings indented by four spaces.
 
 The blocking kinds are line_over_text, line_over_icon, line_overlap, icon_overlap (two icon
 boxes, each shrunk by 2px, overlap), text_overlap (two text boxes, each shrunk by 1px, overlap;
-icon labels, line labels and frame names all count) and outside_frame (an icon's box or its
-label's box sticks out of the frame that is its parent). The other kinds are reported but do
-not fail.
+icon labels, line labels and frame names all count) and outside_frame (an icon or its name,
+or a frame, sticks out of its parent frame, or a frame's name sticks out of the frame itself).
+The other kinds are reported but do not fail.
 
 With `--known`, findings listed in that file are printed with ` (known)` and do not fail. Each
 line of the file is `<case> <kind> <finding>`, where the case is the name of the folder that holds
 the diagram; text from `#` to the end of a line is a comment. A listed finding for this case that
-is no longer found is printed as `stale known finding: <case> <kind> <finding>` and fails, so the
-list does not go out of date.
+is no longer found is printed to standard error as `stale known finding: <case> <kind> <finding>`
+and fails, so the list does not go out of date; with `--json`, standard output stays plain JSON.
 
 Exit status: 1 if a blocking kind has a finding that is not in the known list, or a known finding
 is stale; 2 if the checker could not read the diagram or the known list: the file or the rendering
 is unreadable, `drawio` or Pillow is missing, or the rendering yields fewer text boxes, lines or
-icon boxes than the file has labelled cells, edges or icons (the missing ids are printed); else 0.
+icon boxes than the file has labelled cells, edges or icons, or a frame that holds a part has no
+box (the missing ids are printed); else 0.
 
 Deliberately not counted: a line through the blank margin of an icon's 60x60 box (the icon's
 box is shrunk by 2px), a line over the icon at either of its own ends, and a line over its
@@ -330,16 +331,36 @@ def inside(box, frame):
 
 
 def outside_frames(cells, icons, labels, rects):
-    """Icons whose box or label box sticks out of the frame that is their parent cell."""
-    bad = []
-    for cid in sorted(icons):
-        cell = cells.get(cid) or {}
-        frame = rects.get(cell.get("parent"))
-        if frame is None:
+    """Parts drawn outside the frame they belong to.
+
+    An icon's box or its name's box outside its parent frame gives `<icon> outside <frame>`; a
+    frame's box outside its parent frame gives `<frame> outside <parent>`; a frame's name outside
+    the frame itself gives `the name of <frame> outside <frame>`. Every frame is checked against
+    its own parent, so this covers all the frames around a part, not only the nearest one. A frame
+    that holds a part but whose box was not read is a ReadError: skipping it would let anything
+    inside it pass unchecked.
+    """
+    groups = expected_parts(cells)[0]
+    bad, unread = [], set()
+    for cid in sorted(groups):
+        if cid not in rects:
             continue
-        boxes = [icons[cid]] + ([labels[cid]] if cid in labels else [])
-        if not all(inside(b, frame) for b in boxes):
-            bad.append(f"{cid} outside {cell.get('parent')}")
+        if cid in labels and not inside(labels[cid], rects[cid]):
+            bad.append(f"the name of {cid} outside {cid}")
+    for cid in sorted(set(icons) | groups):
+        cell = cells.get(cid) or {}
+        parent = cell.get("parent")
+        if parent not in groups:
+            continue
+        own = icons.get(cid, rects.get(cid))
+        if own is None or parent not in rects:
+            unread.update(f for f in (cid, parent) if f in groups and f not in rects)
+            continue
+        boxes = [own] + ([labels[cid]] if cid in icons and cid in labels else [])
+        if not all(inside(b, rects[parent]) for b in boxes):
+            bad.append(f"{cid} outside {parent}")
+    if unread:
+        raise ReadError(f"could not read the rendered diagram: no box for the frames {', '.join(sorted(unread))}")
     return bad
 
 
@@ -535,6 +556,26 @@ def self_test():
     got = outside_frames(frame_cells, {"in": (10, 10, 70, 70), "out": (250, 10, 310, 70)},
                          {"in": (0, 74, 80, 94)}, {"r": (0, 0, 300, 200)})
     assert got == ["out outside r"], got
+    # A frame is checked against its parent frame, and a frame's name against the frame itself.
+    nested = {
+        "r": {"id": "r", "vertex": "1", "value": "Outer"},
+        "s": {"id": "s", "vertex": "1", "value": "Inner", "parent": "r"},
+        "i": {"id": "i", "vertex": "1", "value": "", "parent": "s"},
+    }
+    nested_icons, nested_rects = {"i": (120, 40, 180, 100)}, {"r": (0, 0, 300, 200), "s": (100, 20, 290, 190)}
+    nested_labels = {"r": (5, 5, 40, 15), "s": (105, 25, 140, 35)}
+    assert outside_frames(nested, nested_icons, nested_labels, nested_rects) == []
+    got = outside_frames(nested, nested_icons, nested_labels, {**nested_rects, "s": (100, 20, 310, 190)})
+    assert got == ["s outside r"], got
+    got = outside_frames(nested, nested_icons, {**nested_labels, "s": (105, 10, 140, 35)}, nested_rects)
+    assert got == ["the name of s outside s"], got
+    # A frame that holds a part but has no box is a read error, not a skip.
+    for gone in ("r", "s"):
+        try:
+            outside_frames(nested, nested_icons, nested_labels, {k: v for k, v in nested_rects.items() if k != gone})
+            raise AssertionError(f"no read error without the box of {gone}")
+        except ReadError as e:
+            assert f"no box for the frames {gone}" in str(e), e
     # Through main with a list of known findings: the case name is the diagram's folder name.
     finding = "the text of a and the text of b"
 
@@ -566,13 +607,114 @@ def self_test():
     # A finding listed for another case does not count for this one.
     status, text = run_known(fake_found, f"web-y text_overlap {finding}\n")
     assert status == 1 and "stale" not in text, (status, text)
+    # The real check() and main(), with only the draw.io rendering replaced by made-up boxes.
+    status_of = real_path_self_test()
     print("self-test: counts match -> exit 0; line e1 with 0 or 1 points -> exit 2 naming e1; flat boxes -> " + " | ".join(flat))
     print("self-test: short reads -> exit 2 with: " + " | ".join(short))
     print("self-test: m/l/h/v paths read, a curve is not read")
     print("self-test: icons overlapping past 2px, texts past 1px, and parts outside their frame are found; "
           "known findings pass, unlisted ones fail, stale ones fail")
+    print("self-test: through the real check() and main(): " + " | ".join(f"{k} -> exit {v}" for k, v in status_of))
     print("self-test: passed")
     return 0
+
+
+REAL_PATH_DIAGRAM = """<mxfile><diagram id="p" name="Page-1"><mxGraphModel><root>
+<mxCell id="0"/>
+<mxCell id="1" parent="0"/>
+<mxCell id="r" value="Outer" style="group" vertex="1" parent="1"/>
+<mxCell id="s" value="Inner" style="group" vertex="1" parent="r"/>
+<mxCell id="a" value="A" vertex="1" parent="r"/>
+<mxCell id="b" value="B" vertex="1" parent="s"/>
+</root></mxGraphModel></diagram></mxfile>
+"""
+
+
+def real_path_self_test():
+    """Runs main() and the real check() on a written .drawio file, replacing only the rendering.
+
+    Each layout below moves one part so that exactly one of the new kinds has a finding.
+    """
+    import contextlib
+    global export_svg, read_svg
+    clean_rects = {"r": (0, 0, 400, 300), "s": (150, 30, 390, 290), "a": (20, 40, 80, 100), "b": (200, 60, 260, 120)}
+    clean_labels = {"r": (5, 5, 40, 15), "s": (155, 35, 190, 45), "a": (20, 104, 80, 114), "b": (200, 124, 260, 134)}
+    layouts = [
+        ("clean", {}, {}, None),
+        ("icon_overlap", {"a": (170, 90, 230, 150)}, {}, "a and b"),
+        ("text_overlap", {}, {"a": (190, 120, 250, 132)}, "the text of a and the text of b"),
+        ("outside_frame", {"a": (370, 40, 430, 100)}, {"a": (370, 104, 430, 114)}, "a outside r"),
+        ("outside_frame", {"s": (150, 30, 410, 290)}, {}, "s outside r"),
+    ]
+    real_export, real_read = export_svg, read_svg
+    status_of = []
+
+    def run(rects, labels, known_text=None):
+        global export_svg, read_svg
+        export_svg = lambda _drawio, out_dir: Path(out_dir) / "d.svg"
+        read_svg = lambda _svg, _edge_ids=(): ({}, dict(labels), dict(rects))
+        with tempfile.TemporaryDirectory() as tmp:
+            diagram = Path(tmp) / "web-x" / "expected.drawio"
+            diagram.parent.mkdir()
+            diagram.write_text(REAL_PATH_DIAGRAM)
+            argv = ["geocheck.py", str(diagram)]
+            if known_text is not None:
+                (Path(tmp) / "known.txt").write_text(known_text)
+                argv += ["--known", str(Path(tmp) / "known.txt")]
+            out, err = io.StringIO(), io.StringIO()
+            try:
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    status = main(argv)
+                    found = check(diagram)
+            finally:
+                export_svg, read_svg = real_export, real_read
+            return status, found, out.getvalue(), err.getvalue()
+    try:
+        for kind, rect_moves, label_moves, finding in layouts:
+            rects, labels = {**clean_rects, **rect_moves}, {**clean_labels, **label_moves}
+            status, found, out, _ = run(rects, labels)
+            for k in ("icon_overlap", "text_overlap", "outside_frame"):
+                want = [finding] if k == kind else []
+                assert found[k] == want, (kind, k, found[k])
+            assert status == (0 if finding is None else 1), (kind, status, out)
+            if finding is not None:
+                assert f"{kind}: 1\n    {finding}\n" in out, (kind, out)
+                status, _, out, _ = run(rects, labels, f"web-x {kind} {finding}\n")
+                assert status == 0 and f"{finding} (known)" in out, (kind, status, out)
+                label = f"{kind} ({finding})"
+                status_of.append((label, 1))
+                status_of.append((label + " listed as known", 0))
+        status, _, out, err = run(clean_rects, clean_labels, "web-x icon_overlap a and b\n")
+        assert status == 1 and "stale known finding: web-x icon_overlap a and b" in err, (status, err)
+        assert "stale" not in out, out
+        status_of.append(("a known finding that is no longer found", 1))
+        # With --json, a stale finding leaves standard output as plain JSON.
+        export_svg = lambda _drawio, out_dir: Path(out_dir) / "d.svg"
+        read_svg = lambda _svg, _edge_ids=(): ({}, dict(clean_labels), dict(clean_rects))
+        with tempfile.TemporaryDirectory() as tmp:
+            diagram = Path(tmp) / "web-x" / "expected.drawio"
+            diagram.parent.mkdir()
+            diagram.write_text(REAL_PATH_DIAGRAM)
+            (Path(tmp) / "known.txt").write_text("web-x icon_overlap a and b\n")
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                status = main(["geocheck.py", str(diagram), "--json", "--known", str(Path(tmp) / "known.txt")])
+        assert status == 1 and json.loads(out.getvalue())["icon_overlap"] == [] and "stale" in err.getvalue(), (status, out.getvalue())
+        # A frame that holds parts but was not read: exit 2, not a pass.
+        export_svg = lambda _drawio, out_dir: Path(out_dir) / "d.svg"
+        read_svg = lambda _svg, _edge_ids=(): ({}, dict(clean_labels), {k: v for k, v in clean_rects.items() if k != "s"})
+        with tempfile.TemporaryDirectory() as tmp:
+            diagram = Path(tmp) / "web-x" / "expected.drawio"
+            diagram.parent.mkdir()
+            diagram.write_text(REAL_PATH_DIAGRAM)
+            out, errio = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(errio):
+                status = main(["geocheck.py", str(diagram)])
+        assert status == 2 and "no box for the frames s" in errio.getvalue(), (status, errio.getvalue())
+        status_of.append(("a frame holding parts with no box", 2))
+    finally:
+        export_svg, read_svg = real_export, real_read
+    return status_of
 
 
 def main(argv):
@@ -607,7 +749,7 @@ def main(argv):
                 print("   ", x + (" (known)" if (k, x) in known else ""))
     stale = sorted(kf for kf in known if kf[1] not in result.get(kf[0], []))
     for k, f in stale:
-        print(f"stale known finding: {case} {k} {f}")
+        print(f"stale known finding: {case} {k} {f}", file=sys.stderr)
     blocking = any(x for k in BLOCKING for x in result[k] if (k, x) not in known)
     return 1 if blocking or stale else 0
 
