@@ -7,6 +7,7 @@ pub mod flow_infer;
 pub mod infer;
 pub mod layout;
 pub mod model;
+pub mod place;
 pub mod route;
 pub mod rules;
 
