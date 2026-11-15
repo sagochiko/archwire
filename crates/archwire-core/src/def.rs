@@ -427,6 +427,16 @@ mod tests {
         assert_eq!(parse("flows:\n  - ecs -> s3\n  - s3 ~> ecs\n").unwrap().links.len(), 2);
     }
 
+    // Fails if one pair of parts accepts two relations, which would give two lines the same id (edge-<from>-to-<to>).
+    #[test]
+    fn two_relations_between_one_pair_stop_before_drawing() {
+        let out = crate::compile("flows:\n  - user -> alb -> ecs\n  - ecs -> cloudwatch\n  - ecs ~> cloudwatch\nchoose:\n  route.ecs.cloudwatch: endpoint\n");
+        assert!(out.drawio.is_none());
+        let d = &out.diagnostics;
+        assert_eq!(d.exit_code(), 1, "{:?}", d.errors);
+        assert_eq!((d.errors[0].code.as_str(), d.errors[0].at.as_deref()), ("CONFLICTING_RELATION", Some("flows[2]")));
+    }
+
     #[test]
     fn a_conflicting_kind_in_the_middle_of_a_chain_is_reported_once() {
         let e = parse("flows:\n  - alb -> ecs(fargate)\n  - user -> ecs(ec2) -> aurora\n").unwrap_err();

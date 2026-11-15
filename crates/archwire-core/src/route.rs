@@ -2771,4 +2771,34 @@ mod tests {
         let unrouted = r.text("note.unrouted_line", crate::rules::Lang::En).replace("{line}", &ab.id);
         assert!(notes.contains(&unrouted), "{ab:?} {notes:?}");
     }
+
+    // Fails if a line already merged across AZs is counted again by the step that bundles side lines into one service, and dropped.
+    #[test]
+    #[ignore = "fixed when lines are gathered in one step"]
+    fn web_lines_merged_across_azs_survive_bundling() {
+        let src = format!("{WEB2}set:\n  lang: ja\n");
+        let r = Rules::builtin();
+        let (m, _) = crate::infer::infer(&crate::def::parse(&src).unwrap(), &r);
+        let m = m.unwrap();
+        let l = crate::layout::layout(&m, &r);
+        let (w, _) = route_planned(&m, &l, &r, &[]);
+        let cw: Vec<&Wire> = w.iter().filter(|x| x.to == "cloudwatch").collect();
+        assert_eq!(cw.len(), 1, "{:?}", w.iter().map(|x| &x.id).collect::<Vec<_>>());
+        assert_eq!(cw[0].represents, [("ecs-1a".to_string(), "cloudwatch".to_string()), ("ecs-1c".to_string(), "cloudwatch".to_string())]);
+    }
+
+    // Fails if a line whose target AZ has no copy of the sender is dropped instead of drawn from another AZ.
+    #[test]
+    fn three_zones_with_fewer_readers_keep_every_edge() {
+        let src = "flows:\n  - user -> alb -> ecs -> aurora\n  - aurora -> ecs\n  - aurora -> s3\nset:\n  azs: 3\n  readers: 1\nchoose:\n  route.aurora.s3: endpoint\n";
+        let (m, _, w, _) = wires(src);
+        let mut drawn: Vec<(String, String)> = w.iter().flat_map(|x| x.represents.clone()).collect();
+        let mut want: Vec<(String, String)> = m.edges.iter().map(|e| (e.from.clone(), e.to.clone())).collect();
+        drawn.sort();
+        want.sort();
+        assert_eq!(drawn, want);
+        let into_1d: Vec<&Wire> = w.iter().filter(|x| x.to == "ecs-1d" && x.from.starts_with("aurora-")).collect();
+        assert_eq!(into_1d.len(), 1, "{:?}", w.iter().map(|x| &x.id).collect::<Vec<_>>());
+        assert_eq!(into_1d[0].from, "aurora-1a");
+    }
 }
