@@ -156,7 +156,7 @@ pub fn port_point(r: Rect, p: Port) -> (i32, i32) {
 }
 
 /// How far a port on the bottom side moves down to clear the label: the first line, then each further line.
-const LABEL_FIRST: i32 = 24;
+pub(crate) const LABEL_FIRST: i32 = 24;
 pub(crate) const LABEL_LINE: i32 = 14;
 
 /// Ends closer in height than this count as level: the label goes above the line, centred.
@@ -1716,6 +1716,22 @@ mod tests {
         let ab = wire(&w, "a", "b");
         assert_eq!(drawn(ab, &l), [(60, 130), (300, 130)]);
         assert!(notes.contains(&unrouted("edge-a-to-b")), "{notes:?}");
+    }
+
+    // Fails if a line kept whole is stopped by a side line's planned path, which only sends searched lines round it.
+    #[test]
+    fn a_whole_line_may_cross_a_side_line() {
+        let (m, l) = scene(
+            &[("a", 0, 100, S3), ("b", 300, 100, S3), ("c", 150, 0, S3), ("d", 150, 220, S3)],
+            &[("a", "b", Rel::Main, HTTPS), ("c", "d", Rel::Aux, "logs_metrics")],
+        );
+        // The side line runs straight down at x = 180, across the main line's height 130.
+        let side = keep_draft(&m, 1, Side::Bottom, Side::Top, Bend::Straight, Keep::Free);
+        let main = keep_draft(&m, 0, Side::Right, Side::Left, Bend::Straight, Keep::Whole);
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &[main, side]);
+        assert_eq!(drawn(wire(&w, "a", "b"), &l), [(60, 130), (300, 130)]);
+        assert!(!notes.contains(&unrouted("edge-a-to-b")), "{notes:?}");
+        assert_eq!(drawn(wire(&w, "c", "d"), &l).iter().map(|p| p.0).collect::<Vec<_>>(), [180, 180]);
     }
 
     /// `a` inside the frame `f`, whose right side is at x = 250; `b` outside it. The line leaves

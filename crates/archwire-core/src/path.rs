@@ -233,6 +233,11 @@ impl<'a> Scene<'a> {
     /// names, by at least `margin`. The ends' own labels are skipped where the line leaves or enters
     /// below them, and so is the margin around the ends' own icons.
     fn clear(&self, a: Pt, b: Pt, (from, to): (&str, &str), (own_from, own_to): (bool, bool), margin: i32) -> bool {
+        self.clear_of(a, b, (from, to), (own_from, own_to), margin, true)
+    }
+
+    /// Like `clear`; `barriers` says whether the side lines' planned paths count.
+    fn clear_of(&self, a: Pt, b: Pt, (from, to): (&str, &str), (own_from, own_to): (bool, bool), margin: i32, barriers: bool) -> bool {
         let exempt = |id: &str| (own_from && id == from) || (own_to && id == to);
         let icons = self.icons.iter().all(|i| {
             let by = match (i.id == from || i.id == to, exempt(&i.id)) {
@@ -243,7 +248,8 @@ impl<'a> Scene<'a> {
             !hits(a, b, grow(i.rect, by))
         });
         let labels = self.labels.iter().all(|&(id, r)| exempt(id) || !hits(a, b, grow(r, margin)));
-        let barriers = self
+        let barriers = !barriers
+            || self
             .barriers
             .iter()
             .filter(|(p, q, _)| ![p, q].iter().any(|x| *x == from || *x == to))
@@ -306,7 +312,18 @@ impl<'a> Scene<'a> {
 
     /// Like `check`, for a part of a line: `own` says which of the part's ends are the line's own
     /// ends at an icon, whose label and margin the part may pass where it leaves or enters.
-    fn check_part(&self, path: &[Pt], (from, to): (&str, &str), (out, inward): (Dir, Dir), own: (bool, bool), placed: &[Vec<Pt>]) -> Option<usize> {
+    fn check_part(&self, path: &[Pt], ends: (&str, &str), dirs: (Dir, Dir), own: (bool, bool), placed: &[Vec<Pt>]) -> Option<usize> {
+        self.check_part_of(path, ends, dirs, own, placed, true)
+    }
+
+    /// Like `check`, for a line kept whole. It is drawn as planned and never searched, so it cannot
+    /// go round the side lines' planned paths, which only send searched lines round them; it may
+    /// cross them as it may cross any other line.
+    pub(crate) fn check_kept(&self, path: &[Pt], from: &str, to: &str, out: Dir, inward: Dir, placed: &[Vec<Pt>]) -> Option<usize> {
+        self.check_part_of(path, (from, to), (out, inward), (true, true), placed, false)
+    }
+
+    fn check_part_of(&self, path: &[Pt], (from, to): (&str, &str), (out, inward): (Dir, Dir), own: (bool, bool), placed: &[Vec<Pt>], barriers: bool) -> Option<usize> {
         if path.len() < 2 {
             return None;
         }
@@ -314,7 +331,7 @@ impl<'a> Scene<'a> {
         let mut crossings = 0;
         for (k, s) in path.windows(2).enumerate() {
             let d = dir_of(s[0], s[1])?;
-            if (k == 0 && d != out) || (k == last && d != inward) || !self.clear(s[0], s[1], (from, to), (k == 0 && own.0, k == last && own.1), 0) {
+            if (k == 0 && d != out) || (k == last && d != inward) || !self.clear_of(s[0], s[1], (from, to), (k == 0 && own.0, k == last && own.1), 0, barriers) {
                 return None;
             }
             crossings += self.against(s[0], s[1], placed)?;
@@ -655,7 +672,7 @@ impl<'a> Ctx<'a> {
             }),
             Keep::Whole => {
                 let path = self.draft_path(s, d, ports).filter(|p| p.len() >= 2).unwrap_or_else(|| vec![ep, np]);
-                match self.scene.check(&path, &s.from, &s.to, out, inward, placed) {
+                match self.scene.check_kept(&path, &s.from, &s.to, out, inward, placed) {
                     Some(_) => Ok(path),
                     None => Err(path),
                 }
