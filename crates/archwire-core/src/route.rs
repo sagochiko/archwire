@@ -202,6 +202,11 @@ fn facing(a: Rect, b: Rect) -> Side {
     if center(b).0 >= center(a).0 { Side::Right } else { Side::Left }
 }
 
+/// The rectangle of no width or no height an axis-aligned segment covers.
+fn span(a: Pt, b: Pt) -> Rect {
+    Rect { x: a.0.min(b.0), y: a.1.min(b.1), w: (a.0 - b.0).abs(), h: (a.1 - b.1).abs() }
+}
+
 fn grow(r: Rect, by: i32) -> Rect {
     Rect { x: r.x - by, y: r.y - by, w: r.w + 2 * by, h: r.h + 2 * by }
 }
@@ -526,6 +531,10 @@ struct Scene<'a> {
     borders: Vec<(Pt, Pt)>,
     xs: Vec<i32>,
     ys: Vec<i32>,
+    /// The planned paths of side lines, with the two parts each joins: other lines may not cross
+    /// them, so a line goes round a side part and its partner instead of between them. Only in
+    /// the layout without a VPC.
+    barriers: Vec<(String, String, Vec<Pt>)>,
 }
 
 impl<'a> Scene<'a> {
@@ -552,7 +561,7 @@ impl<'a> Scene<'a> {
                 [((l, t), (rt, t)), ((l, b), (rt, b)), ((l, t), (l, b)), ((rt, t), (rt, b))]
             })
             .collect();
-        Scene { icons: &layout.icons, labels, frame_names, borders, xs: channels(ex), ys: channels(ey) }
+        Scene { icons: &layout.icons, labels, frame_names, borders, xs: channels(ex), ys: channels(ey), barriers: Vec::new() }
     }
 
     /// Whether one segment of the line from `from` to `to` stays clear of icons, labels and frame
@@ -569,7 +578,12 @@ impl<'a> Scene<'a> {
             !hits(a, b, grow(i.rect, by))
         });
         let labels = self.labels.iter().all(|&(id, r)| exempt(id) || !hits(a, b, grow(r, margin)));
-        icons && labels && self.frame_names.iter().all(|&r| !hits(a, b, grow(r, margin)))
+        let barriers = self
+            .barriers
+            .iter()
+            .filter(|(p, q, _)| ![p, q].iter().any(|x| *x == from || *x == to))
+            .all(|(_, _, path)| path.windows(2).all(|s| !hits(a, b, grow(span(s[0], s[1]), margin.max(1)))));
+        icons && labels && barriers && self.frame_names.iter().all(|&r| !hits(a, b, grow(r, margin)))
     }
 
     /// Whether the label of line `me` taking `area` stays `margin` off every frame side, icon, icon
@@ -830,6 +844,23 @@ pub fn route_planned(model: &Model, layout: &Layout, rules: &Rules, plans: &[Lin
     let rest: Vec<usize> = (0..specs.len()).filter(|&i| drafts[i].is_none()).collect();
     ctx.plan_rest(&specs, &rest, &mut drafts);
     let drafts: Vec<Draft> = drafts.into_iter().map(|d| d.expect("every line planned")).collect();
+    // A side line drawn as planned between the middles of its sides, past every icon and name,
+    // is a barrier the other lines go round.
+    let barriers: Vec<(String, String, Vec<Pt>)> = specs
+        .iter()
+        .zip(&drafts)
+        .filter(|(s, _)| s.rel != Rel::Main)
+        .filter_map(|(s, d)| {
+            let (exit, entry) = (ctx.port(&s.from, d.exit, 50), ctx.port(&s.to, d.entry, 50));
+            let (ep, np) = (port_point(layout.rect(&s.from), exit), port_point(layout.rect(&s.to), entry));
+            let (out, inward) = (outward(d.exit), reverse(outward(d.entry)));
+            let path = shape_path(d.shape, ep, np, out)?;
+            ctx.scene.check(&path, &s.from, &s.to, out, inward, &[])?;
+            Some((s.from.clone(), s.to.clone(), path))
+        })
+        .collect();
+    let mut ctx = ctx;
+    ctx.scene.barriers = barriers;
     draw(&ctx, &specs, &drafts, notes)
 }
 

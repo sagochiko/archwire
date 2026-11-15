@@ -284,4 +284,61 @@ mod tests {
             }
         }
     }
+
+    /// The drawn path of a line: exit, waypoints, entry, with diagonal steps folded into right angles.
+    fn drawn(w: &route::Wire, layout: &layout::Layout) -> Vec<(i32, i32)> {
+        let mut raw = vec![route::port_point(layout.rect(&w.from), w.exit)];
+        raw.extend(w.points.iter().copied());
+        raw.push(route::port_point(layout.rect(&w.to), w.entry));
+        let mut out = vec![raw[0]];
+        for &p in &raw[1..] {
+            let a = *out.last().unwrap();
+            if a.0 != p.0 && a.1 != p.1 {
+                out.push((p.0, a.1));
+            }
+            out.push(p);
+        }
+        out
+    }
+
+    /// Main lines that cross a side line they share no part with, as "main x side".
+    fn main_lines_across_side_lines(src: &str) -> Vec<String> {
+        let rules = Rules::builtin();
+        let (model, _) = flow_infer::infer(&def::parse(src).unwrap(), &rules);
+        let model = model.unwrap();
+        let p = place::place(&model, &rules).unwrap();
+        let (wires, notes) = route::route_planned(&model, &p.layout, &rules, &p.lines);
+        assert!(notes.iter().all(|n| !n.contains("edge-")), "{notes:?}");
+        let cross = |a: (i32, i32), b: (i32, i32), c: (i32, i32), d: (i32, i32)| {
+            let (h, v) = if a.1 == b.1 { ((a, b), (c, d)) } else { ((c, d), (a, b)) };
+            let ((hx1, hx2), hy) = ((h.0 .0.min(h.1 .0), h.0 .0.max(h.1 .0)), h.0 .1);
+            let (vx, (vy1, vy2)) = (v.0 .0, (v.0 .1.min(v.1 .1), v.0 .1.max(v.1 .1)));
+            h.0 .1 == h.1 .1 && v.0 .0 == v.1 .0 && hx1 < vx && vx < hx2 && vy1 < hy && hy < vy2
+        };
+        let mut out = Vec::new();
+        for m in wires.iter().filter(|w| w.style == route::WireStyle::Main) {
+            for s in wires.iter().filter(|w| w.style != route::WireStyle::Main) {
+                if [&s.from, &s.to].iter().any(|x| **x == m.from || **x == m.to) {
+                    continue;
+                }
+                let (pm, ps) = (drawn(m, &p.layout), drawn(s, &p.layout));
+                if pm.windows(2).any(|a| ps.windows(2).any(|b| cross(a[0], a[1], b[0], b[1]))) {
+                    out.push(format!("{} x {}", m.id, s.id));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_main_line_into_the_region_goes_round_the_global_columns_side_parts() {
+        let rest = "flows:\n  - user -> cloudfront -> s3\n  - user -> apigateway(rest) -> lambda -> dynamodb\n  - cognito -- apigateway\n  - waf -- cloudfront\n  - acm -- cloudfront\n";
+        let m = "m".repeat(24);
+        let wide = format!(
+            "flows:\n  - user -> cloudfront.{m} -> s3.{m}\n  - user -> apigateway.{m}(http) -> lambda.{m} -> dynamodb.{m}\n  - cognito.{m} -- apigateway.{m}\n  - waf.{m} -- cloudfront.{m}\n  - lambda.{m} ~> cloudwatch.{m}\nset:\n  lang: ja\n"
+        );
+        for src in [rest, wide.as_str(), API] {
+            assert_eq!(main_lines_across_side_lines(src), Vec::<String>::new(), "{src}");
+        }
+    }
 }
