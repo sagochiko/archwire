@@ -183,17 +183,31 @@ mod tests {
     }
 
     #[test]
-    fn a_nearly_empty_region_compiles() {
+    fn a_region_without_parts_is_not_drawn() {
         let out = compile("flows:\n  - user -> cloudfront\n");
         assert_eq!(out.diagnostics.exit_code(), 0, "{:?}", out.diagnostics.errors);
         let x = out.drawio.unwrap();
-        assert!(x.contains("id=\"region\"") && object(&x, "region").contains("resources-inside-region-frame"));
+        assert!(!x.contains("id=\"region\""), "{x}");
+        assert!(x.contains("id=\"aws-cloud\"") && x.contains("id=\"cloudfront\""));
+        let rules: Vec<&str> = out.diagnostics.derived.iter().map(|d| d.rule.as_str()).collect();
+        assert!(!rules.contains(&"resources-inside-region-frame") && !rules.contains(&"default-region"), "{rules:?}");
+        assert!(out.diagnostics.derived.iter().all(|d| d.target != "region"));
+    }
+
+    #[test]
+    fn a_region_with_one_part_is_drawn() {
+        let out = compile("flows:\n  - user -> cloudfront -> s3\n");
+        assert_eq!(out.diagnostics.exit_code(), 0, "{:?}", out.diagnostics.errors);
+        let region = object(out.drawio.as_ref().unwrap(), "region");
+        assert!(region.contains("resources-inside-region-frame") && region.contains("default-region"), "{region}");
     }
 
     #[test]
     fn a_layout_failure_is_an_error_without_a_diagram() {
         let rules = Rules::builtin();
-        let (model, diagnostics) = flow_infer::infer(&def::parse(API).unwrap(), &rules);
+        let (model, diagnostics) = flow_infer::infer(&def::parse(HOLE).unwrap(), &rules);
+        let (derived, holes) = (diagnostics.derived.clone(), diagnostics.holes.clone());
+        assert!(!derived.is_empty() && !holes.is_empty());
         let failed = diag::Problem {
             code: "LAYOUT_FAILED".into(),
             at: Some("lambda".into()),
@@ -205,6 +219,7 @@ mod tests {
         assert!(out.drawio.is_none());
         assert_eq!(out.diagnostics.exit_code(), 1);
         assert_eq!(out.diagnostics.errors.iter().map(|e| e.code.as_str()).collect::<Vec<_>>(), ["LAYOUT_FAILED"]);
+        assert_eq!((out.diagnostics.derived, out.diagnostics.holes), (derived, holes));
     }
 
     #[test]
@@ -215,23 +230,58 @@ mod tests {
         assert!(out.diagnostics.errors.iter().all(|e| e.code == "UNSUPPORTED"), "{:?}", out.diagnostics.errors);
     }
 
+    const HOLE: &str = "flows:\n  - user -> apigateway -> lambda -> dynamodb\n  - cognito -- apigateway\n";
+
     #[test]
     fn a_hole_in_a_definition_without_a_vpc_still_gives_a_diagram() {
-        let out = compile("flows:\n  - user -> apigateway -> lambda\n  - cognito -- apigateway\n");
-        assert_eq!(out.diagnostics.exit_code(), 2, "{:?}", out.diagnostics.errors);
-        assert!(out.drawio.is_some());
+        let out = compile(HOLE);
+        let d = &out.diagnostics;
+        assert_eq!(d.exit_code(), 2, "{:?}", d.errors);
+        assert_eq!(d.holes.len(), 1, "{:?}", d.holes);
+        assert_eq!((d.holes[0].hole.as_str(), d.holes[0].choices.clone()), ("kind.apigateway", vec!["http".to_string(), "rest".to_string()]));
+        let x = out.drawio.unwrap();
+        // The part with the open hole is named without a kind and says the kind is not decided.
+        assert!(object(&x, "apigateway").contains("label=\"Amazon API Gateway&#xa;type undecided\""), "{}", object(&x, "apigateway"));
+        assert!(!object(&x, "lambda").contains("undecided"));
+        let line = line(&x, "edge-cognito-to-apigateway");
+        assert!(line.contains("value=\"Verify tokens\"") && line.contains("endArrow=none"), "{line}");
+        assert!(!line.contains("#879196"), "{line}");
+        let ja = compile(&format!("{HOLE}set:\n  lang: ja\n")).drawio.unwrap();
+        assert!(object(&ja, "apigateway").contains("label=\"Amazon API Gateway&#xa;種類未定\""), "{}", object(&ja, "apigateway"));
+        let answered = compile(&format!("{HOLE}choose:\n  kind.apigateway: http\n")).drawio.unwrap();
+        assert!(!object(&answered, "apigateway").contains("undecided"));
+    }
+
+    /// Three functions sending logs to one CloudWatch: the lines are drawn as one.
+    const MERGED: &str = "flows:\n  - user -> apigateway(http) -> lambda.a -> dynamodb\n  - apigateway -> lambda.b -> dynamodb\n  - apigateway -> lambda.c -> dynamodb\n  - lambda.a ~> cloudwatch\n  - lambda.b ~> cloudwatch\n  - lambda.c ~> cloudwatch\n";
+
+    #[test]
+    fn the_router_notes_reach_the_diagnostics() {
+        let out = compile(MERGED);
+        assert_eq!(out.diagnostics.exit_code(), 0, "{:?}", out.diagnostics.errors);
+        let notes = &out.diagnostics.notes;
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("lambda.a") && notes[0].contains("lambda.b") && notes[0].contains("lambda.c") && notes[0].contains("cloudwatch"), "{notes:?}");
+        assert!(out.diagnostics.to_json().contains(&notes[0]));
     }
 
     #[test]
-    fn a_line_keeps_clear_of_another_lines_label() {
-        // The line from Cognito once ran a pixel above the label of the line from API Gateway to
-        // the second Lambda function, and draw.io drew the label's letters against it.
+    fn a_line_keeps_three_pixels_from_another_lines_label() {
+        // Wide names, shared targets and side parts in both frames put lines close to labels.
         let m = "m".repeat(22);
         let src = format!(
-            "flows:\n  - user -> apigateway(http) -> lambda.f1{m}\n  - apigateway -> lambda.f2{m}\n  - lambda.f1{m} -> dynamodb.t1{m}\n  - lambda.f2{m} -> dynamodb.t2{m}\n  - lambda.f1{m} ~> cloudwatch.l{m}m\n  - lambda.f2{m} ~> cloudwatch.l{m}m\n  - apigateway ~> cloudwatch.l{m}m\n  - cognito.g{m}m -- apigateway\n  - user -> cloudfront.c{m}m -> s3.web\n  - waf.w{m}m -- cloudfront.c{m}m\nset:\n  lang: ja\n"
+            "flows:\n  - user -> apigateway(http) -> lambda.f1{m}\n  - apigateway -> lambda.f2{m}\n  - lambda.f1{m} -> dynamodb.t1{m}\n  - lambda.f2{m} -> dynamodb.t2{m}\n  - lambda.f1{m} ~> cloudwatch.l{m}m\n  - lambda.f2{m} ~> cloudwatch.l{m}m\n  - apigateway ~> cloudwatch.l{m}m\n  - cognito.g{m}m -- apigateway\n  - user -> cloudfront.c{m}m -> s3.web\n"
         );
-        let out = compile(&src);
-        assert_eq!(out.diagnostics.exit_code(), 0, "{:?}", out.diagnostics.errors);
-        assert!(out.diagnostics.notes.iter().all(|n| !n.contains("edge-")), "{:?}", out.diagnostics.notes);
+        for src in [src.as_str(), API, MERGED, HOLE] {
+            let rules = Rules::builtin();
+            let (model, _) = flow_infer::infer(&def::parse(src).unwrap(), &rules);
+            let model = model.unwrap();
+            let p = place::place(&model, &rules).unwrap();
+            let (wires, notes) = route::route_planned(&model, &p.layout, &rules, &p.lines);
+            assert!(notes.iter().all(|n| !n.contains("edge-")), "{notes:?}");
+            if let Some((d, line, label)) = route::closest_line_to_label(&p.layout, &wires) {
+                assert!(d >= 3, "{line} runs {d}px from the label of {label}\n{src}");
+            }
+        }
     }
 }

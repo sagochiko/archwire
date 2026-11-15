@@ -376,6 +376,7 @@ fn node(id: String, service: &str, option: Option<String>, az: Option<usize>, ro
         part: service.into(),
         tag: None,
         area: None,
+        undecided: false,
     }
 }
 

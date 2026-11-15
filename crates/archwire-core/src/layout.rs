@@ -307,6 +307,9 @@ pub(crate) fn icon(n: &Node, s: &Service, rules: &Rules, lang: Lang, rect: Rect,
     if let Some(region) = &n.region {
         label = format!("{label}\n{region}");
     }
+    if n.undecided {
+        label = format!("{label}\n{}", rules.text("undecided", lang));
+    }
     let lines = label.lines().count() as u8;
     Icon { id: n.id.clone(), label, lines, rect, parent }
 }
@@ -426,6 +429,7 @@ mod tests {
             part: format!("{service}.web"),
             tag: Some("web".into()),
             area: None,
+            undecided: false,
         };
         let at = Rect { x: 0, y: 0, w: ICON, h: ICON };
         let s3 = icon(&n("s3", None), r.service("s3").unwrap(), &r, Lang::En, at, None);

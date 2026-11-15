@@ -58,6 +58,7 @@ const USER_TO_CLOUD: i32 = 60;
 
 const CLOUD_FRAME: &str = "aws-cloud";
 const REGION_FRAME: &str = "region";
+const CLOUD_NAME: &str = "AWS Cloud";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Placement {
@@ -197,8 +198,19 @@ pub fn place(model: &Model, rules: &Rules) -> Result<Placement, Vec<Problem>> {
     };
     let region_y = CLOUD_Y + REGION_BELOW_CLOUD;
     let region = Rect { x: region_x, y: region_y, w: block.w, h: block.h };
-    let cloud_bottom = global_icons.iter().map(|i| extent(i).1 + REGION_BOTTOM).fold(bottom(region), i32::max) + CLOUD_INSET;
-    let cloud = Rect { x: cloud_x, y: CLOUD_Y, w: right(region) + CLOUD_INSET - cloud_x, h: cloud_bottom - CLOUD_Y };
+    // The Region frame is drawn only when a part is in it; else the AWS Cloud frame closes
+    // around the global column and its own name.
+    let has_region = nodes.iter().any(|n| n.area == Some(Area::Region));
+    let (inner_right, inner_bottom) = if has_region {
+        (right(region), bottom(region))
+    } else {
+        let cloud_name = Frame { id: CLOUD_FRAME.into(), kind: FrameKind::Cloud, label: CLOUD_NAME.into(), rect: icon_at(cloud_x, CLOUD_Y), parent: None };
+        let name_right = right(frame_name_box(&cloud_name)) + FRAME_ROOM - CLOUD_INSET;
+        let icons_right = global_icons.iter().map(|i| right(i.rect) + CLOUD_LEFT - CLOUD_INSET).chain(global_icons.iter().map(|i| extent(i).0 + FRAME_ROOM - CLOUD_INSET));
+        (icons_right.fold(name_right, i32::max), region_y)
+    };
+    let cloud_bottom = global_icons.iter().map(|i| extent(i).1 + REGION_BOTTOM).fold(inner_bottom, i32::max) + CLOUD_INSET;
+    let cloud = Rect { x: cloud_x, y: CLOUD_Y, w: inner_right + CLOUD_INSET - cloud_x, h: cloud_bottom - CLOUD_Y };
 
     let mut icons: Vec<Icon> = Vec::new();
     for (i, n) in nodes.iter().enumerate() {
@@ -223,10 +235,10 @@ pub fn place(model: &Model, rules: &Rules) -> Result<Placement, Vec<Problem>> {
         rect,
         parent: parent.map(String::from),
     };
-    let frames = vec![
-        frame(CLOUD_FRAME, FrameKind::Cloud, "AWS Cloud".into(), cloud, None),
-        frame(REGION_FRAME, FrameKind::Region, region_name(model, rules), region, Some(CLOUD_FRAME)),
-    ];
+    let mut frames = vec![frame(CLOUD_FRAME, FrameKind::Cloud, CLOUD_NAME.into(), cloud, None)];
+    if has_region {
+        frames.push(frame(REGION_FRAME, FrameKind::Region, region_name(model, rules), region, Some(CLOUD_FRAME)));
+    }
     let layout = Layout { frames, icons };
 
     let col_x: Vec<i32> = block.cols.iter().map(|c| region.x + c).collect();
@@ -1056,12 +1068,23 @@ set:
     }
 
     #[test]
-    fn a_nearly_empty_region_is_still_laid_out() {
-        for src in ["flows:\n  - user -> cloudfront\n", "flows:\n  - user -> apigateway(http)\n"] {
+    fn a_region_frame_is_drawn_only_with_a_part_in_it() {
+        for (src, region) in [
+            ("flows:\n  - user -> cloudfront\n", false),
+            ("flows:\n  - user -> cloudfront\n  - waf -- cloudfront\n", false),
+            ("flows:\n  - user -> apigateway(http)\n", true),
+            ("flows:\n  - user -> cloudfront -> s3\n", true),
+        ] {
             let (m, p) = placed(src);
-            assert!(p.layout.frames.iter().any(|f| f.id == "region"), "{src}");
+            assert_eq!(p.layout.frames.iter().any(|f| f.id == "region"), region, "{src}");
             assert!(check(&m, &p.layout).is_empty(), "{src}");
         }
+        // Without a Region frame, the AWS Cloud frame holds the global column and its own name.
+        let (_, p) = placed("flows:\n  - user -> cloudfront\n");
+        let cloud = p.layout.frames.iter().find(|f| f.id == "aws-cloud").unwrap();
+        let cf = p.layout.icons.iter().find(|i| i.id == "cloudfront").unwrap();
+        assert!(right(name_area(cf)) + FRAME_ROOM <= right(cloud.rect));
+        assert!(right(frame_name_box(cloud)) + FRAME_ROOM <= right(cloud.rect));
     }
 
     #[test]
@@ -1206,6 +1229,39 @@ set:
                 }
             }
         }
+        out.extend(through_cloudfront());
+        out
+    }
+
+    /// Definitions where the API is reached through CloudFront (`user -> cloudfront ->
+    /// apigateway -> lambda -> s3`), with names as written or every name made of `m` alone at the
+    /// longest allowed.
+    fn through_cloudfront() -> Vec<String> {
+        let mut out = Vec::new();
+        for wide in [false, true] {
+            let n = |svc: &str| if wide { format!("{svc}.{}", "m".repeat(crate::def::MAX_TAG)) } else { svc.to_string() };
+            for api in ["http", "rest"] {
+                for att in 0..3 {
+                    for cognito in [false, true] {
+                        let mut src = format!("flows:\n  - user -> {} -> {}({api}) -> {} -> {}\n", n("cloudfront"), n("apigateway"), n("lambda"), n("s3"));
+                        if att > 0 {
+                            src.push_str(&format!("  - {} -- {}\n", n("waf"), n("cloudfront")));
+                        }
+                        if att > 1 {
+                            src.push_str(&format!("  - {} -- {}\n", n("acm"), n("cloudfront")));
+                        }
+                        if cognito {
+                            src.push_str(&format!("  - {} -- {}\n", n("cognito"), n("apigateway")));
+                        }
+                        src.push_str(&format!("  - {} ~> {}\n", n("lambda"), n("cloudwatch")));
+                        if wide {
+                            src.push_str("set:\n  lang: ja\n");
+                        }
+                        out.push(src);
+                    }
+                }
+            }
+        }
         out
     }
 
@@ -1318,44 +1374,69 @@ set:
             };
             // A note that names a line by its id says the line or its label could not be drawn
             // clear. The note on lines drawn as one names parts, not a line id, and does not count.
-            let (_, notes) = crate::route::route_planned(&m, &p.layout, &r, &p.lines);
+            let (wires, notes) = crate::route::route_planned(&m, &p.layout, &r, &p.lines);
             if notes.iter().any(|n| n.contains("edge-")) {
                 failed.push(format!("route: {notes:?}\n{src}"));
+            }
+            // A line keeps at least 3 pixels from every other line's label.
+            if let Some((d, line, label)) = crate::route::closest_line_to_label(&p.layout, &wires).filter(|c| c.0 < 3) {
+                failed.push(format!("label: {line} runs {d}px from the label of {label}\n{src}"));
             }
         }
         assert!(failed.is_empty(), "{} of {} definitions failed:\n{}", failed.len(), defs.len(), failed.join("\n"));
     }
 
-    /// The definitions handed to the diagram checker: 40 taken evenly from `generated()`, by
-    /// their number there.
+    /// How many diagrams `tools/check_generated.sh` expects.
+    const CHECKED: usize = 40;
+
+    /// The definitions handed to the diagram checker, by their number in `generated()`: two
+    /// taken from the ones through CloudFront (one with short names, the last with every name
+    /// made of `m` alone), and the rest taken evenly from the others.
     fn generated_for_the_checker() -> Vec<(usize, String)> {
         let defs = generated();
-        (0..40).map(|k| k * defs.len() / 40).map(|i| (i, defs[i].clone())).collect()
+        let extra = through_cloudfront().len();
+        let base = defs.len() - extra;
+        let mut picked: Vec<usize> = (0..CHECKED - 2).map(|k| k * base / (CHECKED - 2)).collect();
+        // The short-named HTTP API with WAF, ACM and Cognito, and the last one.
+        picked.extend([base + extra / 4 - 1, defs.len() - 1]);
+        picked.into_iter().map(|i| (i, defs[i].clone())).collect()
     }
 
-    /// With `ARCHWIRE_GEN_OUT=<dir>`, writes each picked definition as `<dir>/<number>.yaml` and
-    /// what `compile` makes of it as `<dir>/<number>.drawio` and `<dir>/<number>.json`, for
-    /// `tools/check_generated.sh`. Without it, only compiles them.
+    /// With `ARCHWIRE_GEN_OUT=<dir>`, removes the numbered files a run left there, then writes
+    /// each picked definition as `<dir>/<number>.yaml` and what `compile` makes of it as
+    /// `<dir>/<number>.drawio` and `<dir>/<number>.json`, for `tools/check_generated.sh`.
+    /// Without it, only compiles them. Every one must give a diagram.
     #[test]
     fn generated_diagrams_compile_for_the_checker() {
         let picked = generated_for_the_checker();
-        // The pick holds a diagram with lines drawn as one and one with the widest names allowed.
-        let wide = "m".repeat(crate::def::MAX_TAG - 2);
-        assert!(picked.iter().any(|(_, s)| s.matches(" ~> cloudwatch").count() >= 4), "no three Lambda functions sending to one CloudWatch in the pick");
-        assert!(picked.iter().any(|(_, s)| s.contains(&wide)), "no names filled with `m` in the pick");
+        assert_eq!(picked.len(), CHECKED);
+        let all_m = "m".repeat(crate::def::MAX_TAG);
+        let has = |what: &str, f: &dyn Fn(&str) -> bool| assert!(picked.iter().any(|(_, s)| f(s)), "no {what} in the pick");
+        has("three Lambda functions sending to one CloudWatch", &|s| s.matches(" ~> cloudwatch").count() >= 4);
+        has("name filled with `m` after a letter", &|s| s.contains(&"m".repeat(crate::def::MAX_TAG - 2)) && !s.contains(&all_m));
+        has("name made of `m` alone", &|s| s.contains(&format!(".{all_m}")));
+        has("API reached through CloudFront", &|s| s.contains("user -> cloudfront -> apigateway(http) -> lambda -> s3\n"));
         // A relative folder is taken from the workspace root, where the command is typed, not
         // from this crate's folder, where the test runs.
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let dir = std::env::var_os("ARCHWIRE_GEN_OUT").map(|d| root.join(d));
         if let Some(d) = &dir {
             std::fs::create_dir_all(d).unwrap();
+            for entry in std::fs::read_dir(d).unwrap() {
+                let path = entry.unwrap().path();
+                let numbered = path.file_stem().and_then(|s| s.to_str()).is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()));
+                let ours = path.extension().and_then(|e| e.to_str()).is_some_and(|e| ["yaml", "drawio", "json"].contains(&e));
+                if numbered && ours {
+                    std::fs::remove_file(&path).unwrap();
+                }
+            }
         }
         let mut failed: Vec<String> = Vec::new();
         for (i, src) in &picked {
             let out = crate::compile(src);
             let d = &out.diagnostics;
-            if d.exit_code() != 0 || d.notes.iter().any(|n| n.contains("edge-")) {
-                failed.push(format!("{i}: {:?} {:?}\n{src}", d.errors, d.notes));
+            if out.drawio.is_none() || d.exit_code() != 0 || d.notes.iter().any(|n| n.contains("edge-")) {
+                failed.push(format!("{i}: diagram {} {:?} {:?}\n{src}", out.drawio.is_some(), d.errors, d.notes));
             }
             if let Some(dir) = &dir {
                 let name = format!("{i:04}");

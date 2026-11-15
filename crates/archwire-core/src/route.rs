@@ -1633,6 +1633,30 @@ fn audit_wire_label(w: &Wire, path: &[(i32, i32)]) -> Option<Rect> {
     })
 }
 
+/// The least distance in pixels between a line and another line's label, as the audit reads the
+/// drawn diagram, with the line's id and the id of the line whose label it is.
+#[cfg(test)]
+pub(crate) fn closest_line_to_label(layout: &Layout, wires: &[Wire]) -> Option<(i32, String, String)> {
+    let paths: Vec<Vec<(i32, i32)>> = wires.iter().map(|w| audit_path(w, layout)).collect();
+    let mut best: Option<(i32, String, String)> = None;
+    for (m, (w, p)) in wires.iter().zip(&paths).enumerate() {
+        let Some(r) = audit_wire_label(w, p) else { continue };
+        for (n, q) in paths.iter().enumerate().filter(|&(n, _)| n != m) {
+            for s in q.windows(2) {
+                let (x1, x2) = (s[0].0.min(s[1].0), s[0].0.max(s[1].0));
+                let (y1, y2) = (s[0].1.min(s[1].1), s[0].1.max(s[1].1));
+                let dx = (r.x - x2).max(x1 - (r.x + r.w)).max(0);
+                let dy = (r.y - y2).max(y1 - (r.y + r.h)).max(0);
+                let d = dx.max(dy);
+                if best.as_ref().is_none_or(|b| d < b.0) {
+                    best = Some((d, wires[n].id.clone(), w.id.clone()));
+                }
+            }
+        }
+    }
+    best
+}
+
 /// Lines that run over text (an icon's label, a frame's name, another line's label), over an
 /// icon they do not attach to, or on top of another line. Ids in line order, each once.
 /// The VPC layout is checked with its own measure of names, written apart from the router's; the
@@ -2353,6 +2377,7 @@ mod tests {
                 part: id.to_string(),
                 tag: id.split_once('.').map(|(_, t)| t.to_string()),
                 area: Some(crate::model::Area::Region),
+                undecided: false,
             })
             .collect();
         let edges = edges

@@ -220,6 +220,7 @@ fn build(
             part: r.name.clone(),
             tag: r.tag.clone(),
             area: Some(area),
+            undecided: open.iter().any(|(id, o)| o.name == r.name && !def.choose.contains_key(id)),
         });
     }
     let kind_of = |name: &str| nodes.iter().find(|n| n.id == name).and_then(|n| n.option.clone());
@@ -239,9 +240,12 @@ fn build(
 
     let mut why = |target: &str, id: &str, added: bool| diag.derived.push(derived(rules, lang, target, id, added));
     why("aws-cloud", "resources-inside-aws-cloud-frame", true);
-    why("region", "resources-inside-region-frame", true);
-    if !def.set.contains_key("region") {
-        why("region", "default-region", true);
+    // The Region frame, and the Region chosen for it, only when a part is drawn inside it.
+    if nodes.iter().any(|n| n.area == Some(Area::Region)) {
+        why("region", "resources-inside-region-frame", true);
+        if !def.set.contains_key("region") {
+            why("region", "default-region", true);
+        }
     }
     for r in parts {
         let s = svc(&r.service);

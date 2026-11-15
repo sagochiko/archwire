@@ -312,6 +312,7 @@ mod tests {
             part: id.into(),
             tag: tag.map(String::from),
             area: None,
+            undecided: false,
         };
         let model = Model {
             region: "ap-northeast-1".into(),

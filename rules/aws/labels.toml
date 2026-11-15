@@ -140,6 +140,11 @@ ja = "{from} から {to} への経路"
 en = "Kind of {part}"
 ja = "{part} の種類"
 
+# Under the name of a part whose hole is not answered yet.
+[undecided]
+en = "type undecided"
+ja = "種類未定"
+
 # Service option labels are looked up by their English text.
 ["Amazon ECS (Fargate)"]
 en = "Amazon ECS (Fargate)"

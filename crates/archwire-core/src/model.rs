@@ -34,6 +34,9 @@ pub struct Node {
     pub tag: Option<String>,
     /// Which frame the node belongs to, decided by inference. None in the VPC layout.
     pub area: Option<Area>,
+    /// The part has a hole the definition has not answered yet, such as its kind. Always false
+    /// in the VPC layout, whose holes are routes.
+    pub undecided: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
