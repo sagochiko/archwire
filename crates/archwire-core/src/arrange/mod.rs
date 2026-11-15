@@ -118,11 +118,16 @@ pub fn arrange(model: &Model, rules: &Rules, axis: Axis, choices: Choices) -> Re
             }
         }
     }
-    let placed = (!inside.is_empty()).then(|| azgrid::lay_vpc(model, rules, &inside, axis, choices));
+    let placed = match inside.is_empty() {
+        true => None,
+        false => Some(azgrid::lay_vpc(model, rules, &inside, axis, choices)?),
+    };
     let piece = placed.as_ref().map(|p| layered::Piece { placed: p, first: matches!(choices.block_order, BlockOrder::First) });
     let mut placement = layered::layered(model, rules, axis, piece.as_ref());
+    let mut problems = Vec::new();
     if placed.is_some() {
         let reps: Vec<usize> = crate::lines::gather(model, &placement.layout, rules).0.iter().map(|l| l.rep).collect();
+        let bands: Vec<Lane> = placement.lanes.clone();
         for lane in &mut placement.lanes {
             lane.tracks.retain(|t| reps.contains(&t.0));
         }
@@ -130,8 +135,10 @@ pub fn arrange(model: &Model, rules: &Rules, axis: Axis, choices: Choices) -> Re
         for pl in placement.lines.iter_mut().filter(|pl| !reps.contains(&pl.edge)) {
             pl.tracks.clear();
         }
+        problems.extend(check::fixed_ends_apart(model, &placement, &reps));
+        problems.extend(check::bands_kept(model, &placement, &bands, &reps));
     }
-    let problems = check::check(model, &placement);
+    problems.extend(check::check(model, &placement));
     if !problems.is_empty() {
         return Err(problems);
     }

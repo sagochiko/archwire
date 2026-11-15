@@ -12,7 +12,10 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use super::layered::ROW_STEP;
+use super::check::failed;
 use super::{Choices, Crossing, Lane, SpanRow};
+use crate::diag::Problem;
+use crate::route::edge_id;
 use crate::def::Rel;
 use crate::layout::{icon, Frame, FrameKind, Icon, Layout, Rect};
 use crate::lines::gather;
@@ -204,6 +207,15 @@ struct Down {
     h: i32,
 }
 
+/// A line that does not keep clear across: the semantic edge, what it passes (a part's or a
+/// frame's id), and how much further from it the line has to be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Clash {
+    edge: usize,
+    against: String,
+    short: i32,
+}
+
 /// What has to change for the lines to keep clear: wider zones, a wider gap between them, or the
 /// columns moved right in their zones.
 enum Fix {
@@ -230,25 +242,44 @@ struct Grid<'a> {
     reps: Vec<usize>,
 }
 
-pub(crate) fn lay_vpc(model: &Model, rules: &Rules, parts: &[usize], axis: Axis, choices: Choices) -> Placed {
+/// The inside of the VPC, or LAYOUT_FAILED naming a line that no widening keeps clear of a part
+/// or a frame's name it passes.
+pub(crate) fn lay_vpc(model: &Model, rules: &Rules, parts: &[usize], axis: Axis, choices: Choices) -> Result<Placed, Vec<Problem>> {
     let g = Grid::new(model, rules, parts, axis, choices);
-    // Across: widen until the lines that pass a part or a frame's name keep clear of it.
+    // Across: widen until the lines that pass a part or a frame's name keep clear of it. A widening
+    // that leaves the same line exactly as close to the same thing does not move them apart, so
+    // widening cannot clear it; nor can it when the tries run out.
     let (mut extra, mut gap, mut shift) = (0, AZ_GAP, 0);
     let mut across = g.across(extra, gap, shift);
     let mut runs = g.runs(&across);
-    for _ in 0..TRIES {
-        match g.conflict(&across, &runs) {
-            None => break,
-            Some(Fix::Wider) => extra += 2,
-            Some(Fix::Gap) => gap += 2,
-            Some(Fix::Shift) => shift += 2,
+    let mut last: Option<Clash> = None;
+    let mut tries = 0;
+    while let Some((fix, clash)) = g.conflict(&across, &runs) {
+        let stuck = last.as_ref().is_some_and(|l| l.edge == clash.edge && l.against == clash.against && clash.short == l.short);
+        if stuck || tries == TRIES {
+            let e = &model.edges[clash.edge];
+            let line = edge_id(&e.from, &e.to);
+            return Err(vec![failed(&line, format!("{line} and {}", clash.against), "the line passing over it")]);
         }
+        match fix {
+            Fix::Wider => extra += 2,
+            Fix::Gap => gap += 2,
+            Fix::Shift => shift += 2,
+        }
+        last = Some(clash);
+        tries += 1;
+        #[cfg(test)]
+        WIDENED.fetch_max(tries, std::sync::atomic::Ordering::Relaxed);
         across = g.across(extra, gap, shift);
         runs = g.runs(&across);
     }
     let down = g.down(&runs);
-    g.finish(&across, &down, runs)
+    Ok(g.finish(&across, &down, runs))
 }
+
+/// The most widenings any layout took, for the tests to see how far from the limit they stay.
+#[cfg(test)]
+pub(super) static WIDENED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 impl<'a> Grid<'a> {
     fn new(model: &'a Model, rules: &'a Rules, parts: &[usize], axis: Axis, choices: Choices) -> Grid<'a> {
@@ -755,26 +786,39 @@ impl<'a> Grid<'a> {
     /// the zones (widen the zones), or a line coming down from a part spanning the zones that runs
     /// by a frame's name or side or a public part (widen the gap the line comes down in, or move
     /// the columns right).
-    fn conflict(&self, a: &Across, runs: &[Run]) -> Option<Fix> {
+    fn conflict(&self, a: &Across, runs: &[Run]) -> Option<(Fix, Clash)> {
         let n = self.zones();
-        let mut items: Vec<(i32, i32)> = self.spans().zip(&a.spans).map(|(g, &x)| (x, g.half)).collect();
-        if self.axis == Axis::Down && self.groups.iter().any(|g| g.place == Place::Entry) {
-            items.push((a.entry, self.entry_half));
+        let id = |i: usize| self.model.nodes[i].id.clone();
+        let mut items: Vec<(i32, i32, String)> = self.spans().zip(&a.spans).map(|(g, &x)| (x, g.half, id(g.nodes[0]))).collect();
+        if self.axis == Axis::Down {
+            if let Some(g) = self.groups.iter().find(|g| g.place == Place::Entry) {
+                items.push((a.entry, self.entry_half, id(g.nodes[0])));
+            }
         }
-        let clear = |x: i32, (c, h): (i32, i32)| (x - c).abs() >= h + ROOM;
+        // How much further a line at x has to be from a part centred at c, half as wide as h.
+        let short = |x: i32, c: i32, h: i32| h + ROOM - (x - c).abs();
+        let clash = |r: &Run, against: String, by: i32| Clash { edge: r.edge, against, short: by };
         for r in runs.iter().filter(|r| r.drawn) {
             let pass = match (r.kind, self.place(r.to)) {
                 (Kind::NatOut, _) => Some(self.cx(a, r.from)),
                 (Kind::InGate, Some(Place::Private)) if self.axis == Axis::Down => Some(self.cx(a, r.to)),
                 _ => None,
             };
-            if pass.is_some_and(|x| !items.iter().all(|&it| clear(x, it))) {
-                return Some(Fix::Wider);
+            let Some(x) = pass else { continue };
+            if let Some((c, h, it)) = items.iter().find(|&&(c, h, _)| short(x, c, h) > 0) {
+                return Some((Fix::Wider, clash(r, it.clone(), short(x, *c, *h))));
             }
         }
-        let fix = if n.is_multiple_of(2) { Fix::Gap } else { Fix::Shift };
-        let pubs: Vec<(i32, i32)> = self.groups.iter().filter(|g| g.place == Place::Public).flat_map(|g| (0..n).map(move |k| (a.az_x(k) + a.pubs[g.col], g.half))).collect();
+        let fix = || if n.is_multiple_of(2) { Fix::Gap } else { Fix::Shift };
+        let pubs: Vec<(i32, i32, String)> = self
+            .groups
+            .iter()
+            .filter(|g| g.place == Place::Public)
+            .flat_map(|g| g.nodes.iter().map(move |&i| (a.az_x(self.az(i)) + a.pubs[g.col], g.half, i)))
+            .map(|(x, h, i)| (x, h, id(i)))
+            .collect();
         let frame_w = |kind: FrameKind, label: String| frame_name_box(&Frame { id: String::new(), kind, label, rect: Rect { x: 0, y: 0, w: 0, h: 0 }, parent: None }).w;
+        let sfx = |k: usize| self.model.azs[k][self.model.azs[k].len() - 2..].to_string();
         for r in runs.iter().filter(|r| r.drawn) {
             let spanning = self.place(r.from) == Some(Place::Span) && self.place(r.to) == Some(Place::Private);
             let into_span = self.axis == Axis::Down && self.boundary && self.place(r.from) == Some(Place::Entry) && self.place(r.to) == Some(Place::Span);
@@ -782,25 +826,26 @@ impl<'a> Grid<'a> {
                 continue;
             }
             let x = if into_span { a.entry } else { self.cx(a, r.from) - ICON / 2 + ICON * r.exit_pos as i32 / 100 };
-            if pubs.iter().any(|&p| !clear(x, p)) {
-                return Some(fix);
+            if let Some((c, h, it)) = pubs.iter().find(|&&(c, h, _)| short(x, c, h) > 0) {
+                return Some((fix(), clash(r, it.clone(), short(x, *c, *h))));
             }
             for k in 0..n {
                 let z = a.az_x(k);
-                let mut borders = vec![z, z + a.w];
+                let mut borders = vec![(z, format!("az-{}", sfx(k))), (z + a.w, format!("az-{}", sfx(k)))];
                 if self.public {
-                    borders.extend([z + SUB_INSET, z + a.w - SUB_INSET]);
+                    borders.extend([(z + SUB_INSET, format!("pub-{}", sfx(k))), (z + a.w - SUB_INSET, format!("pub-{}", sfx(k)))]);
                 }
-                if borders.iter().any(|&b| (x - b).abs() < ROOM) {
-                    return Some(fix);
+                if let Some((b, f)) = borders.iter().find(|&&(b, _)| (x - b).abs() < ROOM) {
+                    return Some((fix(), clash(r, f.clone(), ROOM - (x - b).abs())));
                 }
                 if self.above() || into_span {
-                    let mut names = vec![(z, z + frame_w(FrameKind::Az, self.model.azs[k].clone()))];
+                    let mut names = vec![(z, z + frame_w(FrameKind::Az, self.model.azs[k].clone()), format!("az-{}", sfx(k)))];
                     if self.public {
-                        names.push((z + SUB_INSET, z + SUB_INSET + frame_w(FrameKind::PublicSubnet, self.rules.text("public_subnet", self.model.lang))));
+                        let w = frame_w(FrameKind::PublicSubnet, self.rules.text("public_subnet", self.model.lang));
+                        names.push((z + SUB_INSET, z + SUB_INSET + w, format!("pub-{}", sfx(k))));
                     }
-                    if names.iter().any(|&(l, r)| x > l - ROOM && x < r + ROOM) {
-                        return Some(fix);
+                    if let Some((l, rt, f)) = names.iter().find(|&&(l, rt, _)| x > l - ROOM && x < rt + ROOM) {
+                        return Some((fix(), clash(r, f.clone(), (x - (l - ROOM)).min(rt + ROOM - x))));
                     }
                 }
             }
@@ -1222,6 +1267,7 @@ pub(in crate::arrange) mod tests {
     use crate::path::hits;
     use crate::route::{port_point, Bend, Keep, Port, Side, LABEL_FIRST, LABEL_LINE};
     use crate::rules::Lang;
+    use std::sync::OnceLock;
 
     const WEB_CASES: [(&str, &str); 10] = [
         ("web-2az-ja", include_str!("../../../../tests/cases/web-2az-ja/def.yaml")),
@@ -1342,6 +1388,53 @@ pub(in crate::arrange) mod tests {
         (m, d)
     }
 
+    /// Three zones with a load balancer, and Lambda copies written before ECS in its row, so a
+    /// Lambda copy takes the middle zone's first column, right below the load balancer.
+    fn lambda_under_the_balancer() -> Model {
+        let (mut m, _) = grid(WEB_CASES[2].1);
+        let pri = Area::Subnet(Tier::Private);
+        let at = m.nodes.iter().position(|n| n.part == "ecs").unwrap();
+        for (k, zone) in ["1a", "1c", "1d"].iter().enumerate() {
+            m.nodes.insert(at + k, node(&format!("lambda.api@{zone}"), "lambda", "lambda.api", pri, Some(k), None));
+        }
+        m.nodes.push(http_api());
+        m.edges.push(edge("user", "apigateway", Rel::Main, "https", None));
+        for zone in ["1a", "1c", "1d"] {
+            m.edges.push(edge("apigateway", &format!("lambda.api@{zone}"), Rel::Main, "invoke", None));
+        }
+        m
+    }
+
+    /// The web example with a second load balancer beside the first, both reached from the entry gateway.
+    fn two_balancers() -> Model {
+        let (mut m, _) = grid(WEB_CASES[0].1);
+        let alb = m.nodes.iter().find(|n| n.id == "alb").unwrap().clone();
+        let at = m.nodes.iter().position(|n| n.id == "alb").unwrap();
+        m.nodes.insert(at + 1, Node { id: "alb.b".into(), part: "alb.b".into(), tag: Some("b".into()), ..alb });
+        m.edges.push(edge("igw", "alb.b", Rel::Main, "https", None));
+        m
+    }
+
+    // Fails if a line the widening cannot clear is left through a part and the layout returned anyway.
+    #[test]
+    fn a_line_widening_cannot_clear_fails_the_layout() {
+        let r = Rules::builtin();
+        let m = lambda_under_the_balancer();
+        let e = arrange(&m, &r, Axis::Down, CHOICES[0]).unwrap_err();
+        assert!(e.iter().any(|p| p.code == "LAYOUT_FAILED" && p.message.contains("edge-apigateway-to-lambda.api@1c") && p.message.contains("alb")), "{e:?}");
+    }
+
+    // Fails if two fixed ends are left on one spot of one side.
+    #[test]
+    fn two_fixed_ends_on_one_spot_fail_the_layout() {
+        let r = Rules::builtin();
+        let m = two_balancers();
+        for axis in [Axis::Right, Axis::Down] {
+            let e = arrange(&m, &r, axis, CHOICES[0]).unwrap_err();
+            assert!(e.iter().any(|p| p.code == "LAYOUT_FAILED" && p.message.contains("edge-igw-to-alb") && p.message.contains("edge-igw-to-alb.b")), "{axis:?} {e:?}");
+        }
+    }
+
     pub(in crate::arrange) const LONG: &str = "lambda.resize-images-for-the-we";
 
     /// Every model the inside of a VPC is laid out for, by name.
@@ -1382,20 +1475,31 @@ pub(in crate::arrange) mod tests {
         format!("{s}-{o}")
     }
 
-    /// Every input laid out along both axes with every choice: (name, model, axis, choices, placement).
-    fn placements() -> Vec<(String, Model, Axis, Choices, Placement)> {
-        let r = Rules::builtin();
-        let mut out = Vec::new();
-        for (name, m, _) in inputs() {
-            for axis in [Axis::Right, Axis::Down] {
-                for c in CHOICES {
-                    let label = format!("{name} {} {}", axis_name(axis), choice_name(c));
-                    let p = arrange(&m, &r, axis, c).unwrap_or_else(|e| panic!("{label}: {e:?}"));
-                    out.push((label, m.clone(), axis, c, p));
+    /// One input laid out: (name, model, axis, choices, the layout or its problems).
+    type Laid = (String, Model, Axis, Choices, Result<Placement, Vec<Problem>>);
+
+    /// Every input laid out along both axes with every choice, once for all the tests.
+    fn laid_out() -> &'static [Laid] {
+        static ALL: OnceLock<Vec<Laid>> = OnceLock::new();
+        ALL.get_or_init(|| {
+            let r = Rules::builtin();
+            let mut out = Vec::new();
+            for (name, m, _) in inputs() {
+                for axis in [Axis::Right, Axis::Down] {
+                    for c in CHOICES {
+                        let label = format!("{name} {} {}", axis_name(axis), choice_name(c));
+                        let p = arrange(&m, &r, axis, c);
+                        out.push((label, m.clone(), axis, c, p));
+                    }
                 }
             }
-        }
-        out
+            out
+        })
+    }
+
+    /// Every input laid out: (name, model, axis, choices, placement).
+    fn placements() -> impl Iterator<Item = (&'static String, &'static Model, Axis, Choices, &'static Placement)> {
+        laid_out().iter().map(|(label, m, axis, c, p)| (label, m, *axis, *c, p.as_ref().unwrap_or_else(|e| panic!("{label}: {e:?}"))))
     }
 
     fn frame(p: &Placement, id: &str) -> Rect {
@@ -1446,21 +1550,15 @@ pub(in crate::arrange) mod tests {
         }
     }
 
-    // Fails if parts overlap or leave their frames inside the VPC.
+    // Fails if parts overlap or leave their frames inside the VPC, or if a layout is only found
+    // by widening up to the limit.
     #[test]
     fn vpc_layouts_pass_their_check() {
-        let r = Rules::builtin();
-        let mut failed = Vec::new();
-        for (name, m, _) in inputs() {
-            for axis in [Axis::Right, Axis::Down] {
-                for c in CHOICES {
-                    if let Err(e) = arrange(&m, &r, axis, c) {
-                        failed.push(format!("{name} {} {}: {e:?}", axis_name(axis), choice_name(c)));
-                    }
-                }
-            }
-        }
+        let failed: Vec<String> = laid_out().iter().filter_map(|(label, _, _, _, p)| p.as_ref().err().map(|e| format!("{label}: {e:?}"))).collect();
         assert!(failed.is_empty(), "{}", failed.join("\n"));
+        // A layout that ran out of widenings would have failed above; none comes near the limit.
+        let most = WIDENED.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(most < TRIES / 10, "{most}");
     }
 
     // Fails if a part's copies sit at different heights, or at different places in their zones.
@@ -1474,8 +1572,8 @@ pub(in crate::arrange) mod tests {
                 let at: Vec<(i32, i32)> = copies
                     .iter()
                     .map(|n| {
-                        let r = icon(&p, &n.id).rect;
-                        (r.y, r.x - frame(&p, &format!("az-{}", suffix(&m, n.az.unwrap()))).x)
+                        let r = icon(p, &n.id).rect;
+                        (r.y, r.x - frame(p, &format!("az-{}", suffix(m, n.az.unwrap()))).x)
                     })
                     .collect();
                 assert!(at.windows(2).all(|w| w[0] == w[1]), "{label}: {part} {at:?}");
@@ -1511,7 +1609,7 @@ pub(in crate::arrange) mod tests {
     fn the_internet_gateway_sits_on_the_entry_side() {
         for (label, m, axis, _, p) in placements() {
             for n in m.nodes.iter().filter(|n| n.area == Area::VpcEdge) {
-                let g = icon(&p, &n.id);
+                let g = icon(p, &n.id);
                 let name = name_area(g);
                 assert_eq!(g.parent.as_deref(), Some("vpc"), "{label}");
                 for z in p.layout.frames.iter().filter(|f| f.id.starts_with("az-")) {
@@ -1534,7 +1632,7 @@ pub(in crate::arrange) mod tests {
             }
             seen += 1;
             let across = |id: &str| {
-                let c = centre(icon(&p, id).rect);
+                let c = centre(icon(p, id).rect);
                 if axis == Axis::Right { c.1 } else { c.0 }
             };
             assert_eq!(across("cloudfront"), across("igw"), "{label}");
@@ -1549,7 +1647,7 @@ pub(in crate::arrange) mod tests {
     #[test]
     fn the_outside_runs_along_the_axis() {
         for (label, _, axis, _, p) in placements() {
-            let (u, cloud) = (icon(&p, "user").rect, frame(&p, "aws-cloud"));
+            let (u, cloud) = (icon(p, "user").rect, frame(p, "aws-cloud"));
             match axis {
                 Axis::Right => assert!(u.x + u.w < cloud.x, "{label}"),
                 Axis::Down => assert!(u.y + u.h < cloud.y, "{label}"),
@@ -1584,7 +1682,7 @@ pub(in crate::arrange) mod tests {
                 at(&e.from) != at(&e.to)
             });
             assert_eq!(crossing.count(), p.crossings.len(), "{label}");
-            let v = frame(&p, "vpc");
+            let v = frame(p, "vpc");
             for c in &p.crossings {
                 assert_eq!(c.frame, "vpc", "{label}");
                 let pl = p.lines.iter().find(|l| l.edge == c.edge).unwrap();
@@ -1597,7 +1695,7 @@ pub(in crate::arrange) mod tests {
                 let on_y = (gy == v.y || gy == v.y + v.h) && v.x < gx && gx < v.x + v.w;
                 assert!(on_x != on_y, "{label}: gate {:?} off {v:?}", t.gate);
                 // The stretch of the inner part next to the gate, in the line's direction.
-                let pts = kept_points(&p, pl);
+                let pts = kept_points(p, pl);
                 let (a, b) = if t.inner_is_start { (pts[pts.len() - 2], pts[pts.len() - 1]) } else { (pts[0], pts[1]) };
                 let inward = |q: (i32, i32)| v.x < q.0 && q.0 < v.x + v.w && v.y < q.1 && q.1 < v.y + v.h;
                 if on_x {
@@ -1617,7 +1715,7 @@ pub(in crate::arrange) mod tests {
     fn tracks_in_a_band_keep_apart() {
         let r = Rules::builtin();
         for (label, m, _, _, p) in placements() {
-            let reps: Vec<usize> = crate::lines::gather(&m, &p.layout, &r).0.iter().map(|l| l.rep).collect();
+            let reps: Vec<usize> = crate::lines::gather(m, &p.layout, &r).0.iter().map(|l| l.rep).collect();
             for lane in &p.lanes {
                 assert!(lane.from < lane.to && lane.lo <= lane.hi, "{label}: {lane:?}");
                 for (k, &(e, at)) in lane.tracks.iter().enumerate() {
@@ -1637,7 +1735,7 @@ pub(in crate::arrange) mod tests {
         let mut seen = 0;
         for (label, _, _, _, p) in placements() {
             for pl in p.lines.iter().filter(|l| !l.tracks.is_empty()) {
-                let pts = kept_points(&p, pl);
+                let pts = kept_points(p, pl);
                 for t in &pl.tracks {
                     seen += 1;
                     assert!(t.horizontal && t.from < t.to, "{label}: {t:?}");
@@ -1790,6 +1888,22 @@ pub(in crate::arrange) mod tests {
                 }
             }
         }
+    }
+
+    // Fails if a line the router draws from the new layout's drafts comes out broken: through a
+    // part, a name or another line, or off its draft or its track.
+    #[test]
+    fn lines_drawn_from_the_vpc_drafts_keep_clear() {
+        let r = Rules::builtin();
+        let mut broken = Vec::new();
+        for (label, m, _, _, p) in placements() {
+            let (_, notes) = crate::route::route_planned(m, &p.layout, &r, &p.lines);
+            let named: Vec<&String> = notes.iter().filter(|n| n.contains("edge-")).collect();
+            if !named.is_empty() {
+                broken.push(format!("{label}: {named:?}"));
+            }
+        }
+        assert!(broken.is_empty(), "{}", broken.join("\n"));
     }
 
     /// With `ARCHWIRE_PROTO_OUT=<dir>`, writes every input laid out along both axes with every
