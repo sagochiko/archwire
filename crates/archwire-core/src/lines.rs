@@ -319,16 +319,35 @@ mod tests {
         }
     }
 
-    // Fails if edges with different labels, holes or endpoint routes are merged into one line.
+    /// The hole example with the line from ecs-1c given a hole id of its own: two hole ids into s3.
+    fn two_holes(r: &Rules) -> (Model, Layout) {
+        let (mut m, l) = model_and_layout(CASES[11].1, r);
+        let e = m.edges.iter_mut().find(|e| e.from == "ecs-1c" && e.to == "s3").unwrap();
+        assert_eq!(e.hole.as_deref(), Some("route.ecs.s3"));
+        e.hole = Some("route.x.s3".to_string());
+        (m, l)
+    }
+
+    // Fails if edges with different labels, hole ids or endpoint routes are merged into one line.
     #[test]
     fn merged_lines_agree_on_label_hole_and_endpoint() {
-        for (name, src) in sources_and_fewer_readers() {
-            let (m, lines, _) = gathered(&src);
-            for l in &lines {
+        let r = Rules::builtin();
+        let mut inputs: Vec<(String, Model, Vec<Line>)> = sources_and_fewer_readers()
+            .into_iter()
+            .map(|(name, src)| {
+                let (m, lines, _) = gathered(&src);
+                (name, m, lines)
+            })
+            .collect();
+        let (m, l) = two_holes(&r);
+        let (lines, _) = gather(&m, &l, &r);
+        inputs.push(("two-holes".to_string(), m, lines));
+        for (name, m, lines) in &inputs {
+            for l in lines {
                 for &e in &l.edges {
                     let edge = &m.edges[e];
                     assert_eq!(edge.label, l.label_key, "{name}: {} -> {}", edge.from, edge.to);
-                    assert_eq!(edge.hole.is_some(), l.hole.is_some(), "{name}: {} -> {}", edge.from, edge.to);
+                    assert_eq!(edge.hole, l.hole, "{name}: {} -> {}", edge.from, edge.to);
                     assert_eq!(edge.endpoint, l.endpoint, "{name}: {} -> {}", edge.from, edge.to);
                     assert_eq!((edge.to.as_str(), edge.rel), (l.to.as_str(), l.rel), "{name}");
                 }
@@ -385,12 +404,11 @@ mod tests {
     #[test]
     fn merged_lines_share_one_hole() {
         let r = Rules::builtin();
-        let (mut m, l) = model_and_layout(CASES[11].1, &r);
-        let e = m.edges.iter_mut().find(|e| e.from == "ecs-1c" && e.to == "s3").unwrap();
-        assert_eq!(e.hole.as_deref(), Some("route.ecs.s3"));
-        e.hole = Some("route.x.s3".to_string());
+        let (m, l) = two_holes(&r);
         let (lines, _) = gather(&m, &l, &r);
-        assert_eq!(lines.iter().filter(|l| l.to == "s3").count(), 2);
+        let edge = |from: &str| m.edges.iter().position(|e| e.from == from && e.to == "s3").unwrap();
+        let s3: Vec<(Option<&str>, &[usize])> = lines.iter().filter(|l| l.to == "s3").map(|l| (l.hole.as_deref(), l.edges.as_slice())).collect();
+        assert_eq!(s3, [(Some("route.ecs.s3"), &[edge("ecs-1a")][..]), (Some("route.x.s3"), &[edge("ecs-1c")][..])]);
     }
 
     // Fails if two drawn lines get the same id (edge-<from>-to-<to>).
@@ -459,6 +477,55 @@ mod tests {
         let template = r.text("note.merged_side_lines", Lang::En);
         let head = template.split('{').next().unwrap();
         assert!(notes.iter().all(|n| !n.starts_with(head)), "{notes:?}");
+    }
+
+    /// Two Lambda parts with logs into CloudWatch, in model order `lambda.a` then `lambda.b`, at
+    /// the given rectangles (x, y, w, h); one line comes out of them and this is its sender.
+    fn drawn_from(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32), target: (i32, i32, i32, i32)) -> String {
+        let nodes = vec![
+            node("lambda.a", "lambda.a", "lambda", None, Area::Region),
+            node("lambda.b", "lambda.b", "lambda", None, Area::Region),
+            node("cloudwatch", "cloudwatch", "cloudwatch", None, Area::Region),
+        ];
+        let edges = ["lambda.a", "lambda.b"]
+            .iter()
+            .map(|f| Edge { from: f.to_string(), to: "cloudwatch".to_string(), rel: Rel::Aux, label: "logs_metrics".to_string(), hole: None, endpoint: false })
+            .collect();
+        let m = Model { region: "ap-northeast-1".to_string(), azs: Vec::new(), lang: Lang::En, nodes, edges, direction: None };
+        let icons = [("lambda.a", a), ("lambda.b", b), ("cloudwatch", target)]
+            .iter()
+            .map(|&(id, (x, y, w, h))| Icon { id: id.to_string(), label: String::new(), lines: 1, rect: Rect { x, y, w, h }, parent: None })
+            .collect();
+        let r = Rules::builtin();
+        let (lines, _) = gather(&m, &Layout { frames: Vec::new(), icons }, &r);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].edges, [0, 1]);
+        lines[0].from.clone()
+    }
+
+    // Fails if the sender is chosen by the vertical distance alone instead of the across-plus-down distance.
+    #[test]
+    fn the_sender_nearest_across_plus_down_draws_the_line() {
+        // Target centre (330, 30). lambda.a centre (30, 30): 300 across + 0 down = 300.
+        // lambda.b centre (330, 130): 0 across + 100 down = 100. By the vertical distance alone a (0) would win.
+        assert_eq!(drawn_from((0, 0, 60, 60), (300, 100, 60, 60), (300, 0, 60, 60)), "lambda.b");
+    }
+
+    // Fails if the distance is measured between the icons' top-left corners instead of their centres.
+    #[test]
+    fn the_distance_is_measured_between_icon_centres() {
+        // Target centre (330, 30), corner (300, 0). lambda.a is 200 square: centre (400, 200) gives
+        // 70 + 170 = 240, corner (300, 100) gives 0 + 100 = 100. lambda.b centre (130, 30) gives
+        // 200 + 0 = 200, corner (100, 0) gives 200 + 0 = 200. By centres b wins, by corners a would.
+        assert_eq!(drawn_from((300, 100, 200, 200), (100, 0, 60, 60), (300, 0, 60, 60)), "lambda.b");
+    }
+
+    // Fails if a tie in distance goes to the later sender in the model instead of the first.
+    #[test]
+    fn a_tie_in_distance_goes_to_the_first_sender_in_the_model() {
+        // Target centre (330, 30). lambda.a centre (330, 230): 0 + 200 = 200.
+        // lambda.b centre (130, 30): 200 + 0 = 200. Equal, so the first in the model, lambda.a.
+        assert_eq!(drawn_from((300, 200, 60, 60), (100, 0, 60, 60), (300, 0, 60, 60)), "lambda.a");
     }
 
     // Fails if a line with no per-AZ copies reads its empty set of AZs as matching every AZ.
