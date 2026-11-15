@@ -819,27 +819,30 @@ set:
         }
     }
 
-    /// The gap between two columns of parts `a` and `b` wide, by their widths as the layout read
-    /// them before it read lengths along an axis.
-    fn col_gap(a: i32, b: i32, wire: i32, bending: i32) -> i32 {
-        rank_gap(COL_STEP, (30 + (a + 1) / 2, 30 - b / 2), (ICON, 0), wire, bending)
-    }
-
     #[test]
     fn names_wider_than_the_column_step_widen_the_columns() {
-        assert_eq!(col_gap(60, 60, 0, 0), COL_STEP);
-        assert_eq!(col_gap(300, 300, 0, 0), 300 + 20);
-        assert_eq!(col_gap(301, 300, 0, 0), 301 + 20);
-        assert_eq!(col_gap(60, 60, 200, 1), 60 + 200 + 40);
+        // Spans are from the icon's left side: a part 300 wide runs from 30 - 150 to 30 + 150.
+        // Icons alone: max(220, 60 - 0 + 20, 60 - 0 + 0 + 40) = 220.
+        assert_eq!(rank_gap(COL_STEP, (60, 0), (ICON, 0), 0, 0), 220);
+        // Two parts 300 wide: 180 - (-120) + 20 = 320.
+        assert_eq!(rank_gap(COL_STEP, (180, -120), (ICON, 0), 0, 0), 320);
+        // An odd end on the first part: 181 - (-120) + 20 = 321.
+        assert_eq!(rank_gap(COL_STEP, (181, -120), (ICON, 0), 0, 0), 321);
+        // An odd start on the second part: 180 - (-121) + 20 = 321.
+        assert_eq!(rank_gap(COL_STEP, (180, -121), (ICON, 0), 0, 0), 321);
+        // A label 200 wide on a straight line: 60 - 0 + 200 + 40 = 300.
+        assert_eq!(rank_gap(COL_STEP, (60, 0), (ICON, 0), 200, 1), 300);
     }
 
     #[test]
     fn each_further_bending_main_line_widens_its_gap() {
-        assert_eq!(col_gap(60, 60, 0, 0), COL_STEP);
-        assert_eq!(col_gap(60, 60, 0, 1), COL_STEP);
-        assert_eq!(col_gap(60, 60, 0, 2), COL_STEP + 60);
-        assert_eq!(col_gap(60, 60, 0, 3), COL_STEP + 120);
-        assert_eq!(col_gap(300, 300, 0, 2), 320 + 60);
+        // Each bending line past the first adds 60: 220, 220, 220 + 60, 220 + 120.
+        assert_eq!(rank_gap(COL_STEP, (60, 0), (ICON, 0), 0, 0), 220);
+        assert_eq!(rank_gap(COL_STEP, (60, 0), (ICON, 0), 0, 1), 220);
+        assert_eq!(rank_gap(COL_STEP, (60, 0), (ICON, 0), 0, 2), 280);
+        assert_eq!(rank_gap(COL_STEP, (60, 0), (ICON, 0), 0, 3), 340);
+        // Two parts 300 wide and two bending lines: 180 - (-120) + 20 + 60 = 380.
+        assert_eq!(rank_gap(COL_STEP, (180, -120), (ICON, 0), 0, 2), 380);
 
         // One function: one straight line. Two: API Gateway between them, two bending lines.
         let (_, one) = placed("flows:\n  - user -> apigateway(http) -> lambda\n");
