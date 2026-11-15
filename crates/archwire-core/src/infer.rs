@@ -76,7 +76,7 @@ pub fn infer(def: &Definition, rules: &Rules) -> (Option<Model>, Diagnostics) {
 
 /// Every part must be a writable service, and its kind one the service has.
 /// Returns false if any name is unknown.
-fn check_names(def: &Definition, rules: &Rules, errors: &mut Vec<Problem>) -> bool {
+pub(crate) fn check_names(def: &Definition, rules: &Rules, errors: &mut Vec<Problem>) -> bool {
     let writable: Vec<String> =
         rules.service_keys().into_iter().filter(|k| rules.service(k).is_some_and(|s| !s.derived_only)).collect();
     let mut seen_at: Vec<&str> = Vec::new();
@@ -136,40 +136,52 @@ fn check_no_tags(def: &Definition, errors: &mut Vec<Problem>) -> bool {
     seen_at.is_empty()
 }
 
+fn bad_setting(errors: &mut Vec<Problem>, key: &str, got: &str, allowed: Vec<String>) {
+    errors.push(problem("BAD_SETTING", &format!("set.{key}"), got, allowed, format!("`{got}` is not a valid value for `{key}`")));
+}
+
+/// The value of `set.region`, ap-northeast-1 when it is not written. A value outside the list
+/// adds BAD_SETTING.
+pub(crate) fn check_region(def: &Definition, errors: &mut Vec<Problem>) -> String {
+    match def.set.get("region").map(String::as_str) {
+        Some(v) if !REGIONS.contains(&v) => {
+            bad_setting(errors, "region", v, strings(&REGIONS));
+            REGIONS[0].to_string()
+        }
+        v => v.unwrap_or(REGIONS[0]).to_string(),
+    }
+}
+
+/// The value of `set.lang`, English when it is not written. A value outside the list adds BAD_SETTING.
+pub(crate) fn check_lang(def: &Definition, errors: &mut Vec<Problem>) -> Lang {
+    match def.set.get("lang").map(String::as_str) {
+        None | Some("en") => Lang::En,
+        Some("ja") => Lang::Ja,
+        Some(v) => {
+            bad_setting(errors, "lang", v, strings(&LANGS));
+            Lang::En
+        }
+    }
+}
+
 fn check_settings(def: &Definition, errors: &mut Vec<Problem>) -> Settings {
-    let mut bad = |key: &str, got: &str, allowed: Vec<String>| {
-        errors.push(problem("BAD_SETTING", &format!("set.{key}"), got, allowed, format!("`{got}` is not a valid value for `{key}`")));
-    };
     let get = |key: &str| def.set.get(key).map(String::as_str);
 
     let azs = match get("azs") {
         None => 2,
         Some(v) if AZ_COUNTS.contains(&v) => v.parse().expect("listed value"),
         Some(v) => {
-            bad("azs", v, strings(&AZ_COUNTS));
+            bad_setting(errors, "azs", v, strings(&AZ_COUNTS));
             2
         }
     };
-    let region = match get("region") {
-        Some(v) if !REGIONS.contains(&v) => {
-            bad("region", v, strings(&REGIONS));
-            REGIONS[0]
-        }
-        v => v.unwrap_or(REGIONS[0]),
-    };
-    let lang = match get("lang") {
-        None | Some("en") => Lang::En,
-        Some("ja") => Lang::Ja,
-        Some(v) => {
-            bad("lang", v, strings(&LANGS));
-            Lang::En
-        }
-    };
+    let region = check_region(def, errors);
+    let lang = check_lang(def, errors);
     let nat_single = match get("nat") {
         None | Some("per-az") => false,
         Some("single") => true,
         Some(v) => {
-            bad("nat", v, strings(&NAT_MODES));
+            bad_setting(errors, "nat", v, strings(&NAT_MODES));
             false
         }
     };
@@ -178,7 +190,7 @@ fn check_settings(def: &Definition, errors: &mut Vec<Problem>) -> Settings {
         Some(v) => match v.parse::<usize>() {
             Ok(n) if (1..azs).contains(&n) => n,
             _ => {
-                bad("readers", v, (1..azs).map(|n| n.to_string()).collect());
+                bad_setting(errors, "readers", v, (1..azs).map(|n| n.to_string()).collect());
                 azs - 1
             }
         },
@@ -186,7 +198,7 @@ fn check_settings(def: &Definition, errors: &mut Vec<Problem>) -> Settings {
     for key in def.set.keys().filter(|k| !SETTINGS.contains(&k.as_str())) {
         errors.push(problem("UNKNOWN_SETTING", &format!("set.{key}"), key, strings(&SETTINGS), format!("unknown setting `{key}`")));
     }
-    Settings { azs, region: region.to_string(), readers, nat_single, lang }
+    Settings { azs, region, readers, nat_single, lang }
 }
 
 fn find_routes(def: &Definition, rules: &Rules) -> Vec<Route> {
@@ -308,7 +320,7 @@ fn arrow(rel: Rel) -> &'static str {
     }
 }
 
-fn derived(rules: &Rules, lang: Lang, target: &str, id: &str, added: bool) -> Derived {
+pub(crate) fn derived(rules: &Rules, lang: Lang, target: &str, id: &str, added: bool) -> Derived {
     let r = rules.rule(id);
     Derived {
         target: target.into(),

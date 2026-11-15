@@ -2,6 +2,8 @@ pub mod def;
 pub mod diag;
 pub mod drawio;
 pub mod edit;
+pub mod engine;
+pub mod flow_infer;
 pub mod infer;
 pub mod layout;
 pub mod model;

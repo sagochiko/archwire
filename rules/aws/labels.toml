@@ -56,6 +56,22 @@ ja = "Web ACL を適用"
 en = "Certificate"
 ja = "証明書"
 
+[invoke]
+en = "Invoke"
+ja = "呼び出し"
+
+[verify_token]
+en = "Verify tokens"
+ja = "トークンを検証"
+
+[jwt_authorizer]
+en = "JWT authorizer"
+ja = "JWT オーソライザー"
+
+[cognito_authorizer]
+en = "Cognito authorizer"
+ja = "Cognito オーソライザー"
+
 [undecided_route]
 en = "Route undecided"
 ja = "経路未定"
@@ -104,6 +120,11 @@ ja = "{line} の線のラベルは、アイコン、文字、ほかの線のど�
 ["need.route"]
 en = "Route from {from} to {to}"
 ja = "{from} から {to} への経路"
+
+# `{part}` is a part name.
+["need.kind"]
+en = "Kind of {part}"
+ja = "{part} の種類"
 
 # Service option labels are looked up by their English text.
 ["Amazon ECS (Fargate)"]

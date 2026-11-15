@@ -1,0 +1,86 @@
+# The connections the layout without a VPC accepts, one entry per service pair and relation.
+# Any connection not listed here stops with UNSUPPORTED.
+#
+# `label` is a key of labels.toml. `to_kind` gives, per kind of `to`, the label of the
+# connection and the rule whose reason is given to `to`; while the kind is not decided the
+# connection keeps `label`. `max_from` limits how many `from` parts one `to` part may have,
+# with `max_rule` saying why. `from_region` places the `from` part in that Region, with
+# `from_rule` saying why.
+
+[[link]]
+from = "user"
+to = "cloudfront"
+rel = "main"
+label = "https"
+
+[[link]]
+from = "user"
+to = "apigateway"
+rel = "main"
+label = "https"
+
+[[link]]
+from = "cloudfront"
+to = "s3"
+rel = "main"
+label = "static_files"
+
+[[link]]
+from = "cloudfront"
+to = "apigateway"
+rel = "main"
+label = "https"
+
+[[link]]
+from = "apigateway"
+to = "lambda"
+rel = "main"
+label = "invoke"
+
+[[link]]
+from = "lambda"
+to = "dynamodb"
+rel = "main"
+label = "read_write"
+
+[[link]]
+from = "lambda"
+to = "s3"
+rel = "main"
+label = "read_write"
+
+[[link]]
+from = "lambda"
+to = "cloudwatch"
+rel = "aux"
+label = "logs_metrics"
+
+[[link]]
+from = "apigateway"
+to = "cloudwatch"
+rel = "aux"
+label = "logs_metrics"
+
+[[link]]
+from = "cognito"
+to = "apigateway"
+rel = "assoc"
+label = "verify_token"
+to_kind.http = { label = "jwt_authorizer", rule = "http-api-jwt-authorizer" }
+to_kind.rest = { label = "cognito_authorizer", rule = "rest-api-cognito-authorizer" }
+
+[[link]]
+from = "waf"
+to = "cloudfront"
+rel = "assoc"
+label = "web_acl"
+max_from = 1
+max_rule = "one-web-acl-per-resource"
+
+[[link]]
+from = "acm"
+to = "cloudfront"
+rel = "assoc"
+label = "certificate"
+from_region = "us-east-1"
+from_rule = "cloudfront-certificate-in-us-east-1"

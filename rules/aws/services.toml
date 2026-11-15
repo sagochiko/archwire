@@ -1,6 +1,11 @@
 # Service properties. For `user` and `internet` the label is a key in labels.toml;
 # consumers resolve every label through Rules::text, which returns unknown keys unchanged.
 #
+# `origin = true` marks where main flows start: in the layout without a VPC every main flow must be
+# reachable from such a part. `kind_hole = true` makes a part written without a kind a hole.
+# `separate_from_vpc = true` marks a service that cannot be written together with VPC services yet.
+# `place_rule` names the rule that explains where the part is drawn; without it the scope decides.
+#
 # `flow_source = true` marks a global service that may start a main (->) or auxiliary (~>) flow.
 # `attach_to` makes a service an attachment: it carries no flows and may only be associated
 # (--) with the services listed there, written attachment first.
@@ -13,6 +18,7 @@ icon = "resource"
 shape = "users"
 color = "#242F3E"
 label = "users"
+origin = true
 
 [[service]]
 key = "internet"
@@ -132,3 +138,53 @@ shape = "cloudwatch_2"
 color = "#E7157B"
 label = "Amazon CloudWatch"
 in_label = "logs_metrics"
+
+[[service]]
+key = "apigateway"
+scope = "regional"
+place = "single"
+icon = "service"
+shape = "api_gateway"
+color = "#8C4FFF"
+label = "Amazon API Gateway"
+kind_hole = true
+separate_from_vpc = true
+
+[service.options.http]
+shape = "api_gateway"
+label = "Amazon API Gateway\nHTTP API"
+
+[service.options.rest]
+shape = "api_gateway"
+label = "Amazon API Gateway\nREST API"
+
+[[service]]
+key = "lambda"
+scope = "regional"
+place = "single"
+icon = "service"
+shape = "lambda"
+color = "#ED7100"
+label = "AWS Lambda"
+separate_from_vpc = true
+
+[[service]]
+key = "dynamodb"
+scope = "regional"
+place = "single"
+icon = "service"
+shape = "dynamodb"
+color = "#C925D1"
+label = "Amazon DynamoDB"
+separate_from_vpc = true
+
+[[service]]
+key = "cognito"
+scope = "regional"
+place = "single"
+icon = "service"
+shape = "cognito"
+color = "#DD344C"
+label = "Amazon Cognito"
+separate_from_vpc = true
+place_rule = "cognito-user-pool-in-one-region"
