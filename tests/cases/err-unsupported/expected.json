@@ -8,19 +8,11 @@
   "errors": [
     {
       "code": "UNSUPPORTED",
-      "at": "flows",
-      "got": null,
-      "allowed": [],
-      "rule": null,
-      "message": "v0.1 needs a main flow from user or cloudfront into alb, and from alb into ecs"
-    },
-    {
-      "code": "UNSUPPORTED",
       "at": "flows[0]",
       "got": "user -> s3",
       "allowed": [],
       "rule": null,
-      "message": "v0.1 does not support `user -> s3`"
+      "message": "`user -> s3` is not a supported connection"
     }
   ],
   "warnings": [],

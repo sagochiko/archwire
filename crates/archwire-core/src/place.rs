@@ -1325,4 +1325,47 @@ set:
         }
         assert!(failed.is_empty(), "{} of {} definitions failed:\n{}", failed.len(), defs.len(), failed.join("\n"));
     }
+
+    /// The definitions handed to the diagram checker: 40 taken evenly from `generated()`, by
+    /// their number there.
+    fn generated_for_the_checker() -> Vec<(usize, String)> {
+        let defs = generated();
+        (0..40).map(|k| k * defs.len() / 40).map(|i| (i, defs[i].clone())).collect()
+    }
+
+    /// With `ARCHWIRE_GEN_OUT=<dir>`, writes each picked definition as `<dir>/<number>.yaml` and
+    /// what `compile` makes of it as `<dir>/<number>.drawio` and `<dir>/<number>.json`, for
+    /// `tools/check_generated.sh`. Without it, only compiles them.
+    #[test]
+    fn generated_diagrams_compile_for_the_checker() {
+        let picked = generated_for_the_checker();
+        // The pick holds a diagram with lines drawn as one and one with the widest names allowed.
+        let wide = "m".repeat(crate::def::MAX_TAG - 2);
+        assert!(picked.iter().any(|(_, s)| s.matches(" ~> cloudwatch").count() >= 4), "no three Lambda functions sending to one CloudWatch in the pick");
+        assert!(picked.iter().any(|(_, s)| s.contains(&wide)), "no names filled with `m` in the pick");
+        // A relative folder is taken from the workspace root, where the command is typed, not
+        // from this crate's folder, where the test runs.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let dir = std::env::var_os("ARCHWIRE_GEN_OUT").map(|d| root.join(d));
+        if let Some(d) = &dir {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let mut failed: Vec<String> = Vec::new();
+        for (i, src) in &picked {
+            let out = crate::compile(src);
+            let d = &out.diagnostics;
+            if d.exit_code() != 0 || d.notes.iter().any(|n| n.contains("edge-")) {
+                failed.push(format!("{i}: {:?} {:?}\n{src}", d.errors, d.notes));
+            }
+            if let Some(dir) = &dir {
+                let name = format!("{i:04}");
+                std::fs::write(dir.join(format!("{name}.yaml")), src).unwrap();
+                std::fs::write(dir.join(format!("{name}.json")), d.to_json()).unwrap();
+                if let Some(x) = &out.drawio {
+                    std::fs::write(dir.join(format!("{name}.drawio")), x).unwrap();
+                }
+            }
+        }
+        assert!(failed.is_empty(), "{} of {} definitions failed:\n{}", failed.len(), picked.len(), failed.join("\n"));
+    }
 }

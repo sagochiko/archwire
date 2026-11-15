@@ -11,7 +11,10 @@ pub mod place;
 pub mod route;
 pub mod rules;
 
-use diag::{Diagnostics, Versions};
+use diag::{Diagnostics, Problem, Versions};
+use engine::Engine;
+use model::Model;
+use place::Placement;
 use rules::Rules;
 
 pub struct Output {
@@ -35,20 +38,48 @@ pub fn compile(def_text: &str) -> Output {
         Ok(d) => d,
         Err(errors) => return stop(errors),
     };
-    // Which layout the definition goes through is decided here, once. Both still take the VPC
-    // layout below; a definition mixing VPC parts with services kept apart from them stops here.
-    let _engine = match engine::pick(&def, &rules) {
-        Ok(e) => e,
-        Err(errors) => return stop(errors),
+    // Which layout the definition goes through is decided here, once: the VPC layout (Grid) or
+    // the layout without a VPC (Flow). Nothing after this point decides it again; the writer is
+    // told through its arguments. A definition mixing VPC parts with services kept apart from
+    // them stops here.
+    match engine::pick(&def, &rules) {
+        Err(errors) => stop(errors),
+        Ok(Engine::Grid) => {
+            let (model, mut diagnostics) = infer::infer(&def, &rules);
+            let Some(model) = model else {
+                return Output { drawio: None, diagnostics };
+            };
+            let layout = layout::layout(&model, &rules);
+            let (wires, notes) = route::route(&model, &layout, &rules);
+            diagnostics.notes.extend(notes);
+            let drawio = drawio::write(&model, &layout, &wires, &diagnostics, &rules, true);
+            Output { drawio: Some(drawio), diagnostics }
+        }
+        Ok(Engine::Flow) => {
+            let (model, diagnostics) = flow_infer::infer(&def, &rules);
+            let Some(model) = model else {
+                return Output { drawio: None, diagnostics };
+            };
+            let placed = place::place(&model, &rules);
+            flow_output(&model, placed, diagnostics, &rules)
+        }
+    }
+}
+
+/// The rest of the layout without a VPC once the parts are placed: a layout that failed its
+/// checks gives its errors and no diagram; otherwise the lines are routed from the placement's
+/// plans and associations are written without arrowheads.
+fn flow_output(model: &Model, placed: Result<Placement, Vec<Problem>>, mut diagnostics: Diagnostics, rules: &Rules) -> Output {
+    let p = match placed {
+        Ok(p) => p,
+        Err(errors) => {
+            diagnostics.errors.extend(errors);
+            return Output { drawio: None, diagnostics };
+        }
     };
-    let (model, mut diagnostics) = infer::infer(&def, &rules);
-    let Some(model) = model else {
-        return Output { drawio: None, diagnostics };
-    };
-    let layout = layout::layout(&model, &rules);
-    let (wires, notes) = route::route(&model, &layout, &rules);
+    let (wires, notes) = route::route_planned(model, &p.layout, rules, &p.lines);
     diagnostics.notes.extend(notes);
-    let drawio = drawio::write(&model, &layout, &wires, &diagnostics, &rules);
+    let drawio = drawio::write(model, &p.layout, &wires, &diagnostics, rules, false);
     Output { drawio: Some(drawio), diagnostics }
 }
 
@@ -81,11 +112,126 @@ mod tests {
         }
     }
 
+    /// The tag that opens the object of `id`, up to its first `>`.
+    fn object(x: &str, id: &str) -> String {
+        let tag = x.split("<object ").find(|s| s.starts_with(&format!("id=\"{id}\""))).unwrap_or_else(|| panic!("no object `{id}`"));
+        tag.split('>').next().unwrap().to_string()
+    }
+
+    /// The line of the diagram that writes the cell `id`.
+    fn line<'a>(x: &'a str, id: &str) -> &'a str {
+        x.lines().find(|l| l.contains(&format!("id=\"{id}\""))).unwrap_or_else(|| panic!("no cell `{id}`"))
+    }
+
+    const API: &str = "flows:\n  - user -> cloudfront -> s3\n  - user -> apigateway(http) -> lambda -> dynamodb\n  - cognito -- apigateway\n  - lambda ~> cloudwatch\nset:\n  lang: ja\n";
+
     #[test]
-    fn a_definition_without_a_vpc_still_stops_in_the_vpc_inference() {
-        let out = compile("flows:\n  - user -> apigateway(http) -> lambda -> dynamodb\n");
+    fn an_api_definition_compiles_with_associations_without_arrows() {
+        let out = compile(API);
+        assert_eq!(out.diagnostics.exit_code(), 0, "{:?}", out.diagnostics.errors);
+        assert!(out.diagnostics.notes.is_empty(), "{:?}", out.diagnostics.notes);
+        let x = out.drawio.unwrap();
+        assert!(line(&x, "edge-cognito-to-apigateway").contains("endArrow=none"));
+        assert!(!line(&x, "edge-cognito-to-apigateway").contains("endArrow=block"));
+        assert!(line(&x, "edge-lambda-to-cloudwatch").contains("endArrow=block"));
+    }
+
+    #[test]
+    fn the_web_layout_keeps_its_association_arrows() {
+        let x = compile("flows:\n  - user -> cloudfront -> alb -> ecs\n  - waf -- cloudfront\n").drawio.unwrap();
+        assert!(line(&x, "edge-waf-to-cloudfront").contains("endArrow=block"));
+    }
+
+    #[test]
+    fn every_added_frame_carries_a_reason() {
+        let x = compile("flows:\n  - user -> apigateway(http) -> lambda\nset:\n  region: ap-northeast-1\n").drawio.unwrap();
+        let region = object(&x, "region");
+        assert!(region.contains(" added=\"1\"") && region.contains("rule=\"resources-inside-region-frame\""), "{region}");
+        for tag in x.split("<object ").skip(1).map(|s| s.split('>').next().unwrap()) {
+            assert!(!tag.contains(" added=\"1\"") || tag.contains(" rule=\""), "{tag}");
+        }
+    }
+
+    #[test]
+    fn a_bare_part_reason_does_not_reach_a_named_part() {
+        let src = "flows:\n  - user -> apigateway(http) -> lambda.a\n  - user -> apigateway.other(rest) -> lambda.b\n  - cognito -- apigateway\n";
+        let out = compile(src);
+        assert_eq!(out.diagnostics.exit_code(), 0, "{:?}", out.diagnostics.errors);
+        let x = out.drawio.unwrap();
+        assert!(object(&x, "apigateway").contains("http-api-jwt-authorizer"));
+        assert!(!object(&x, "apigateway.other").contains("authorizer"));
+    }
+
+    #[test]
+    fn ids_with_digits_and_to_in_names_stay_unique() {
+        let out = compile("flows:\n  - user -> apigateway(http) -> lambda.1a -> s3.a-to-b\n  - lambda.1a -> s3\n");
+        assert_eq!(out.diagnostics.exit_code(), 0, "{:?}", out.diagnostics.errors);
+        let x = out.drawio.unwrap();
+        let ids: Vec<&str> = x.split(" id=\"").skip(1).map(|s| s.split('"').next().unwrap()).collect();
+        let mut seen = std::collections::BTreeSet::new();
+        for id in &ids {
+            assert!(seen.insert(*id), "`{id}` twice in {ids:?}");
+        }
+    }
+
+    #[test]
+    fn splitting_lines_differently_gives_the_same_bytes() {
+        let one = compile("flows:\n  - user -> apigateway(http) -> lambda -> dynamodb\n");
+        let three = compile("flows:\n  - user -> apigateway(http)\n  - apigateway -> lambda\n  - lambda -> dynamodb\n");
+        assert!(one.drawio.is_some());
+        assert_eq!(one.drawio, three.drawio);
+    }
+
+    #[test]
+    fn a_nearly_empty_region_compiles() {
+        let out = compile("flows:\n  - user -> cloudfront\n");
+        assert_eq!(out.diagnostics.exit_code(), 0, "{:?}", out.diagnostics.errors);
+        let x = out.drawio.unwrap();
+        assert!(x.contains("id=\"region\"") && object(&x, "region").contains("resources-inside-region-frame"));
+    }
+
+    #[test]
+    fn a_layout_failure_is_an_error_without_a_diagram() {
+        let rules = Rules::builtin();
+        let (model, diagnostics) = flow_infer::infer(&def::parse(API).unwrap(), &rules);
+        let failed = diag::Problem {
+            code: "LAYOUT_FAILED".into(),
+            at: Some("lambda".into()),
+            got: Some("lambda and dynamodb".into()),
+            message: "archwire could not lay out lambda and dynamodb without overlapping; this is a bug in archwire, please report the definition".into(),
+            ..Default::default()
+        };
+        let out = flow_output(&model.unwrap(), Err(vec![failed]), diagnostics, &rules);
         assert!(out.drawio.is_none());
         assert_eq!(out.diagnostics.exit_code(), 1);
-        assert!(out.diagnostics.errors.iter().all(|e| e.code == "UNSUPPORTED"));
+        assert_eq!(out.diagnostics.errors.iter().map(|e| e.code.as_str()).collect::<Vec<_>>(), ["LAYOUT_FAILED"]);
+    }
+
+    #[test]
+    fn mixed_definitions_stop_before_either_layout() {
+        let out = compile("flows:\n  - user -> apigateway(http) -> lambda -> aurora\n");
+        assert!(out.drawio.is_none());
+        assert_eq!(out.diagnostics.exit_code(), 1);
+        assert!(out.diagnostics.errors.iter().all(|e| e.code == "UNSUPPORTED"), "{:?}", out.diagnostics.errors);
+    }
+
+    #[test]
+    fn a_hole_in_a_definition_without_a_vpc_still_gives_a_diagram() {
+        let out = compile("flows:\n  - user -> apigateway -> lambda\n  - cognito -- apigateway\n");
+        assert_eq!(out.diagnostics.exit_code(), 2, "{:?}", out.diagnostics.errors);
+        assert!(out.drawio.is_some());
+    }
+
+    #[test]
+    fn a_line_keeps_clear_of_another_lines_label() {
+        // The line from Cognito once ran a pixel above the label of the line from API Gateway to
+        // the second Lambda function, and draw.io drew the label's letters against it.
+        let m = "m".repeat(22);
+        let src = format!(
+            "flows:\n  - user -> apigateway(http) -> lambda.f1{m}\n  - apigateway -> lambda.f2{m}\n  - lambda.f1{m} -> dynamodb.t1{m}\n  - lambda.f2{m} -> dynamodb.t2{m}\n  - lambda.f1{m} ~> cloudwatch.l{m}m\n  - lambda.f2{m} ~> cloudwatch.l{m}m\n  - apigateway ~> cloudwatch.l{m}m\n  - cognito.g{m}m -- apigateway\n  - user -> cloudfront.c{m}m -> s3.web\n  - waf.w{m}m -- cloudfront.c{m}m\nset:\n  lang: ja\n"
+        );
+        let out = compile(&src);
+        assert_eq!(out.diagnostics.exit_code(), 0, "{:?}", out.diagnostics.errors);
+        assert!(out.diagnostics.notes.iter().all(|n| !n.contains("edge-")), "{:?}", out.diagnostics.notes);
     }
 }

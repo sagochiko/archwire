@@ -18,6 +18,9 @@ const PRIVATE_SUBNET_STYLE: &str = "html=1;whiteSpace=wrap;fontSize=12;shape=mxg
 const MAIN_EDGE_STYLE: &str = "edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeColor=#545B64;rounded=0;labelBackgroundColor=none;verticalAlign=bottom;align=left;spacingLeft=6";
 const AUX_EDGE_STYLE: &str = "edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeColor=#E7157B;rounded=0;dashed=1;labelBackgroundColor=none;verticalAlign=bottom;align=left;spacingLeft=6";
 const AUX_COLOR: &str = "strokeColor=#E7157B";
+const ARROW: &str = "endArrow=block;endFill=1";
+/// An association line in the layout without a VPC has no arrowhead.
+const NO_ARROW: &str = "endArrow=none";
 /// A line whose route is still a hole is drawn in the auxiliary style, in grey.
 const HOLE_COLOR: &str = "strokeColor=#879196";
 const LABEL_BESIDE: &str = "align=left;spacingLeft=6";
@@ -26,7 +29,9 @@ const LABEL_LEFT: &str = "align=right;spacingRight=6";
 const LABEL_BOTTOM: &str = "verticalAlign=bottom";
 const LABEL_TOP: &str = "verticalAlign=top";
 
-pub fn write(model: &Model, layout: &Layout, wires: &[Wire], diag: &Diagnostics, rules: &Rules) -> String {
+/// `assoc_arrow` is whether association lines (`--`) end in an arrowhead: they do in the VPC
+/// layout and do not in the layout without a VPC. The caller says which.
+pub fn write(model: &Model, layout: &Layout, wires: &[Wire], diag: &Diagnostics, rules: &Rules, assoc_arrow: bool) -> String {
     let origin = |parent: &Option<String>| parent.as_deref().map_or((0, 0), |p| {
         let r = layout.rect(p);
         (r.x, r.y)
@@ -67,7 +72,9 @@ pub fn write(model: &Model, layout: &Layout, wires: &[Wire], diag: &Diagnostics,
     for w in wires {
         let mut style = match w.style {
             WireStyle::Main => MAIN_EDGE_STYLE.to_string(),
-            WireStyle::Aux | WireStyle::Assoc => AUX_EDGE_STYLE.to_string(),
+            WireStyle::Aux => AUX_EDGE_STYLE.to_string(),
+            WireStyle::Assoc if assoc_arrow => AUX_EDGE_STYLE.to_string(),
+            WireStyle::Assoc => AUX_EDGE_STYLE.replace(ARROW, NO_ARROW),
             WireStyle::Hole => AUX_EDGE_STYLE.replace(AUX_COLOR, HOLE_COLOR),
         };
         style = match (w.horizontal_label, w.label_flip) {
@@ -325,7 +332,7 @@ mod tests {
             source: r.source.clone(),
         };
         let diag = Diagnostics { derived: vec![why], ..Default::default() };
-        let x = super::write(&model, &layout, &[], &diag, &rules);
+        let x = super::write(&model, &layout, &[], &diag, &rules, true);
         let cell = |id: &str| x.split("<object ").find(|s| s.starts_with(&format!("id=\"{id}\""))).unwrap().split('>').next().unwrap().to_string();
         assert!(cell("s3").contains("rule=\"regional-service-outside-vpc\""));
         assert!(!cell("s3.web").contains("rule="));

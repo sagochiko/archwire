@@ -129,6 +129,8 @@ const LABEL_STEP: i32 = 2;
 /// looks for a spot with this much room first.
 const LABEL_MARGIN: i32 = 1;
 const LABEL_ROOM: i32 = 4;
+/// The least room between a line and another line's label in the layout without a VPC.
+const FLOW_LABEL_ROOM: i32 = 3;
 
 const NAT: &str = "nat";
 const IGW: &str = "igw";
@@ -420,6 +422,16 @@ impl Measure {
         match self {
             Measure::Grid => frame_name_area(f),
             Measure::Flow => frame_name_box(f),
+        }
+    }
+    /// The least room kept between a line's label and anything else. In the layout without a VPC
+    /// a line may not run closer than `FLOW_LABEL_ROOM` to another line's label: draw.io draws the
+    /// tops of wide letters a pixel or two from the box `wire_label_area` gives, so a line along
+    /// the box's edge touches the text.
+    fn label_margin(self, margin: i32) -> i32 {
+        match self {
+            Measure::Grid => margin,
+            Measure::Flow => margin.max(FLOW_LABEL_ROOM),
         }
     }
 }
@@ -1059,7 +1071,7 @@ impl<'a> Ctx<'a> {
         let len = path_length(path);
         let usual = if near_source { len / 4 } else { len / 2 };
         let area = wire_label_area(&one, point_along(path, usual).0, level, false);
-        if self.scene.label_clear(area, LABEL_MARGIN, paths, me, placed) {
+        if self.scene.label_clear(area, self.measure.label_margin(LABEL_MARGIN), paths, me, placed) {
             return LabelSpot { text: one, above: level, flip: false, at: None, area: Some(area), clear: true };
         }
         let mut texts = vec![one.clone()];
@@ -1070,6 +1082,7 @@ impl<'a> Ctx<'a> {
         let mut tries = Vec::new();
         for between in [0, 1] {
             for margin in [LABEL_ROOM, LABEL_MARGIN] {
+                let margin = self.measure.label_margin(margin);
                 tries.extend(texts.iter().map(|t| (between, margin, t)));
             }
         }
@@ -1648,7 +1661,8 @@ fn audit(_model: &Model, layout: &Layout, wires: &[Wire], measure: Measure) -> V
         })
         .collect();
     let paths: Vec<Vec<(i32, i32)>> = wires.iter().map(|w| audit_path(w, layout)).collect();
-    let labels: Vec<Option<Rect>> = wires.iter().zip(&paths).map(|(w, p)| audit_wire_label(w, p)).collect();
+    let room = measure.label_margin(0);
+    let labels: Vec<Option<Rect>> = wires.iter().zip(&paths).map(|(w, p)| audit_wire_label(w, p).map(|r| grow(r, room))).collect();
     let mut bad = vec![false; wires.len()];
     for (n, (w, p)) in wires.iter().zip(&paths).enumerate() {
         let last = p.len() - 2;
