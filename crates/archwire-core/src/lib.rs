@@ -341,4 +341,28 @@ mod tests {
             assert_eq!(main_lines_across_side_lines(src), Vec::<String>::new(), "{src}");
         }
     }
+
+    #[test]
+    fn a_bent_main_line_carries_its_label_where_it_leaves_its_source() {
+        let src = "flows:\n  - user -> apigateway(http) -> lambda.orders -> dynamodb.orders\n  - apigateway -> lambda.users -> dynamodb.users\n  - apigateway -> lambda.search -> dynamodb.orders\n  - lambda.orders ~> cloudwatch\n  - lambda.users ~> cloudwatch\n  - lambda.search ~> cloudwatch\nset:\n  lang: ja\n";
+        let rules = Rules::builtin();
+        let (model, _) = flow_infer::infer(&def::parse(src).unwrap(), &rules);
+        let model = model.unwrap();
+        let p = place::place(&model, &rules).unwrap();
+        let (wires, notes) = route::route_planned(&model, &p.layout, &rules, &p.lines);
+        assert!(notes.iter().all(|n| !n.contains("edge-")), "{notes:?}");
+        let mut bent = 0;
+        for w in wires.iter().filter(|w| w.style == route::WireStyle::Main) {
+            let path = drawn(w, &p.layout);
+            if path.len() < 3 || path[0].1 != path[1].1 {
+                continue;
+            }
+            bent += 1;
+            let len: i32 = path.windows(2).map(|s| (s[1].0 - s[0].0).abs() + (s[1].1 - s[0].1).abs()).sum();
+            let at = w.label_at.map_or(len / 2, |a| (a as i32 * len + 500) / 1000);
+            let first = (path[1].0 - path[0].0).abs();
+            assert!(at > 0 && at < first && w.horizontal_label, "{} puts its label {at} along, past its first stretch of {first}", w.id);
+        }
+        assert!(bent >= 4, "{bent}");
+    }
 }
