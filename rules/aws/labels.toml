@@ -84,6 +84,15 @@ ja = "（全 AZ から）"
 en = "(via VPC endpoint)"
 ja = "（VPC エンドポイント経由）"
 
+# `{n}` is how many parts the one drawn line stands for.
+[from_sources]
+en = "({n} sources)"
+ja = "（{n}か所から）"
+
+[parts_separator]
+en = ", "
+ja = "、"
+
 [writer]
 en = "Writer"
 ja = "Writer"
@@ -116,6 +125,11 @@ ja = "{line} の線は、アイコン、ラベル、ほかの線のどれかを�
 ["note.unplaced_label"]
 en = "The label of the line {line} could not be placed clear of every icon, text and other line; check it in the diagram."
 ja = "{line} の線のラベルは、アイコン、文字、ほかの線のどれかを避けて置けなかった。図で確かめること。"
+
+# `{parts}` lists part names; it names the parts, not the line's id.
+["note.merged_side_lines"]
+en = "The line from {from} to {to} stands for the lines from {parts}."
+ja = "{from} から {to} への線は、{parts} からの線をまとめて表す。"
 
 ["need.route"]
 en = "Route from {from} to {to}"

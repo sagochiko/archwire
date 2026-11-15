@@ -14,7 +14,7 @@ use crate::def::Rel;
 use crate::diag::Problem;
 use crate::layout::{icon, Frame, FrameKind, Icon, Layout, Rect};
 use crate::model::{Area, Model};
-use crate::route::{label_area, wire_text_width, Bend, LinePlan, Side};
+use crate::route::{frame_name_box, name_area, name_text_width, wire_text_width, Bend, LinePlan, Side};
 use crate::rules::Rules;
 
 /// The least distance between the centres of two neighbouring columns.
@@ -33,8 +33,6 @@ const NAME_ROOM: i32 = 20;
 const WIRE_ROOM: i32 = 40;
 /// More room between two columns for each further main line that bends between them.
 const LANE_ROOM: i32 = 60;
-/// How much further down the Region's side row moves for each further line into one side part.
-const GATHER_ROOM: i32 = 50;
 /// From the Region frame's left side to the first column's icons, and from its top to the first row.
 const REGION_LEFT: i32 = 110;
 const REGION_TOP: i32 = 60;
@@ -71,7 +69,8 @@ pub struct Placement {
     pub col_x: Vec<i32>,
 }
 
-/// Which way a frame's contents run. This version has one; each frame is given its own.
+/// Which way a frame's contents run. Only the Region is laid out through it, only from left to
+/// right, and nothing reads it yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Direction {
     LeftToRight,
@@ -82,6 +81,8 @@ struct Block {
     w: i32,
     h: i32,
     icons: Vec<Icon>,
+    /// The centre x of each column: the main columns, then the side row's own past the last one.
+    cols: Vec<i32>,
 }
 
 /// The Region's parts on a main flow and the main lines between them.
@@ -228,11 +229,7 @@ pub fn place(model: &Model, rules: &Rules) -> Result<Placement, Vec<Problem>> {
     ];
     let layout = Layout { frames, icons };
 
-    // Every column has an icon: a column past the first holds a part whose predecessor is in the
-    // column before, and side parts move right one column at a time.
-    let mut col_x: Vec<i32> = block.icons.iter().map(|i| region.x + i.rect.x + ICON / 2).collect();
-    col_x.sort_unstable();
-    col_x.dedup();
+    let col_x: Vec<i32> = block.cols.iter().map(|c| region.x + c).collect();
     let lines = plans(model, &layout, &col_x);
 
     let problems = check(model, &layout);
@@ -257,7 +254,7 @@ pub(crate) fn check(model: &Model, layout: &Layout) -> Vec<Problem> {
         }
     }
     let icons = &layout.icons;
-    let labels: Vec<Rect> = icons.iter().map(label_area).collect();
+    let labels: Vec<Rect> = icons.iter().map(name_area).collect();
     for a in 0..icons.len() {
         for b in a + 1..icons.len() {
             let (ia, ib, la, lb) = (icons[a].rect, icons[b].rect, labels[a], labels[b]);
@@ -279,6 +276,38 @@ pub(crate) fn check(model: &Model, layout: &Layout) -> Vec<Problem> {
             out.push(failed(&f.id, f.id.clone(), "leaving its frame"));
         }
     }
+    // The frame a part sits in is the one the model gives it.
+    for n in &model.nodes {
+        let want = match n.area {
+            Some(Area::Outside) => None,
+            Some(Area::Cloud) => Some(CLOUD_FRAME),
+            Some(Area::Region) => Some(REGION_FRAME),
+            None => continue,
+        };
+        if let Some(i) = icons.iter().find(|i| i.id == n.id) {
+            if i.parent.as_deref() != want {
+                out.push(failed(&i.id, i.id.clone(), "leaving its frame"));
+            }
+        }
+    }
+    // Parts in one column, in one frame, stay at least a row apart.
+    for a in 0..icons.len() {
+        for b in a + 1..icons.len() {
+            let (ia, ib) = (&icons[a], &icons[b]);
+            if ia.rect.x == ib.rect.x && ia.parent == ib.parent && (ia.rect.y - ib.rect.y).abs() < ROW_STEP {
+                out.push(failed(&ia.id, format!("{} and {}", ia.id, ib.id), "keeping rows apart"));
+            }
+        }
+    }
+    // No part or name lies over a frame's name.
+    for f in &layout.frames {
+        let name = frame_name_box(f);
+        for (i, label) in icons.iter().zip(&labels) {
+            if overlaps(i.rect, name) || overlaps(*label, name) {
+                out.push(failed(&i.id, format!("{} and {}", i.id, f.id), "overlapping"));
+            }
+        }
+    }
     out
 }
 
@@ -296,33 +325,12 @@ fn lay_region(model: &Model, rules: &Rules, dir: Direction) -> Block {
     let f = flow(model);
     let ys = rows(&f, r, true);
 
-    // (model index, column, y) of every Region part. Side parts take one row below the main
-    // rows, in the column of the part their first side line joins, or the next column to the
-    // right that no side part has taken yet. The row moves further down when one side part
-    // gathers several lines, so they have room to come in between the last main row and it.
-    let mut spots: Vec<(usize, usize, i32)> = f.parts.iter().enumerate().map(|(k, &i)| (i, f.col[k], ys[k])).collect();
-    let sides: Vec<usize> =
-        (0..model.nodes.len()).filter(|&i| model.nodes[i].area == Some(Area::Region) && !f.parts.contains(&i)).collect();
-    let most = sides.iter().map(|&i| side_lines(model, i)).max().unwrap_or(0) as i32;
-    let side_y = ys.iter().max().map_or(0, |m| m + r) + (most - 1).max(0) * GATHER_ROOM;
-    let mut taken: Vec<usize> = Vec::new();
-    for &i in &sides {
-        let partner = partners(model, i).into_iter().next();
-        let mut col = partner.and_then(|p| f.parts.iter().position(|&j| j == p)).map_or(1, |k| f.col[k]);
-        while taken.contains(&col) {
-            col += 1;
-        }
-        taken.push(col);
-        spots.push((i, col, side_y));
-    }
-    spots.sort_by_key(|s| s.0);
-
-    // Column widths from the names in them, and the distances between the column centres.
-    let named: Vec<Icon> = spots.iter().map(|s| icon_of(model, rules, s.0, icon_at(0, 0), None)).collect();
-    let cols = spots.iter().map(|s| s.1).max().unwrap_or(0);
+    // Main columns: their widths come from the main parts' names alone, so side parts never move them.
+    let named = |i: usize| icon_of(model, rules, i, icon_at(0, 0), None);
+    let cols = f.col.iter().copied().max().unwrap_or(0);
     let mut w = vec![ICON; cols + 1];
-    for (s, n) in spots.iter().zip(&named) {
-        w[s.1] = w[s.1].max(width(n));
+    for (k, &i) in f.parts.iter().enumerate() {
+        w[f.col[k]] = w[f.col[k]].max(width(&named(i)));
     }
     let local = |id: &str| f.parts.iter().position(|&i| model.nodes[i].id == id);
     let mut x = vec![0; cols + 1];
@@ -342,10 +350,40 @@ fn lay_region(model: &Model, rules: &Rules, dir: Direction) -> Block {
         let bending = lines.iter().filter(|&&(a, b, _)| ys[a] != ys[b]).count() as i32;
         x[c + 1] = x[c] + col_gap(w[c], w[c + 1], wire, bending);
     }
+    // (model index, centre x, y) of every Region part.
+    let mut spots: Vec<(usize, i32, i32)> = f.parts.iter().enumerate().map(|(k, &i)| (i, x[f.col[k]], ys[k])).collect();
+
+    // Side parts take one row below the main rows, under the column of the part their first side
+    // line joins, or the next column to the right where their names keep clear of the side parts
+    // placed before them, or past the last column.
+    let sides: Vec<usize> =
+        (0..model.nodes.len()).filter(|&i| model.nodes[i].area == Some(Area::Region) && !f.parts.contains(&i)).collect();
+    let side_y = ys.iter().max().map_or(0, |m| m + r);
+    let mut placed: Vec<(i32, i32)> = Vec::new();
+    let mut extra: Vec<i32> = Vec::new();
+    for &i in &sides {
+        let wi = width(&named(i));
+        let partner = partners(model, i).into_iter().next();
+        let want = partner.and_then(|p| f.parts.iter().position(|&j| j == p)).map_or(1, |k| f.col[k]);
+        let clear = |cx: i32| cx - half_up(wi) >= FRAME_ROOM && placed.iter().all(|&(px, pw)| (cx - px).abs() >= step(COL_STEP, pw, wi));
+        let cx = match (want..=cols).map(|c| x[c]).find(|&cx| clear(cx)) {
+            Some(cx) => cx,
+            None => {
+                let base = if cols > 0 { x[cols] + COL_STEP } else { REGION_LEFT + ICON / 2 };
+                placed.iter().map(|&(px, pw)| px + step(COL_STEP, pw, wi)).chain([base, half_up(wi) + FRAME_ROOM]).max().expect("not empty")
+            }
+        };
+        if cols == 0 || cx > x[cols] {
+            extra.push(cx);
+        }
+        placed.push((cx, wi));
+        spots.push((i, cx, side_y));
+    }
+    spots.sort_by_key(|s| s.0);
 
     let icons: Vec<Icon> = spots
         .iter()
-        .map(|&(i, c, y)| icon_of(model, rules, i, icon_at(x[c] - ICON / 2, REGION_TOP + y), Some(REGION_FRAME.into())))
+        .map(|&(i, cx, y)| icon_of(model, rules, i, icon_at(cx - ICON / 2, REGION_TOP + y), Some(REGION_FRAME.into())))
         .collect();
     let (mut bw, mut bh) = (REGION_LEFT + ICON + REGION_RIGHT, REGION_TOP + ICON + REGION_BOTTOM);
     if !icons.is_empty() {
@@ -353,14 +391,16 @@ fn lay_region(model: &Model, rules: &Rules, dir: Direction) -> Block {
         bh = icons.iter().map(|i| extent(i).1).max().expect("not empty") + REGION_BOTTOM;
     }
     // Wide enough for the frame's own name.
-    let name = Icon { id: String::new(), label: region_name(model, rules), lines: 1, rect: icon_at(0, 0), parent: None };
-    bw = bw.max(FRAME_NAME_INDENT + label_area(&name).w + FRAME_ROOM);
-    Block { w: bw, h: bh, icons }
+    bw = bw.max(FRAME_NAME_INDENT + name_text_width(&region_name(model, rules)) + FRAME_ROOM);
+    let mut centres: Vec<i32> = x[1..].iter().copied().chain(extra).collect();
+    centres.sort_unstable();
+    centres.dedup();
+    Block { w: bw, h: bh, icons, cols: centres }
 }
 
 /// R: an icon, the tallest name in the diagram and some room, and at least `ROW_STEP`.
 fn row_step(model: &Model, rules: &Rules) -> i32 {
-    let tallest = (0..model.nodes.len()).map(|i| label_area(&icon_of(model, rules, i, icon_at(0, 0), None)).h).max().unwrap_or(0);
+    let tallest = (0..model.nodes.len()).map(|i| name_area(&icon_of(model, rules, i, icon_at(0, 0), None)).h).max().unwrap_or(0);
     ROW_STEP.max(ICON + tallest + ROW_ROOM)
 }
 
@@ -462,7 +502,7 @@ fn plans(model: &Model, layout: &Layout, col_x: &[i32]) -> Vec<LinePlan> {
             let bend = if upper.rect.x == lower.rect.x {
                 Bend::Straight
             } else {
-                Bend::AtY((bottom(label_area(upper)) + lower.rect.y).div_euclid(2))
+                Bend::AtY((bottom(name_area(upper)) + lower.rect.y).div_euclid(2))
             };
             if from_upper {
                 (Side::Bottom, Side::Top, bend)
@@ -479,12 +519,6 @@ fn plans(model: &Model, layout: &Layout, col_x: &[i32]) -> Vec<LinePlan> {
 /// with the widest label of the main lines from one into the other and how many of them bend.
 fn col_gap(a: i32, b: i32, wire: i32, bending: i32) -> i32 {
     step(COL_STEP, a, b).max(ICON + wire + WIRE_ROOM) + (bending - 1).max(0) * LANE_ROOM
-}
-
-/// How many side lines (auxiliary and association) a part has.
-fn side_lines(model: &Model, i: usize) -> usize {
-    let id = &model.nodes[i].id;
-    model.edges.iter().filter(|e| e.rel != Rel::Main && (&e.from == id || &e.to == id)).count()
 }
 
 fn on_main(model: &Model, id: &str) -> bool {
@@ -543,7 +577,7 @@ fn half_up(v: i32) -> i32 {
 
 /// The width a part takes: its icon or its name, whichever is wider.
 fn width(i: &Icon) -> i32 {
-    ICON.max(label_area(i).w)
+    ICON.max(name_area(i).w)
 }
 
 /// The distance between the centres of two neighbours of these widths: their names apart, and at least `least`.
@@ -553,7 +587,7 @@ fn step(least: i32, a: i32, b: i32) -> i32 {
 
 /// The right and the bottom end of a part's icon and name.
 fn extent(i: &Icon) -> (i32, i32) {
-    let l = label_area(i);
+    let l = name_area(i);
     (right(i.rect).max(right(l)), bottom(i.rect).max(bottom(l)))
 }
 
@@ -581,7 +615,8 @@ fn inside(outer: Rect, inner: Rect) -> bool {
 mod tests {
     use super::*;
     use crate::layout::Rect;
-    use crate::route::{label_area, Bend, Side};
+    use crate::layout::Icon;
+    use crate::route::{name_area, port_point, route_planned, Bend, Side, Wire, NAME_CHARS, NAME_DRAWN, NAME_WIDE_CHARS, NAME_WIDE_DRAWN};
 
     fn placed(src: &str) -> (Model, Placement) {
         let r = Rules::builtin();
@@ -609,7 +644,7 @@ mod tests {
         (a.x - f.x, a.y - f.y)
     }
     fn label_of(p: &Placement, id: &str) -> Rect {
-        label_area(p.layout.icons.iter().find(|i| i.id == id).unwrap())
+        name_area(p.layout.icons.iter().find(|i| i.id == id).unwrap())
     }
     fn plan<'a>(p: &'a Placement, from: &str, to: &str) -> &'a LinePlan {
         p.lines.iter().find(|l| l.from == from && l.to == to).unwrap_or_else(|| panic!("no plan {from} -> {to}"))
@@ -709,18 +744,64 @@ set:
         assert_eq!(rows, [0; 5]);
     }
 
+    /// A name's box from the widths draw.io was measured to draw, apart from the layout's own measure.
+    fn drawn_name(i: &Icon) -> Rect {
+        let ten = |c: char| {
+            NAME_CHARS
+                .chars()
+                .position(|x| x == c)
+                .map(|k| NAME_DRAWN[k])
+                .or_else(|| NAME_WIDE_CHARS.chars().position(|x| x == c).map(|k| NAME_WIDE_DRAWN[k]))
+                .unwrap_or_else(|| panic!("{c:?} in `{}` was not measured", i.label))
+        };
+        let tens = i.label.lines().map(|l| l.chars().map(ten).sum::<i32>()).max().unwrap_or(0);
+        let half = (tens + 19) / 20;
+        Rect { x: i.rect.x + i.rect.w / 2 - half, y: i.rect.y + i.rect.h + 4, w: 2 * half, h: 14 * i.lines as i32 + 6 }
+    }
+    /// No two names as drawn overlap, and no name as drawn lies over another icon.
+    fn assert_names_apart(p: &Placement) {
+        let icons = &p.layout.icons;
+        for (k, a) in icons.iter().enumerate() {
+            for b in &icons[k + 1..] {
+                let (na, nb) = (drawn_name(a), drawn_name(b));
+                assert!(!overlaps(na, nb), "the names of {} and {} overlap: {na:?} {nb:?}", a.id, b.id);
+                assert!(!overlaps(na, b.rect) && !overlaps(a.rect, nb), "{} and {} overlap", a.id, b.id);
+            }
+        }
+    }
+
     #[test]
     fn names_at_the_longest_allowed_do_not_overlap() {
         let long = "a".repeat(crate::def::MAX_TAG);
         let (m, p) = placed(&format!("flows:\n  - user -> apigateway(http) -> lambda.{long} -> dynamodb.{long}\n  - lambda.{long} -> dynamodb.b{}\n", &long[1..]));
         assert!(check(&m, &p.layout).is_empty());
-        let names: Vec<Rect> = p.layout.icons.iter().map(label_area).collect();
-        for (i, a) in names.iter().enumerate() {
-            for b in &names[i + 1..] {
-                assert!(a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y, "{a:?} {b:?}");
-            }
-        }
+        assert_names_apart(&p);
         assert!(p.col_x.windows(2).all(|w| w[1] - w[0] >= COL_STEP), "{:?}", p.col_x);
+    }
+
+    #[test]
+    fn the_widest_letters_at_the_longest_allowed_do_not_overlap_anywhere() {
+        // A name after the dot holds lower-case letters only, so `m` and `w` are its widest letters.
+        for c in ["m", "w"] {
+            let t = |k: &str| format!("{k}{}", c.repeat(crate::def::MAX_TAG - k.len()));
+            let src = format!(
+                "flows:
+  - user -> cloudfront.{cf} -> s3.{s3}
+  - user -> apigateway(http) -> lambda.{la} -> dynamodb.{da}
+  - apigateway -> lambda.{lb} -> dynamodb.{db}
+  - waf.{waf} -- cloudfront.{cf}
+  - acm.{acm} -- cloudfront.{cf}
+  - cognito.{cog} -- apigateway
+  - lambda.{la} ~> cloudwatch.{cw}
+  - apigateway ~> cloudwatch.{cw2}
+",
+                cf = t("c"), s3 = t("s"), la = t("a"), lb = t("b"), da = t("d"), db = t("e"),
+                waf = t("w"), acm = t("k"), cog = t("g"), cw = t("x"), cw2 = t("y"),
+            );
+            let (m, p) = placed(&src);
+            assert!(check(&m, &p.layout).is_empty(), "{c}");
+            assert_names_apart(&p);
+        }
     }
 
     #[test]
@@ -756,7 +837,7 @@ set:
     }
 
     #[test]
-    fn a_side_part_gathering_lines_moves_only_the_side_row_down() {
+    fn a_side_part_gathering_lines_moves_no_part() {
         let base = "flows:
   - user -> apigateway(http) -> lambda.f1
   - apigateway -> lambda.f2
@@ -774,7 +855,141 @@ set:
         }
         let bottom = main.map(|id| at(&a, id).y).into_iter().max().unwrap();
         assert_eq!(at(&b, "cloudwatch").y, bottom + b.row_step);
-        assert_eq!(at(&c, "cloudwatch").y, bottom + c.row_step + 3 * GATHER_ROOM);
+        // However many lines a side part gathers, it stays one row below the main rows.
+        assert_eq!(at(&c, "cloudwatch").y, bottom + c.row_step);
+    }
+
+    #[test]
+    fn side_lines_from_one_service_into_one_part_are_drawn_as_one_from_the_nearest() {
+        let src = "flows:
+  - user -> apigateway(http) -> lambda.f1
+  - apigateway -> lambda.f2
+  - apigateway -> lambda.f3
+  - lambda.f1 ~> cloudwatch
+  - lambda.f2 ~> cloudwatch
+  - lambda.f3 ~> cloudwatch
+  - apigateway ~> cloudwatch
+";
+        for (lang, sources, list) in [("", "(3 sources)", "lambda.f1, lambda.f2, lambda.f3"), ("set:\n  lang: ja\n", "（3か所から）", "lambda.f1、lambda.f2、lambda.f3")] {
+            let (m, p, wires, notes) = drawn(&format!("{src}{lang}"));
+            let into: Vec<&Wire> = wires.iter().filter(|w| w.to == "cloudwatch").collect();
+            assert_eq!(into.len(), 2, "{into:?}");
+            let lambdas = into.iter().find(|w| w.from.starts_with("lambda")).unwrap();
+            assert_eq!(lambdas.id, "edge-lambda.f3-to-cloudwatch");
+            assert!(lambdas.label.ends_with(sources), "{:?}", lambdas.label);
+            let stands: Vec<&str> = lambdas.represents.iter().map(|(f, _)| f.as_str()).collect();
+            assert_eq!(stands, ["lambda.f1", "lambda.f2", "lambda.f3"]);
+            assert!(into.iter().any(|w| w.from == "apigateway" && w.represents.len() == 1));
+            let said: Vec<&String> = notes.iter().filter(|n| n.contains(list)).collect();
+            assert_eq!(said.len(), 1, "{notes:?}");
+            assert!(!said[0].contains("edge-"), "{said:?}");
+            assert_lines_clear(&m, &p, &wires, &notes);
+        }
+    }
+
+    fn drawn(src: &str) -> (Model, Placement, Vec<Wire>, Vec<String>) {
+        let (m, p) = placed(src);
+        let (w, notes) = route_planned(&m, &p.layout, &Rules::builtin(), &p.lines);
+        (m, p, w, notes)
+    }
+    /// No note names a line that could not be drawn clear, and every line as finally drawn keeps
+    /// clear of every icon but its own two ends and of every name.
+    fn assert_lines_clear(m: &Model, p: &Placement, wires: &[Wire], notes: &[String]) {
+        assert!(notes.iter().all(|n| !n.contains("edge-")), "{notes:?}");
+        let l = &p.layout;
+        for w in wires {
+            let mut path = vec![port_point(l.rect(&w.from), w.exit)];
+            path.extend(w.points.iter().copied());
+            path.push(port_point(l.rect(&w.to), w.entry));
+            for s in path.windows(2) {
+                let (x0, x1, y0, y1) = (s[0].0.min(s[1].0), s[0].0.max(s[1].0), s[0].1.min(s[1].1), s[0].1.max(s[1].1));
+                let enters = |r: Rect| x1 > r.x && x0 < r.x + r.w && y1 > r.y && y0 < r.y + r.h;
+                for i in &l.icons {
+                    let own = i.id == w.from || i.id == w.to;
+                    assert!(own || !enters(i.rect), "{} runs through {}", w.id, i.id);
+                    assert!(!enters(name_area(i)), "{} runs through the name of {}", w.id, i.id);
+                }
+            }
+        }
+        assert!(check(m, l).is_empty());
+    }
+    fn assert_clean(src: &str) {
+        let (m, p, w, notes) = drawn(src);
+        assert_names_apart(&p);
+        assert_lines_clear(&m, &p, &w, &notes);
+    }
+
+    #[test]
+    fn lines_whose_first_try_runs_through_parts_end_clear() {
+        // CloudFront's line to S3 is first tried straight, through API Gateway and Lambda on its row.
+        assert_clean("flows:\n  - user -> cloudfront -> s3\n  - user -> apigateway(http) -> lambda -> s3\n");
+        // lambda.a's line to CloudWatch is first tried straight down, through lambda.b and lambda.c.
+        assert_clean("flows:\n  - user -> apigateway(http) -> lambda.a\n  - apigateway -> lambda.b\n  - apigateway -> lambda.c\n  - lambda.a ~> cloudwatch\n");
+    }
+
+    #[test]
+    fn two_apis_and_four_functions_lay_out_cleanly() {
+        assert_clean("flows:
+  - user -> apigateway.a(http) -> lambda.a1 -> dynamodb.a
+  - apigateway.a -> lambda.a2 -> dynamodb.a
+  - user -> apigateway.b(rest) -> lambda.b1 -> dynamodb.b
+  - apigateway.b -> lambda.b2 -> dynamodb.b
+  - lambda.a1 ~> cloudwatch
+  - lambda.a2 ~> cloudwatch
+  - lambda.b1 ~> cloudwatch
+  - lambda.b2 ~> cloudwatch
+");
+    }
+
+    const TWO_LOGS: &str = "flows:
+  - user -> cloudfront -> apigateway.a(rest) -> lambda.a
+  - user -> apigateway.b(http) -> lambda.b
+  - lambda.a ~> cloudwatch.x
+  - lambda.b ~> cloudwatch.x
+  - apigateway.a ~> cloudwatch.y
+  - lambda.a ~> cloudwatch.y
+  - cognito -- apigateway.a
+  - cognito -- apigateway.b
+";
+
+    #[test]
+    fn two_log_groups_with_partly_shared_senders_and_a_distribution_in_front_of_an_api() {
+        assert_clean(TWO_LOGS);
+        assert_clean(&TWO_LOGS.replace("  - user -> cloudfront", "  - user.a -> cloudfront").replace("  - user -> apigateway.b", "  - user.b -> apigateway.b"));
+    }
+
+    #[test]
+    fn the_order_of_side_lines_moves_no_main_part() {
+        let main = "flows:\n  - user -> cloudfront -> apigateway.a(rest) -> lambda.a\n  - user -> apigateway.b(http) -> lambda.b\n";
+        let sides = ["lambda.a ~> cloudwatch.x", "lambda.b ~> cloudwatch.x", "apigateway.a ~> cloudwatch.y", "lambda.a ~> cloudwatch.y", "cognito -- apigateway.a", "cognito -- apigateway.b"];
+        let write = |order: &[&str]| format!("{main}{}", order.iter().map(|l| format!("  - {l}\n")).collect::<String>());
+        let mut reversed = sides;
+        reversed.reverse();
+        let (_, a) = placed(&write(&sides));
+        let (_, b) = placed(&write(&reversed));
+        for id in ["user", "cloudfront", "apigateway.a", "apigateway.b", "lambda.a", "lambda.b"] {
+            assert_eq!(at(&a, id), at(&b, id), "{id}");
+        }
+        assert_clean(&write(&sides));
+        assert_clean(&write(&reversed));
+    }
+
+    #[test]
+    fn global_parts_and_side_parts_with_the_longest_widest_names_lay_out_cleanly() {
+        let t = |k: &str| format!("{k}{}", "m".repeat(crate::def::MAX_TAG - k.len()));
+        assert_clean(&format!(
+            "flows:
+  - user -> cloudfront.{a} -> s3
+  - user -> cloudfront.{b} -> apigateway(http) -> lambda
+  - waf.{w} -- cloudfront.{a}
+  - acm.{k} -- cloudfront.{a}
+  - waf.{v} -- cloudfront.{b}
+  - cognito.{g} -- apigateway
+  - lambda ~> cloudwatch.{x}
+  - apigateway ~> cloudwatch.{x}
+",
+            a = t("a"), b = t("b"), w = t("w"), k = t("k"), v = t("v"), g = t("g"), x = t("x"),
+        ));
     }
 
     #[test]
@@ -789,8 +1004,7 @@ set:
             assert_eq!(in_region(&a, id), in_region(&b, id), "{id}");
         }
         let bottom = ["apigateway", "lambda", "dynamodb"].map(|id| at(&b, id).y).into_iter().max().unwrap();
-        // CloudWatch gathers two lines, so the side row sits one further step down.
-        let side = bottom + b.row_step + GATHER_ROOM;
+        let side = bottom + b.row_step;
         assert_eq!((cx(&b, "cognito"), at(&b, "cognito").y), (cx(&b, "apigateway"), side));
         assert_eq!((cx(&b, "cloudwatch"), at(&b, "cloudwatch").y), (b.col_x[1], side));
     }
@@ -919,6 +1133,33 @@ set:
     }
 
     #[test]
+    fn check_finds_parts_too_close_in_a_column() {
+        let (m, p) = placed("flows:\n  - user -> apigateway(http) -> lambda.a\n  - apigateway -> lambda.b\n");
+        let mut l = p.layout.clone();
+        let a = l.rect("lambda.a");
+        icon_mut(&mut l, "lambda.b").rect.y = a.y + 110;
+        let got = check(&m, &l);
+        assert!(got.iter().any(|e| e.got.as_deref() == Some("lambda.a and lambda.b") && e.message.contains("without keeping rows apart")), "{got:?}");
+    }
+
+    #[test]
+    fn check_finds_a_part_over_a_frame_name() {
+        let (m, p) = placed("flows:\n  - user -> apigateway(http)\n");
+        let mut l = p.layout.clone();
+        let f = l.rect("region");
+        icon_mut(&mut l, "apigateway").rect = Rect { x: f.x + 5, y: f.y + 2, w: 60, h: 60 };
+        let got = check(&m, &l);
+        assert!(got.iter().any(|e| e.got.as_deref() == Some("apigateway and region") && e.message.contains("without overlapping")), "{got:?}");
+    }
+
+    #[test]
+    fn check_finds_a_part_in_a_frame_the_model_does_not_give_it() {
+        let got = broken(|l| icon_mut(l, "dynamodb").parent = Some("aws-cloud".into()));
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!((got[0].at.as_deref(), got[0].message.contains("leaving its frame")), (Some("dynamodb"), true));
+    }
+
+    #[test]
     fn check_finds_duplicate_ids() {
         let got = broken(|l| {
             let mut copy = l.icons[0].clone();
@@ -970,8 +1211,20 @@ set:
 
     #[allow(clippy::too_many_arguments)]
     fn definition(i: usize, lambdas: usize, dest: usize, aux: bool, api: &str, cognito: bool, cf: usize, att: usize) -> String {
-        let long = i % 2 == 1;
-        let tag = |t: &str| if long { format!("{t}{}", "x".repeat(crate::def::MAX_TAG - t.len())) } else { t.to_string() };
+        // Names: as written, or every name after the dot at the longest allowed, filled with `x`
+        // or with `m`, the widest letter a name may hold. Side parts and global parts are named too
+        // then. Taken from the number apart from the settings, which go by `i % 3`.
+        let fill = match (i / 3) % 3 {
+            0 => None,
+            1 => Some("x"),
+            _ => Some("m"),
+        };
+        let tag = |t: &str| match fill {
+            Some(c) => format!("{t}{}", c.repeat(crate::def::MAX_TAG - t.len())),
+            None => t.to_string(),
+        };
+        // A part named only when names are long: `cloudwatch`, or `cloudwatch.l…` filled.
+        let side = |svc: &str, t: &str| if fill.is_some() { format!("{svc}.{}", tag(t)) } else { svc.to_string() };
         let lambda = |k: usize| if lambdas == 1 { "lambda".to_string() } else { format!("lambda.{}", tag(&format!("f{k}"))) };
         let table = |t: &str| format!("dynamodb.{}", tag(t));
         let api_name = api.split('(').next().unwrap();
@@ -991,37 +1244,45 @@ set:
                 lines.push(format!("{} -> {}", lambda(k), table("y")));
             }),
         }
+        let cloudwatch = side("cloudwatch", "l");
         if aux {
-            (1..=lambdas).for_each(|k| lines.push(format!("{} ~> cloudwatch", lambda(k))));
-            lines.push(format!("{api_name} ~> cloudwatch"));
+            (1..=lambdas).for_each(|k| lines.push(format!("{} ~> {cloudwatch}", lambda(k))));
+            lines.push(format!("{api_name} ~> {cloudwatch}"));
         }
         if cognito {
-            lines.push(format!("cognito -- {api_name}"));
+            lines.push(format!("{} -- {api_name}", side("cognito", "g")));
         }
+        // Each distribution's own letter: "" for the only one, "a" and "b" for two.
+        let fronts: Vec<&str> = if cf == 2 { vec!["a", "b"] } else if cf > 0 { vec![""] } else { vec![] };
+        // `svc` for the only one with short names, else `svc.<letter>` with the letter filled out.
+        let named = |svc: &str, f: &str, alone: &str| match (f.is_empty(), fill.is_some()) {
+            (true, false) => svc.to_string(),
+            (true, true) => format!("{svc}.{}", tag(alone)),
+            (false, _) => format!("{svc}.{}", tag(f)),
+        };
+        let front = |f: &str| named("cloudfront", f, "c");
         match cf {
-            1 => lines.push("user -> cloudfront -> s3.web".into()),
+            1 => lines.push(format!("user -> {} -> s3.web", front(""))),
             2 => {
-                lines.push("user -> cloudfront.a -> s3.a".into());
-                lines.push("user -> cloudfront.b -> s3.b".into());
+                lines.push(format!("user -> {} -> s3.a", front("a")));
+                lines.push(format!("user -> {} -> s3.b", front("b")));
             }
             3 => {
-                lines.push("user -> cloudfront -> s3.web".into());
+                lines.push(format!("user -> {} -> s3.web", front("")));
                 lines.push(format!("{} -> s3.web", lambda(1)));
             }
             _ => {}
         }
-        let fronts: Vec<&str> = if cf == 2 { vec!["a", "b"] } else if cf > 0 { vec![""] } else { vec![] };
-        let named = |svc: &str, f: &str| if f.is_empty() { svc.to_string() } else { format!("{svc}.{f}") };
         match att {
             1 | 2 => {
                 for f in &fronts {
-                    lines.push(format!("{} -- {}", named("waf", f), named("cloudfront", f)));
+                    lines.push(format!("{} -- {}", named("waf", f, "w"), front(f)));
                     if att == 2 {
-                        lines.push(format!("{} -- {}", named("acm", f), named("cloudfront", f)));
+                        lines.push(format!("{} -- {}", named("acm", f, "k"), front(f)));
                     }
                 }
             }
-            3 => fronts.iter().for_each(|f| lines.push(format!("waf -- {}", named("cloudfront", f)))),
+            3 => fronts.iter().for_each(|f| lines.push(format!("{} -- {}", side("waf", "w"), front(f)))),
             _ => {}
         }
         let mut src = String::from("flows:\n");
@@ -1055,6 +1316,8 @@ set:
                     continue;
                 }
             };
+            // A note that names a line by its id says the line or its label could not be drawn
+            // clear. The note on lines drawn as one names parts, not a line id, and does not count.
             let (_, notes) = crate::route::route_planned(&m, &p.layout, &r, &p.lines);
             if notes.iter().any(|n| n.contains("edge-")) {
                 failed.push(format!("route: {notes:?}\n{src}"));

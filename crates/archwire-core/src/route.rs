@@ -320,6 +320,110 @@ pub(crate) fn label_area(i: &Icon) -> Rect {
     }
 }
 
+/// Width of a Latin character in an icon's or a frame's name at font size 12, rounded up from
+/// what draw.io draws, so a name is never counted narrower than it is drawn. A character not
+/// listed counts at the widest width.
+fn name_latin_width(c: char) -> i32 {
+    match c {
+        '@' => 13,
+        'W' => 12,
+        '%' => 11,
+        'm' | 'M' | 'G' | 'O' | 'Q' => 10,
+        'w' | 'C' | 'D' | 'H' | 'N' | 'R' | 'U' => 9,
+        'A' | 'B' | 'E' | 'F' | 'K' | 'P' | 'S' | 'T' | 'V' | 'X' | 'Y' | 'Z' | '&' => 8,
+        'a' | 'b' | 'd' | 'e' | 'g' | 'h' | 'n' | 'o' | 'p' | 'q' | 'u' | 'L' | '0'..='9' => 7,
+        '#' | '$' | '?' | '_' | '+' | '<' | '=' | '>' | '~' => 7,
+        'c' | 'k' | 's' | 'v' | 'x' | 'y' | 'z' | 'J' | '^' => 6,
+        '*' | '"' | '{' | '}' => 5,
+        'r' | 't' | 'f' | 'I' | '(' | ')' | '[' | ']' | '-' | '`' | '\\' | '/' | '!' | ',' | '.' | ':' | ';' | '|' | ' ' => 4,
+        'i' | 'j' | 'l' | '\'' => 3,
+        _ => 13,
+    }
+}
+
+/// Text width of an icon's or a frame's name in the layout without a VPC: Latin text letter by
+/// letter, other text at the width of a full-width character.
+pub(crate) fn name_text_width(text: &str) -> i32 {
+    text.lines()
+        .map(|l| l.chars().map(|c| if c.is_ascii() { name_latin_width(c) } else { CHAR_WIDE }).sum::<i32>())
+        .max()
+        .unwrap_or(0)
+}
+
+/// The area an icon's name takes in the layout without a VPC: like `label_area`, measured with `name_text_width`.
+pub(crate) fn name_area(i: &Icon) -> Rect {
+    let half = (name_text_width(&i.label) + 1) / 2;
+    Rect { w: 2 * half, x: i.rect.x + i.rect.w / 2 - half, ..label_area(i) }
+}
+
+/// The area a frame's name takes at its top-left corner in the layout without a VPC.
+pub(crate) fn frame_name_box(f: &Frame) -> Rect {
+    Rect { w: FRAME_NAME_INDENT + name_text_width(&f.label), ..frame_name_area(f) }
+}
+
+/// Ten times the width of each printable Latin character and of some full-width ones, read from
+/// draw.io's rendering at font size 12: the larger of ten in a row and ten more between two
+/// others. Spaces in a row collapse into one when drawn, so a space is read as ten single spaces
+/// between eleven letters, less the eleven letters alone.
+#[cfg(test)]
+pub(crate) const NAME_CHARS: &str = r##"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~ "##;
+#[cfg(test)]
+pub(crate) const NAME_DRAWN: [i32; 95] = [
+    67, 59, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 60, 67, 67, 32, 67, 67, 26, 27, 60, 27, 100, 67, 67, 67, 67, 40, 60, 34, 67, 60,
+    87, 60, 60, 60, 80, 80, 87, 87, 80, 74, 94, 87, 34, 60, 80, 67, 100, 87, 94, 80, 94, 87, 80, 74, 87, 80, 114, 80, 80, 74, 34, 43,
+    67, 67, 107, 80, 23, 40, 40, 47, 70, 34, 40, 34, 34, 34, 34, 70, 70, 70, 67, 122, 33, 35, 34, 57, 67, 38, 41, 31, 41, 70, 34,
+];
+#[cfg(test)]
+pub(crate) const NAME_WIDE_CHARS: &str = "東京リージョン（）・ログメトクス読み書き呼び出し利用者静的ファイル全関数か所ら";
+#[cfg(test)]
+pub(crate) const NAME_WIDE_DRAWN: [i32; 39] = [
+    120, 120, 120, 120, 120, 120, 120, 66, 66, 120, 120, 112, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120,
+    120, 120, 120, 120, 120, 111, 116, 120, 120, 120, 120, 120, 120,
+];
+
+/// Side lines drawn as one in the layout without a VPC: two or more auxiliary or association lines
+/// into the same part, of the same kind, with the same label, from parts of the same service.
+/// Indexes into `Model.edges`, in model order; one list per drawn line.
+pub(crate) fn side_bundles(model: &Model) -> Vec<Vec<usize>> {
+    let service = |id: &str| model.nodes.iter().find(|n| n.id == id).map(|n| n.service.as_str());
+    let mut out: Vec<Vec<usize>> = Vec::new();
+    for (i, e) in model.edges.iter().enumerate().filter(|(_, e)| e.rel != Rel::Main && e.hole.is_none()) {
+        let same = |k: usize| {
+            let f = &model.edges[k];
+            f.to == e.to && f.rel == e.rel && f.label == e.label && service(&f.from) == service(&e.from)
+        };
+        match out.iter_mut().find(|g| same(g[0])) {
+            Some(g) => g.push(i),
+            None => out.push(vec![i]),
+        }
+    }
+    out.retain(|g| g.len() > 1);
+    out
+}
+
+/// How names are measured: the VPC layout keeps its own measure; the layout without a VPC uses
+/// `name_area` and `frame_name_box`, never narrower than draw.io draws a name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Measure {
+    Grid,
+    Flow,
+}
+
+impl Measure {
+    fn icon_name(self, i: &Icon) -> Rect {
+        match self {
+            Measure::Grid => label_area(i),
+            Measure::Flow => name_area(i),
+        }
+    }
+    fn frame_name(self, f: &Frame) -> Rect {
+        match self {
+            Measure::Grid => frame_name_area(f),
+            Measure::Flow => frame_name_box(f),
+        }
+    }
+}
+
 /// The area a line's label takes when anchored at `p`, as draw.io draws it at font size 11:
 /// centred above the anchor if `above` (below it if `flip`), else beside it on the right (on the
 /// left if `flip`) with its last line ending at the anchor. Measured from rendered diagrams, with
@@ -413,9 +517,9 @@ struct Scene<'a> {
 }
 
 impl<'a> Scene<'a> {
-    fn new(layout: &'a Layout) -> Scene<'a> {
-        let labels: Vec<(&str, Rect)> = layout.icons.iter().map(|i| (i.id.as_str(), label_area(i))).collect();
-        let frame_names: Vec<Rect> = layout.frames.iter().map(frame_name_area).collect();
+    fn new(layout: &'a Layout, measure: Measure) -> Scene<'a> {
+        let labels: Vec<(&str, Rect)> = layout.icons.iter().map(|i| (i.id.as_str(), measure.icon_name(i))).collect();
+        let frame_names: Vec<Rect> = layout.frames.iter().map(|f| measure.frame_name(f)).collect();
         // An icon and its label form one block, so no channel runs between them.
         let blocks = layout.icons.iter().zip(&labels).map(|(i, l)| {
             let (x, y) = (i.rect.x.min(l.1.x), i.rect.y);
@@ -664,6 +768,8 @@ struct Spec {
     /// Indexes into `Model.edges`, in model order.
     edges: Vec<usize>,
     several_azs: bool,
+    /// How many parts' side lines this one line stands for, when it stands for two or more.
+    sources: usize,
 }
 
 struct Ctx<'a> {
@@ -671,10 +777,11 @@ struct Ctx<'a> {
     layout: &'a Layout,
     rules: &'a Rules,
     scene: Scene<'a>,
+    measure: Measure,
 }
 
 pub fn route(model: &Model, layout: &Layout, rules: &Rules) -> (Vec<Wire>, Vec<String>) {
-    let ctx = Ctx { model, layout, rules, scene: Scene::new(layout) };
+    let ctx = Ctx { model, layout, rules, scene: Scene::new(layout, Measure::Grid), measure: Measure::Grid };
     let lang = model.lang;
     let (specs, merged_across_azs) = ctx.group();
     let mut notes = Vec::new();
@@ -688,12 +795,13 @@ pub fn route(model: &Model, layout: &Layout, rules: &Rules) -> (Vec<Wire>, Vec<S
 /// Like `route`, with every line's first try taken from `plans`. A line with no plan gets the
 /// usual `candidates`; `plan()` is never called. Reads only frames and icons the layout has.
 pub fn route_planned(model: &Model, layout: &Layout, rules: &Rules, plans: &[LinePlan]) -> (Vec<Wire>, Vec<String>) {
-    let ctx = Ctx { model, layout, rules, scene: Scene::new(layout) };
-    let (specs, merged_across_azs) = ctx.group();
+    let ctx = Ctx { model, layout, rules, scene: Scene::new(layout, Measure::Flow), measure: Measure::Flow };
+    let (mut specs, merged_across_azs) = ctx.group();
     let mut notes = Vec::new();
     if merged_across_azs {
         notes.push(rules.text("note.cross_az_merged", model.lang));
     }
+    ctx.bundle_side_lines(&mut specs, &mut notes);
     let mut drafts: Vec<Option<Draft>> = specs
         .iter()
         .map(|s| {
@@ -792,7 +900,7 @@ fn draw(ctx: &Ctx, specs: &[Spec], drafts: &[Draft], mut notes: Vec<String>) -> 
         });
     }
     // Whatever the router believed, the finished lines are checked once more on their own terms.
-    for id in audit(model, layout, &wires) {
+    for id in audit(model, layout, &wires, ctx.measure) {
         let note = rules.text("note.unrouted_line", lang).replace("{line}", &id);
         if !notes.contains(&note) {
             notes.push(note);
@@ -857,6 +965,7 @@ impl<'a> Ctx<'a> {
                     merge: merge.then(|| f.service.clone()),
                     edges: vec![i],
                     several_azs: false,
+                    sources: 0,
                 }),
             }
         }
@@ -879,6 +988,40 @@ impl<'a> Ctx<'a> {
         (specs, merged_across_azs)
     }
 
+    /// Side lines gathered into one part become one line, from the sender nearest that part
+    /// (the least vertical distance, then the first in the model); the note names the parts it stands for.
+    fn bundle_side_lines(&self, specs: &mut Vec<Spec>, notes: &mut Vec<String>) {
+        let (model, lang) = (self.model, self.model.lang);
+        let icon = |id: &str| self.layout.icons.iter().find(|i| i.id == id).map(|i| i.rect);
+        for bundle in side_bundles(model) {
+            let edge = |e: usize| &model.edges[e];
+            let Some(to) = icon(&edge(bundle[0]).to) else { continue };
+            if bundle.iter().any(|&e| icon(&edge(e).from).is_none()) {
+                continue;
+            }
+            let distance = |e: usize| (icon(&edge(e).from).expect("checked").y - to.y).abs();
+            let rep = *bundle.iter().min_by_key(|&&e| (distance(e), e)).expect("a bundle has two or more lines");
+            let at: Vec<usize> = bundle.iter().map(|&e| specs.iter().position(|s| s.edges.contains(&e)).expect("every edge has a line")).collect();
+            let keep = at[0];
+            specs[keep].from = edge(rep).from.clone();
+            specs[keep].edges = bundle.clone();
+            specs[keep].sources = bundle.len();
+            let mut gone: Vec<usize> = at[1..].to_vec();
+            gone.sort_unstable();
+            for i in gone.into_iter().rev() {
+                specs.remove(i);
+            }
+            let parts: Vec<&str> = bundle.iter().map(|&e| edge(e).from.as_str()).collect();
+            notes.push(
+                self.rules
+                    .text("note.merged_side_lines", lang)
+                    .replace("{from}", &edge(rep).from)
+                    .replace("{to}", &edge(rep).to)
+                    .replace("{parts}", &parts.join(&self.rules.text("parts_separator", lang))),
+            );
+        }
+    }
+
     /// The label's parts: they read on one line joined by a space, or one per line where one line does not fit.
     fn label_parts(&self, s: &Spec) -> Vec<String> {
         let lang = self.model.lang;
@@ -891,6 +1034,9 @@ impl<'a> Ctx<'a> {
         }
         if s.several_azs {
             parts.push(self.rules.text("from_all_azs", lang));
+        }
+        if s.sources > 1 {
+            parts.push(self.rules.text("from_sources", lang).replace("{n}", &s.sources.to_string()));
         }
         parts.retain(|p| !p.is_empty());
         parts
@@ -1476,11 +1622,16 @@ fn audit_wire_label(w: &Wire, path: &[(i32, i32)]) -> Option<Rect> {
 
 /// Lines that run over text (an icon's label, a frame's name, another line's label), over an
 /// icon they do not attach to, or on top of another line. Ids in line order, each once.
-fn audit(_model: &Model, layout: &Layout, wires: &[Wire]) -> Vec<String> {
+/// The VPC layout is checked with its own measure of names, written apart from the router's; the
+/// layout without a VPC with the measure it is laid out by, which is never narrower than draw.io draws.
+fn audit(_model: &Model, layout: &Layout, wires: &[Wire], measure: Measure) -> Vec<String> {
     let icon_labels: Vec<(&str, Rect)> = layout
         .icons
         .iter()
         .map(|i| {
+            if measure == Measure::Flow {
+                return (i.id.as_str(), name_area(i));
+            }
             let half = (audit_text_width(&i.label) + 1) / 2;
             (i.id.as_str(), Rect { x: i.rect.x + i.rect.w / 2 - half, y: i.rect.y + i.rect.h + 4, w: 2 * half, h: 14 * i.lines as i32 + 6 })
         })
@@ -1489,6 +1640,9 @@ fn audit(_model: &Model, layout: &Layout, wires: &[Wire]) -> Vec<String> {
         .frames
         .iter()
         .map(|f| {
+            if measure == Measure::Flow {
+                return frame_name_box(f);
+            }
             let (indent, h) = if f.kind == FrameKind::Az { (10, 20) } else { (30, 25) };
             Rect { x: f.rect.x, y: f.rect.y, w: indent + audit_text_width(&f.label), h }
         })
@@ -1740,7 +1894,7 @@ mod tests {
             assert!(notes.iter().all(|n| !n.contains("edge-")), "{notes:?} in\n{src}");
             let s3 = w.iter().find(|x| x.to == "s3").unwrap();
             assert_eq!(s3.label, "読み書き\n（VPC エンドポイント経由）\n（全 AZ から）", "{src}");
-            let borders = Scene::new(&l).borders;
+            let borders = Scene::new(&l, Measure::Grid).borders;
             for x in w.iter().filter(|x| !x.label.is_empty()) {
                 let area = label_area_of(x, &l);
                 for &(c, d) in &borders {
@@ -1791,6 +1945,23 @@ mod tests {
         assert!(wire_text_width("\t") >= wire_text_width("@"));
     }
 
+    #[test]
+    fn every_name_character_is_estimated_no_narrower_than_draw_io_draws_it_at_twelve() {
+        assert_eq!(NAME_CHARS.chars().count(), NAME_DRAWN.len());
+        assert_eq!(NAME_WIDE_CHARS.chars().count(), NAME_WIDE_DRAWN.len());
+        let all = NAME_CHARS.chars().zip(NAME_DRAWN).chain(NAME_WIDE_CHARS.chars().zip(NAME_WIDE_DRAWN));
+        for (c, d) in all {
+            let w = name_text_width(&c.to_string().repeat(10));
+            assert!(w >= d, "{c:?}: estimated {w} for ten, drawn {d}");
+            // Rounded up a character at a time; a digit counts at the one width every digit is set in.
+            assert!(w <= d + 12 || !c.is_ascii(), "{c:?}: estimated {w} for ten, drawn {d}");
+        }
+        // Characters not measured count at the widest width, never narrower.
+        assert!(name_text_width("\t") >= name_text_width("@"));
+        // The VPC layout's measure is left as it was.
+        assert_eq!(text_width("mmmm"), 28);
+    }
+
     /// Three AZs in English, with the S3 line answered with `endpoint` and lines to the side column
     /// on both sides of it: no stretch of the S3 line holds its label clear of every frame side.
     const ENDPOINT_3AZ_EN: &str = "flows:\n  - user -> alb -> ecs -> aurora\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n  - aurora ~> cloudwatch\n  - ecs -> internet\nset:\n  azs: 3\n  lang: en\n  nat: per-az\nchoose:\n  route.ecs.s3: endpoint\n";
@@ -1808,7 +1979,7 @@ mod tests {
             s3.label
         );
         let area = label_area_of(s3, &l);
-        assert!(Scene::new(&l).borders.iter().any(|&(c, d)| hits(c, d, area)), "{area:?} is clear of frame sides, so the first search should have found it");
+        assert!(Scene::new(&l, Measure::Grid).borders.iter().any(|&(c, d)| hits(c, d, area)), "{area:?} is clear of frame sides, so the first search should have found it");
         for y in &w {
             for s in full_path(y, &l).windows(2) {
                 assert!(!hits(s[0], s[1], area), "{} runs through the label of {}", y.id, s3.id);
@@ -1835,14 +2006,14 @@ mod tests {
         let s3 = w.iter().find(|x| x.to == "s3").unwrap();
         assert_eq!(s3.label, "Read/Write\n(via VPC endpoint)\n(all AZs)");
         let area = label_area_of(s3, &l);
-        assert!(Scene::new(&l).borders.iter().all(|&(c, d)| !hits(c, d, area)));
+        assert!(Scene::new(&l, Measure::Grid).borders.iter().all(|&(c, d)| !hits(c, d, area)));
     }
 
     #[test]
     fn a_label_with_no_spot_clear_of_lines_and_text_stays_at_its_usual_spot_and_is_not_clear() {
         let (m, l, w, _) = wires(WEB2);
         let r = Rules::builtin();
-        let ctx = Ctx { model: &m, layout: &l, rules: &r, scene: Scene::new(&l) };
+        let ctx = Ctx { model: &m, layout: &l, rules: &r, scene: Scene::new(&l, Measure::Grid), measure: Measure::Grid };
         let paths: Vec<Vec<Pt>> = w.iter().map(|x| full_path(x, &l)).collect();
         let me = w.iter().position(|x| x.id == "edge-cloudfront-to-s3").unwrap();
         // Labels already placed everywhere: no spot is clear even over frame sides.
@@ -1890,14 +2061,14 @@ mod tests {
     #[test]
     fn the_final_check_names_lines_that_overlap_or_cross_text_whatever_the_router_thought() {
         let (m, l, mut w, _) = wires(WEB2);
-        assert_eq!(audit(&m, &l, &w), Vec::<String>::new());
+        assert_eq!(audit(&m, &l, &w, Measure::Grid), Vec::<String>::new());
         // Lay one line on top of another, one pixel apart, and another across an icon's label.
         let a = w.iter().position(|x| x.id == "edge-ecs-1a-to-aurora-1a").unwrap();
         let b = w.iter().position(|x| x.id == "edge-ecs-1c-to-aurora-1c").unwrap();
         let pa = full_path(&w[a], &l);
         w[b].points = vec![(pa[0].0 + 1, pa[0].1 + 5), (pa[0].0 + 1, pa[pa.len() - 1].1 - 5)];
         w[b].exit = w[a].exit;
-        let named = audit(&m, &l, &w);
+        let named = audit(&m, &l, &w, Measure::Grid);
         assert!(named.contains(&"edge-ecs-1a-to-aurora-1a".to_string()) && named.contains(&"edge-ecs-1c-to-aurora-1c".to_string()), "{named:?}");
     }
 
@@ -2060,7 +2231,7 @@ mod tests {
     fn no_frame_side_cuts_a_line_label_in_the_acceptance_definitions() {
         for src in acceptance_definitions() {
             let (_, l, w, _) = wires(&src);
-            let borders = Scene::new(&l).borders;
+            let borders = Scene::new(&l, Measure::Grid).borders;
             for x in w.iter().filter(|x| !x.label.is_empty()) {
                 let area = label_area_of(x, &l);
                 for &(c, d) in &borders {
