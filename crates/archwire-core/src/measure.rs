@@ -72,6 +72,14 @@ pub(crate) fn wire_text_width(text: &str) -> i32 {
     text.lines().map(line_width).max().unwrap_or(0)
 }
 
+/// The width and the height of a line's label text, drawn at font size 11; nothing for no text.
+pub(crate) fn wire_text_size(text: &str) -> (i32, i32) {
+    if text.is_empty() {
+        return (0, 0);
+    }
+    (wire_text_width(text), WIRE_LABEL_LINE * text.lines().count() as i32)
+}
+
 /// The area an icon's label takes: centred under the icon.
 pub(crate) fn label_area(i: &Icon) -> Rect {
     let half = (text_width(&i.label) + 1) / 2;

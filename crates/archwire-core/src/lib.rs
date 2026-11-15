@@ -1,3 +1,4 @@
+pub mod arrange;
 pub mod def;
 pub mod diag;
 pub mod drawio;
@@ -88,6 +89,21 @@ fn flow_output(model: &Model, placed: Result<Placement, Vec<Problem>>, mut diagn
     diagnostics.notes.extend(notes);
     let drawio = drawio::write(model, &p.layout, &wires, &diagnostics, rules, false);
     Output { drawio: Some(drawio), diagnostics }
+}
+
+/// The diagram the new layout gives for a model: arrange, route_planned with the placement's drafts,
+/// and the writer without association arrowheads. Also the router's notes.
+#[cfg(test)]
+pub(crate) fn arranged_drawio(
+    model: &Model,
+    diagnostics: &Diagnostics,
+    rules: &Rules,
+    axis: model::Axis,
+    choices: arrange::Choices,
+) -> Result<(String, Vec<String>), Vec<Problem>> {
+    let p = arrange::arrange(model, rules, axis, choices)?;
+    let (wires, notes) = route::route_planned(model, &p.layout, rules, &p.lines);
+    Ok((drawio::write(model, &p.layout, &wires, diagnostics, rules, false), notes))
 }
 
 #[cfg(test)]
