@@ -552,7 +552,9 @@ impl<'a> Scene<'a> {
             }
             let (first, d, cell) = (s % 2 == 1, (s / 2) % 4, s / 8);
             let (xi, yi) = (cell % nx, cell / nx);
-            if (xi, yi) == (gx, gy) && DIRS[d] == inward {
+            // The start is never a finished path, even where the exit and the entry meet: a line
+            // of no length has nothing to draw.
+            if (xi, yi) == (gx, gy) && DIRS[d] == inward && s != s0 {
                 let mut path = vec![goal];
                 let mut cur = s;
                 while prev[cur] != usize::MAX {
@@ -750,7 +752,14 @@ fn draw(ctx: &Ctx, specs: &[Spec], drafts: &[Draft], mut notes: Vec<String>) -> 
         let s = &specs[i];
         let (fr, tr) = (layout.rect(&s.from), layout.rect(&s.to));
         let near_source = ctx.node(&s.from).service == IGW;
-        let spot = ctx.place_label(&ctx.label_parts(s), (&paths, i), (fr.y - tr.y).abs() <= LEVEL, near_source, &areas);
+        let level = (fr.y - tr.y).abs() <= LEVEL;
+        // A line of no length was never laid, and its note already names it: there is no spot along it.
+        if path_length(&paths[i]) == 0 {
+            let text = ctx.label_parts(s).join(" ");
+            spots[i] = Some(LabelSpot { text, above: level, flip: false, at: None, area: None, clear: true });
+            continue;
+        }
+        let spot = ctx.place_label(&ctx.label_parts(s), (&paths, i), level, near_source, &areas);
         areas.extend(spot.area);
         spots[i] = Some(spot);
     }
@@ -1033,7 +1042,9 @@ impl<'a> Ctx<'a> {
             let np = port_point(self.layout.rect(&s.to), ports.1);
             let out = outward(ports.0.side);
             let shape = if d.shape == Shape::Search { Shape::Elbow } else { d.shape };
-            shape_path(shape, ep, np, out).expect("not a search")
+            let path = shape_path(shape, ep, np, out).expect("not a search");
+            // Where the exit and the entry meet, the line still keeps both ends.
+            if path.len() < 2 { vec![ep, np] } else { path }
         })
     }
 
@@ -2139,6 +2150,11 @@ mod tests {
     type EdgeSpec<'a> = (&'a str, &'a str, Rel, &'a str);
 
     fn scene(icons: &[IconSpec], edges: &[EdgeSpec]) -> (Model, Layout) {
+        scene_in(FrameKind::Region, "region", icons, edges)
+    }
+
+    /// Like `scene`, with the one frame of this kind and id instead of the Region frame.
+    fn scene_in(kind: FrameKind, frame: &str, icons: &[IconSpec], edges: &[EdgeSpec]) -> (Model, Layout) {
         let nodes = icons
             .iter()
             .map(|&(id, _, _, _)| Node {
@@ -2150,7 +2166,7 @@ mod tests {
                 added: false,
                 region: None,
                 part: id.to_string(),
-                tag: None,
+                tag: id.split_once('.').map(|(_, t)| t.to_string()),
                 area: Some(crate::model::Area::Region),
             })
             .collect();
@@ -2167,8 +2183,8 @@ mod tests {
             .collect();
         let model = Model { region: "ap-northeast-1".to_string(), azs: Vec::new(), lang: crate::rules::Lang::En, nodes, edges };
         let frames = vec![Frame {
-            id: "region".to_string(),
-            kind: FrameKind::Region,
+            id: frame.to_string(),
+            kind,
             label: "Asia Pacific (Tokyo)".to_string(),
             rect: Rect { x: -100, y: -100, w: 1000, h: 600 },
             parent: None,
@@ -2180,7 +2196,7 @@ mod tests {
                 label: label.to_string(),
                 lines: label.lines().count() as u8,
                 rect: Rect { x, y, w: 60, h: 60 },
-                parent: Some("region".to_string()),
+                parent: Some(frame.to_string()),
             })
             .collect();
         (model, Layout { frames, icons })
@@ -2308,7 +2324,172 @@ mod tests {
             &[("a", 0, 0, S3), ("b", 220, 0, S3), ("c", 440, 0, S3)],
             &[("a", "b", Rel::Main, "https"), ("b", "c", Rel::Main, "https")],
         );
-        let (w, _) = route_planned(&m, &l, &Rules::builtin(), &[]);
-        assert_eq!(w.len(), 2);
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &[]);
+        let ends: Vec<(&str, &str)> = w.iter().map(|x| (x.from.as_str(), x.to.as_str())).collect();
+        assert_eq!(ends, [("a", "b"), ("b", "c")]);
+        assert_represented_once(&m, &w);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    /// Every semantic edge is in exactly one line's `represents`, and nothing else is.
+    fn assert_represented_once(m: &Model, w: &[Wire]) {
+        let mut semantic: Vec<(String, String)> = m.edges.iter().map(|e| (e.from.clone(), e.to.clone())).collect();
+        let mut drawn: Vec<(String, String)> = w.iter().flat_map(|x| x.represents.clone()).collect();
+        semantic.sort();
+        drawn.sort();
+        assert_eq!(semantic, drawn);
+    }
+
+    fn row_of_three() -> (Model, Layout) {
+        scene(
+            &[("a", 0, 0, S3), ("b", 220, 0, S3), ("c", 440, 0, S3)],
+            &[("a", "b", Rel::Main, "https"), ("b", "c", Rel::Main, "https")],
+        )
+    }
+
+    #[test]
+    fn a_plan_for_some_lines_only_leaves_the_others_to_the_candidates() {
+        let (m, l) = row_of_three();
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &[plan("a", "b", Side::Bottom, Side::Bottom, Bend::AtY(150))]);
+        let ab = wire(&w, "a", "b");
+        assert_eq!((ab.exit.side, ab.entry.side), (Side::Bottom, Side::Bottom));
+        assert_eq!(ab.points, [(30, 150), (250, 150)]);
+        let bc = wire(&w, "b", "c");
+        assert_eq!((bc.exit.side, bc.entry.side), (Side::Right, Side::Left));
+        assert_represented_once(&m, &w);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    #[test]
+    fn a_bend_at_a_y_turns_on_that_y() {
+        let (m, l) = scene(&[("a", 0, 0, S3), ("b", 220, 160, S3)], &[("a", "b", Rel::Aux, "logs_metrics")]);
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &[plan("a", "b", Side::Bottom, Side::Top, Bend::AtY(130))]);
+        let ab = wire(&w, "a", "b");
+        assert_eq!(ab.exit, Port { side: Side::Bottom, pos: 50, offset: 24 });
+        assert_eq!(ab.entry, Port { side: Side::Top, pos: 50, offset: 0 });
+        assert_eq!(ab.points, [(30, 130), (250, 130)]);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    #[test]
+    fn an_elbow_turns_where_the_exit_line_meets_the_entry_line() {
+        let (m, l) = scene(&[("a", 0, 0, S3), ("b", 220, 160, S3)], &[("a", "b", Rel::Main, "https")]);
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &[plan("a", "b", Side::Right, Side::Top, Bend::Elbow)]);
+        let ab = wire(&w, "a", "b");
+        assert_eq!((ab.exit.side, ab.entry.side), (Side::Right, Side::Top));
+        assert_eq!(ab.points, [(250, 30)]);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    #[test]
+    fn a_layout_with_only_a_cloud_frame_is_routed() {
+        let (m, l) = scene_in(
+            FrameKind::Cloud,
+            "aws-cloud",
+            &[("a", 0, 0, S3), ("b", 220, 0, S3), ("c", 440, 160, S3)],
+            &[("a", "b", Rel::Main, "https"), ("b", "c", Rel::Main, "read_write")],
+        );
+        let plans = [
+            plan("a", "b", Side::Right, Side::Left, Bend::Straight),
+            plan("b", "c", Side::Right, Side::Left, Bend::AtX(390)),
+        ];
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        assert!(wire(&w, "a", "b").points.is_empty());
+        assert_eq!(wire(&w, "b", "c").points, [(390, 30), (390, 190)]);
+        assert_represented_once(&m, &w);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    #[test]
+    fn no_lines_give_no_wires_and_no_notes() {
+        let (m, l) = scene(&[("a", 0, 0, S3), ("b", 220, 0, S3)], &[]);
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &[plan("a", "b", Side::Right, Side::Left, Bend::Straight)]);
+        assert!(w.is_empty());
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    #[test]
+    fn a_plan_names_a_part_with_a_dot_by_its_full_id() {
+        let (m, l) = scene(&[("a", 0, 0, S3), ("s3.web", 220, 160, S3)], &[("a", "s3.web", Rel::Main, "https")]);
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &[plan("a", "s3.web", Side::Right, Side::Top, Bend::Elbow)]);
+        let x = wire(&w, "a", "s3.web");
+        assert_eq!(x.id, "edge-a-to-s3.web");
+        assert_eq!((x.exit.side, x.entry.side), (Side::Right, Side::Top));
+        assert_eq!(x.points, [(250, 30)]);
+        assert_eq!(x.represents, [("a".to_string(), "s3.web".to_string())]);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    #[test]
+    fn a_plan_for_a_line_the_model_does_not_have_is_ignored() {
+        let (m, l) = row_of_three();
+        let plans = [
+            plan("a", "nowhere", Side::Bottom, Side::Top, Bend::Straight),
+            plan("nowhere", "c", Side::Bottom, Side::Top, Bend::Straight),
+            plan("a", "c", Side::Bottom, Side::Bottom, Bend::AtY(150)),
+        ];
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        let ends: Vec<(&str, &str)> = w.iter().map(|x| (x.from.as_str(), x.to.as_str())).collect();
+        assert_eq!(ends, [("a", "b"), ("b", "c")]);
+        for x in &w {
+            assert_eq!((x.exit.side, x.entry.side), (Side::Right, Side::Left), "{}", x.id);
+        }
+        assert_represented_once(&m, &w);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    #[test]
+    fn a_plan_in_the_other_direction_is_not_taken_for_the_line() {
+        let (m, l) = scene(&[("a", 0, 0, S3), ("b", 220, 0, S3)], &[("a", "b", Rel::Main, "https")]);
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &[plan("b", "a", Side::Bottom, Side::Bottom, Bend::AtY(150))]);
+        let ab = wire(&w, "a", "b");
+        assert_eq!((ab.exit.side, ab.entry.side), (Side::Right, Side::Left));
+        assert!(ab.points.is_empty(), "{:?}", ab.points);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    #[test]
+    fn of_two_plans_for_one_line_the_first_is_taken() {
+        let (m, l) = scene(&[("a", 0, 0, S3), ("b", 220, 0, S3)], &[("a", "b", Rel::Main, "https")]);
+        let straight = plan("a", "b", Side::Right, Side::Left, Bend::Straight);
+        let below = plan("a", "b", Side::Bottom, Side::Bottom, Bend::AtY(150));
+        let (w, _) = route_planned(&m, &l, &Rules::builtin(), &[straight.clone(), below.clone()]);
+        let ab = wire(&w, "a", "b");
+        assert_eq!((ab.exit.side, ab.entry.side), (Side::Right, Side::Left));
+        assert!(ab.points.is_empty(), "{:?}", ab.points);
+        let (w, _) = route_planned(&m, &l, &Rules::builtin(), &[below, straight]);
+        let ab = wire(&w, "a", "b");
+        assert_eq!((ab.exit.side, ab.entry.side), (Side::Bottom, Side::Bottom));
+        assert_eq!(ab.points, [(30, 150), (250, 150)]);
+    }
+
+    #[test]
+    fn a_plan_whose_exit_and_entry_meet_does_not_panic_and_the_line_is_kept() {
+        let (m, l) = scene(&[("a", 0, 0, S3), ("b", 60, 0, S3)], &[("a", "b", Rel::Main, "https")]);
+        let r = Rules::builtin();
+        let (w, notes) = route_planned(&m, &l, &r, &[plan("a", "b", Side::Right, Side::Left, Bend::Straight)]);
+        let ab = wire(&w, "a", "b");
+        assert_eq!(ab.represents, [("a".to_string(), "b".to_string())]);
+        let unrouted = r.text("note.unrouted_line", crate::rules::Lang::En).replace("{line}", &ab.id);
+        let moved = (ab.exit.side, ab.entry.side) != (Side::Right, Side::Left);
+        assert!(moved || notes.contains(&unrouted), "{ab:?} {notes:?}");
+    }
+
+    #[test]
+    fn a_line_whose_ends_meet_and_no_side_is_free_is_named_in_a_note() {
+        let mut icons = vec![("a", 0, 0, S3), ("b", 60, 0, S3)];
+        let walls = [
+            ("w0", -62, -62), ("w1", 0, -62), ("w2", 60, -62), ("w3", 122, -62),
+            ("w4", -62, 0), ("w5", 122, 0),
+            ("w6", -62, 62), ("w7", 0, 62), ("w8", 60, 62), ("w9", 122, 62),
+        ];
+        icons.extend(walls.iter().map(|&(id, x, y)| (id, x, y, "")));
+        let (m, l) = scene(&icons, &[("a", "b", Rel::Main, "https")]);
+        let r = Rules::builtin();
+        let (w, notes) = route_planned(&m, &l, &r, &[plan("a", "b", Side::Right, Side::Left, Bend::Straight)]);
+        let ab = wire(&w, "a", "b");
+        assert_eq!(ab.represents, [("a".to_string(), "b".to_string())]);
+        let unrouted = r.text("note.unrouted_line", crate::rules::Lang::En).replace("{line}", &ab.id);
+        assert!(notes.contains(&unrouted), "{ab:?} {notes:?}");
     }
 }
