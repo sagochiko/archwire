@@ -20,7 +20,7 @@ pub fn route(model: &Model, layout: &Layout, rules: &Rules) -> (Vec<Wire>, Vec<S
     let ctx = Ctx { model, layout, rules, scene: Scene::new(layout, Measure::Grid), measure: Measure::Grid };
     let (specs, notes) = gather(model, layout, rules);
     let drafts = ctx.plan(&specs);
-    draw(&ctx, &specs, &drafts, notes)
+    draw(&ctx, &specs, &drafts, &[], notes)
 }
 
 impl<'a> Ctx<'a> {
@@ -183,7 +183,7 @@ impl<'a> Ctx<'a> {
             .find(|&v| members.iter().zip(&all).all(|(&i, vs)| self.fits(&specs[i], &vs[v])));
         for (&i, vs) in members.iter().zip(all) {
             drafts[i] = Some(match common {
-                Some(v) => vs[v],
+                Some(v) => vs[v].clone(),
                 None => self.first_fit(&specs[i], vs),
             });
         }

@@ -14,8 +14,8 @@ use crate::def::Rel;
 use crate::diag::Problem;
 use crate::layout::{icon, Frame, FrameKind, Icon, Layout, Rect};
 use crate::measure::{frame_name_box, name_area, name_text_width, wire_text_width};
-use crate::model::{Area, Model};
-use crate::route::{Bend, LinePlan, Side};
+use crate::model::{Area, Axis, Model};
+use crate::route::{Bend, Keep, LinePlan, Side};
 use crate::rules::Rules;
 
 /// The least distance between the centres of two neighbouring columns.
@@ -486,13 +486,14 @@ fn rows(f: &Flow, r: i32, sweep_right: bool) -> Vec<i32> {
     y
 }
 
-/// The line plans, in model order. Main lines leave on the right and enter on the left, bending
-/// halfway to whatever is next on the right; side lines join the upper part's bottom to the
-/// lower part's top, bending halfway between the upper part's name and the lower part.
+/// The line plans, in model order, one per semantic edge. Main lines leave on the right and
+/// enter on the left, bending halfway to whatever is next on the right; side lines join the upper
+/// part's bottom to the lower part's top, bending halfway between the upper part's name and the
+/// lower part. Every plan is a first try the router may change, on no band, running right.
 fn plans(model: &Model, layout: &Layout, col_x: &[i32]) -> Vec<LinePlan> {
     let find = |id: &str| layout.icons.iter().find(|i| i.id == id);
     let mut out = Vec::new();
-    for e in &model.edges {
+    for (edge, e) in model.edges.iter().enumerate() {
         let (Some(a), Some(b)) = (find(&e.from), find(&e.to)) else { continue };
         let (exit, entry, bend) = if e.rel == Rel::Main {
             let bend = if a.rect.y == b.rect.y {
@@ -524,7 +525,19 @@ fn plans(model: &Model, layout: &Layout, col_x: &[i32]) -> Vec<LinePlan> {
                 (Side::Top, Side::Bottom, bend)
             }
         };
-        out.push(LinePlan { from: e.from.clone(), to: e.to.clone(), exit, entry, bend });
+        out.push(LinePlan {
+            edge,
+            from: e.from.clone(),
+            to: e.to.clone(),
+            exit,
+            entry,
+            bend,
+            exit_pos: None,
+            entry_pos: None,
+            keep: Keep::Free,
+            tracks: Vec::new(),
+            axis: Axis::Right,
+        });
     }
     out
 }
@@ -1095,11 +1108,11 @@ set:
         let (_, p) = placed(TARGET);
         assert_eq!(p.lines.len(), 7);
         let gw = plan(&p, "apigateway", "lambda");
-        assert_eq!((gw.exit, gw.entry, gw.bend), (Side::Right, Side::Left, Bend::Straight));
+        assert_eq!((gw.exit, gw.entry, gw.bend.clone()), (Side::Right, Side::Left, Bend::Straight));
         let uc = plan(&p, "user", "cloudfront");
         assert_eq!((uc.exit, uc.entry), (Side::Right, Side::Left));
-        match uc.bend {
-            Bend::AtX(x) => assert!(right(at(&p, "user")) < x && x < at(&p, "aws-cloud").x, "{x}"),
+        match &uc.bend {
+            &Bend::AtX(x) => assert!(right(at(&p, "user")) < x && x < at(&p, "aws-cloud").x, "{x}"),
             other => panic!("{other:?}"),
         }
         let cw = plan(&p, "lambda", "cloudwatch");

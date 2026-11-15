@@ -2,6 +2,7 @@
 
 use crate::layout::Rect;
 use crate::measure::{wire_label_area, Measure};
+use crate::model::Axis;
 use crate::path::{alongside, Pt};
 use crate::route::Ctx;
 
@@ -11,6 +12,9 @@ const LABEL_STEP: i32 = 2;
 /// looks for a spot with this much room first.
 const LABEL_MARGIN: i32 = 1;
 const LABEL_ROOM: i32 = 4;
+
+/// One coordinate of a point.
+type Coord = fn(Pt) -> i32;
 
 /// The point `d` along a path from its start, and whether the segment it lies on is horizontal.
 pub(crate) fn point_along(path: &[Pt], mut d: i32) -> (Pt, bool) {
@@ -67,7 +71,9 @@ impl<'a> Ctx<'a> {
     /// the left. If no spot is clear, frame sides may run under the label: the spot clear of lines,
     /// icons and text with the fewest frame sides under it, in the same order, on one line if that
     /// fits anywhere, else one part per line. If there is none either, the usual spot stays.
-    pub(crate) fn place_label(&self, parts: &[String], (paths, me): (&[Vec<Pt>], usize), level: bool, near_source: bool, placed: &[Rect]) -> LabelSpot {
+    /// `level` puts the label at the usual spot above the line instead of beside it; `axis` is the
+    /// way the line's arrangement runs, which picks the stretch `label_where_it_leaves` looks at.
+    pub(crate) fn place_label(&self, parts: &[String], (paths, me): (&[Vec<Pt>], usize), level: bool, near_source: bool, axis: Axis, placed: &[Rect]) -> LabelSpot {
         let path = &paths[me];
         let one = parts.join(" ");
         if one.is_empty() {
@@ -75,7 +81,7 @@ impl<'a> Ctx<'a> {
         }
         let len = path_length(path);
         let usual = if near_source { len / 4 } else { len / 2 };
-        if let Some(spot) = self.label_where_it_leaves(&one, (paths, me), placed) {
+        if let Some(spot) = self.label_where_it_leaves(&one, (paths, me), axis, placed) {
             return spot;
         }
         let area = wire_label_area(&one, point_along(path, usual).0, level, false);
@@ -127,34 +133,53 @@ impl<'a> Ctx<'a> {
         LabelSpot { text: one, above: level, flip: false, at: None, area: Some(area), clear: false }
     }
 
-    /// In the layout without a VPC, a bent line's label goes first on the stretch it leaves its
-    /// source by, when that stretch is level and no other line runs along it: there it reads as
-    /// this line's alone, where a label beside a channel shared by bends can read as a neighbour's.
-    /// Centred above the stretch, or below, and within it; on one line; None if no spot there is clear.
-    fn label_where_it_leaves(&self, text: &str, (paths, me): (&[Vec<Pt>], usize), placed: &[Rect]) -> Option<LabelSpot> {
+    /// In the layout without a VPC, a bent line's label goes first on one stretch, when no other
+    /// line runs along it: there it reads as this line's alone, where a label beside a channel
+    /// shared by bends can read as a neighbour's. Running right, the stretch the line leaves its
+    /// source by, when that is level, with the label centred above it, or below; running down,
+    /// the first upright stretch, with the label beside it on the right, or on the left. Within
+    /// the stretch and on one line; None if no spot there is clear.
+    fn label_where_it_leaves(&self, text: &str, (paths, me): (&[Vec<Pt>], usize), axis: Axis, placed: &[Rect]) -> Option<LabelSpot> {
         let path = &paths[me];
-        if self.measure != Measure::Flow || path.len() < 3 || path[0].1 != path[1].1 {
+        if self.measure != Measure::Flow || path.len() < 3 {
             return None;
         }
-        let (a, b) = (path[0], path[1]);
+        let k = match axis {
+            Axis::Right => (path[0].1 == path[1].1).then_some(0)?,
+            Axis::Down => path.windows(2).position(|s| s[0].0 == s[1].0 && s[0].1 != s[1].1)?,
+        };
+        let horizontal = axis == Axis::Right;
+        let (a, b) = (path[k], path[k + 1]);
         let alone = paths.iter().enumerate().all(|(i, q)| i == me || q.windows(2).all(|s| alongside(a, b, s[0], s[1]) == 0));
         if !alone {
             return None;
         }
-        let first = (b.0 - a.0).abs();
-        let on_first = |p: Pt| p.1 == a.1 && p.0 != a.0 && p.0 != b.0 && (p.0 - a.0).signum() == (b.0 - a.0).signum() && (p.0 - a.0).abs() < first;
+        let before = path_length(&path[..=k]);
+        let (along, across): (Coord, Coord) = if horizontal { (|p: Pt| p.0, |p: Pt| p.1) } else { (|p: Pt| p.1, |p: Pt| p.0) };
+        let first = (along(b) - along(a)).abs();
+        let on_first = |p: Pt| {
+            across(p) == across(a)
+                && along(p) != along(a)
+                && along(p) != along(b)
+                && (along(p) - along(a)).signum() == (along(b) - along(a)).signum()
+                && (along(p) - along(a)).abs() < first
+        };
         for margin in [LABEL_ROOM, LABEL_MARGIN] {
             let margin = self.measure.label_margin(margin);
-            for (at, p, horizontal) in self.label_spots(path, first / 2, 0) {
-                if !horizontal || !on_first(p) {
+            for (at, p, on_level) in self.label_spots(path, before + first / 2, 0) {
+                if on_level != horizontal || !on_first(p) {
                     continue;
                 }
                 for flip in [false, true] {
-                    let area = wire_label_area(text, p, true, flip);
+                    let area = wire_label_area(text, p, horizontal, flip);
                     // The label stays within the stretch, so it does not reach past the bend.
-                    let within = area.x >= a.0.min(b.0) && area.x + area.w <= a.0.max(b.0);
+                    let within = if horizontal {
+                        area.x >= a.0.min(b.0) && area.x + area.w <= a.0.max(b.0)
+                    } else {
+                        area.y >= a.1.min(b.1) && area.y + area.h <= a.1.max(b.1)
+                    };
                     if within && self.scene.label_clear(area, margin, paths, me, placed) {
-                        return Some(LabelSpot { text: text.to_string(), above: true, flip, at: Some(at), area: Some(area), clear: true });
+                        return Some(LabelSpot { text: text.to_string(), above: horizontal, flip, at: Some(at), area: Some(area), clear: true });
                     }
                 }
             }

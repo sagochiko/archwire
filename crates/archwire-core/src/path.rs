@@ -7,7 +7,8 @@ use std::collections::{BTreeMap, BinaryHeap};
 use crate::layout::{Icon, Layout, Rect};
 use crate::lines::Line;
 use crate::measure::Measure;
-use crate::route::{port_point, Ctx, Port, Side, LEVEL, RANK_AUTO, RANK_MAIN};
+use crate::model::Axis;
+use crate::route::{port_point, Bend, Ctx, Keep, LinePlan, Port, Side, Through, LEVEL, RANK_AUTO, RANK_MAIN};
 
 /// Two lines may run together for at most this long.
 const MAX_SHARED: i32 = 1;
@@ -65,7 +66,7 @@ pub(crate) fn opposite(s: Side) -> Side {
     }
 }
 
-fn dir_of(a: Pt, b: Pt) -> Option<Dir> {
+pub(crate) fn dir_of(a: Pt, b: Pt) -> Option<Dir> {
     match (a.0 == b.0, a.1 == b.1) {
         (true, false) => Some(if b.1 > a.1 { Dir::Down } else { Dir::Up }),
         (false, true) => Some(if b.0 > a.0 { Dir::Right } else { Dir::Left }),
@@ -146,6 +147,17 @@ fn simplify(raw: Vec<Pt>) -> Vec<Pt> {
             }
         }
         out.push(p);
+    }
+    out
+}
+
+/// Drops a point that repeats the one before it; keeps every other point, even in a straight run.
+fn dedup(raw: Vec<Pt>) -> Vec<Pt> {
+    let mut out: Vec<Pt> = Vec::new();
+    for p in raw {
+        if out.last() != Some(&p) {
+            out.push(p);
+        }
     }
     out
 }
@@ -289,6 +301,12 @@ impl<'a> Scene<'a> {
 
     /// Checks a whole path from exit to entry. Returns its crossings if it is acceptable.
     pub(crate) fn check(&self, path: &[Pt], from: &str, to: &str, out: Dir, inward: Dir, placed: &[Vec<Pt>]) -> Option<usize> {
+        self.check_part(path, (from, to), (out, inward), (true, true), placed)
+    }
+
+    /// Like `check`, for a part of a line: `own` says which of the part's ends are the line's own
+    /// ends at an icon, whose label and margin the part may pass where it leaves or enters.
+    fn check_part(&self, path: &[Pt], (from, to): (&str, &str), (out, inward): (Dir, Dir), own: (bool, bool), placed: &[Vec<Pt>]) -> Option<usize> {
         if path.len() < 2 {
             return None;
         }
@@ -296,7 +314,7 @@ impl<'a> Scene<'a> {
         let mut crossings = 0;
         for (k, s) in path.windows(2).enumerate() {
             let d = dir_of(s[0], s[1])?;
-            if (k == 0 && d != out) || (k == last && d != inward) || !self.clear(s[0], s[1], (from, to), (k == 0, k == last), 0) {
+            if (k == 0 && d != out) || (k == last && d != inward) || !self.clear(s[0], s[1], (from, to), (k == 0 && own.0, k == last && own.1), 0) {
                 return None;
             }
             crossings += self.against(s[0], s[1], placed)?;
@@ -306,7 +324,8 @@ impl<'a> Scene<'a> {
 
     /// Shortest acceptable path over the channels, counting bends, crossings and frame sides crossed, or None.
     /// Unlike `check`, it keeps a margin around everything and never runs along a frame's side.
-    fn search(&self, start: Pt, out: Dir, goal: Pt, inward: Dir, (from, to): (&str, &str), placed: &[Vec<Pt>]) -> Option<Vec<Pt>> {
+    /// `own` says which of the start and the goal are the line's own ends at an icon, as in `check_part`.
+    fn search(&self, (start, out): (Pt, Dir), (goal, inward): (Pt, Dir), (from, to): (&str, &str), own: (bool, bool), placed: &[Vec<Pt>]) -> Option<Vec<Pt>> {
         let with = |base: &[i32], a: i32, b: i32| {
             let mut v = base.to_vec();
             v.extend([a, b]);
@@ -369,7 +388,7 @@ impl<'a> Scene<'a> {
                         Dir::Right => b.0 <= goal.0,
                         Dir::Left => b.0 >= goal.0,
                     };
-                if !self.clear(a, b, (from, to), (nfirst, on_entry), CLEARANCE) {
+                if !self.clear(a, b, (from, to), (nfirst && own.0, on_entry && own.1), CLEARANCE) {
                     continue;
                 }
                 let Some(crossings) = self.against(a, b, placed) else { continue };
@@ -391,20 +410,27 @@ impl<'a> Scene<'a> {
     }
 }
 
-/// The path a shape gives between two ports, or None for a shape left to the search.
-pub(crate) fn shape_path(shape: Shape, ep: Pt, np: Pt, out: Dir) -> Option<Vec<Pt>> {
+/// The path a shape gives between two ports, or None for a shape left to the search. Waypoints
+/// are kept as written, even in a straight run; only a point repeating the one before is dropped.
+pub(crate) fn shape_path(shape: &Shape, ep: Pt, np: Pt, out: Dir) -> Option<Vec<Pt>> {
     let raw = match shape {
         Shape::Straight => vec![ep, np],
-        Shape::ChannelY(y) => vec![ep, (ep.0, y), (np.0, y), np],
-        Shape::ChannelX(x) => vec![ep, (x, ep.1), (x, np.1), np],
+        Shape::ChannelY(y) => vec![ep, (ep.0, *y), (np.0, *y), np],
+        Shape::ChannelX(x) => vec![ep, (*x, ep.1), (*x, np.1), np],
         Shape::Elbow if vertical(out) => vec![ep, (ep.0, np.1), np],
         Shape::Elbow => vec![ep, (np.0, ep.1), np],
+        Shape::Points(v) => {
+            let mut raw = vec![ep];
+            raw.extend(v.iter().copied());
+            raw.push(np);
+            return Some(dedup(raw));
+        }
         Shape::Search => return None,
     };
     Some(simplify(raw))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Shape {
     /// Exit and entry face each other on one line.
     Straight,
@@ -414,45 +440,131 @@ pub(crate) enum Shape {
     ChannelX(i32),
     /// One bend where the exit's line meets the entry's line.
     Elbow,
+    /// Through these waypoints, in order.
+    Points(Vec<Pt>),
     Search,
 }
 
 /// The sides and shape a line is planned with, before positions on the sides are shared out.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct Draft {
     pub(crate) exit: Side,
     pub(crate) entry: Side,
     /// Positions fixed by the shape instead of shared out with the side's other lines.
     pub(crate) exit_pin: Option<u8>,
     pub(crate) entry_pin: Option<u8>,
+    /// Positions the draft keeps: taken first, and the side's other ends shared out around them.
+    pub(crate) exit_fixed: Option<u8>,
+    pub(crate) entry_fixed: Option<u8>,
     pub(crate) shape: Shape,
     pub(crate) rank: u8,
+    pub(crate) keep: Keep,
+    pub(crate) axis: Axis,
 }
 
 pub(crate) fn draft(exit: Side, entry: Side, shape: Shape, rank: u8) -> Draft {
-    Draft { exit, entry, exit_pin: None, entry_pin: None, shape, rank }
+    Draft { exit, entry, exit_pin: None, entry_pin: None, exit_fixed: None, entry_fixed: None, shape, rank, keep: Keep::Free, axis: Axis::Right }
+}
+
+impl Draft {
+    /// The draft a line plan gives. A position the plan writes for an end it does not fix stays
+    /// where it is written, outside the sharing out.
+    pub(crate) fn from_plan(p: &LinePlan, rank: u8) -> Draft {
+        let shape = match &p.bend {
+            Bend::Straight => Shape::Straight,
+            Bend::AtX(x) => Shape::ChannelX(*x),
+            Bend::AtY(y) => Shape::ChannelY(*y),
+            Bend::Elbow => Shape::Elbow,
+            Bend::Points(v) => Shape::Points(v.clone()),
+        };
+        let (exit_fixed, entry_fixed) = p.fixed();
+        Draft {
+            exit: p.exit,
+            entry: p.entry,
+            exit_pin: if exit_fixed.is_none() { p.exit_pos } else { None },
+            entry_pin: if entry_fixed.is_none() { p.entry_pos } else { None },
+            exit_fixed,
+            entry_fixed,
+            shape,
+            rank,
+            keep: p.keep.clone(),
+            axis: p.axis,
+        }
+    }
+}
+
+/// A line through a gate, split there: the kept inner part, and the ends of the outer part with
+/// the way the line runs at each. `own` says which of the outer part's ends is at an icon.
+struct Split {
+    inner: Vec<Pt>,
+    start: (Pt, Dir),
+    goal: (Pt, Dir),
+    own: (bool, bool),
+    inner_first: bool,
+}
+
+/// Splits the line from `ep` to `np` at the gate. The line runs through the gate the way the
+/// inner part runs from it (or to it), so it crosses the frame's side at a right angle; where
+/// the gate is the inner end's own port, the way the line leaves or enters there.
+fn split(t: &Through, ep: Pt, np: Pt, out: Dir, inward: Dir) -> Split {
+    if t.inner_is_start {
+        let mut raw = vec![ep];
+        raw.extend(t.inner.iter().copied());
+        raw.push(t.gate);
+        let inner = dedup(raw);
+        let n = inner.len();
+        let at_gate = if n >= 2 { dir_of(inner[n - 2], inner[n - 1]) } else { None }.unwrap_or(out);
+        Split { inner, start: (t.gate, at_gate), goal: (np, inward), own: (false, true), inner_first: true }
+    } else {
+        let mut raw = vec![t.gate];
+        raw.extend(t.inner.iter().copied());
+        raw.push(np);
+        let inner = dedup(raw);
+        let at_gate = if inner.len() >= 2 { dir_of(inner[0], inner[1]) } else { None }.unwrap_or(inward);
+        Split { inner, start: (ep, out), goal: (t.gate, at_gate), own: (true, false), inner_first: false }
+    }
+}
+
+impl Split {
+    /// The whole line: the inner part and the outer part, joined at the gate.
+    fn join(&self, outer: &[Pt]) -> Vec<Pt> {
+        let mut raw = Vec::new();
+        if self.inner_first {
+            raw.extend(self.inner.iter().copied());
+            raw.extend(outer.iter().copied());
+        } else {
+            raw.extend(outer.iter().copied());
+            raw.extend(self.inner.iter().copied());
+        }
+        dedup(raw)
+    }
 }
 
 impl<'a> Ctx<'a> {
     /// A line between two icons at the same height that leaves and enters sideways runs straight:
-    /// the end alone on its side moves level with the other end.
-    pub(crate) fn straighten_level_lines(&self, specs: &[Line], ports: &mut [(Port, Port)]) {
+    /// the end alone on its side moves level with the other end. An end the draft fixes never
+    /// moves: the other end moves level with it, if that one is free and alone on its side.
+    pub(crate) fn straighten_level_lines(&self, specs: &[Line], drafts: &[Draft], ports: &mut [(Port, Port)]) {
         let alone = |ports: &[(Port, Port)], me: usize, id: &str, side: Side| {
             !specs.iter().zip(ports).enumerate().any(|(j, (o, (e, n)))| {
                 j != me && ((o.from == id && e.side == side) || (o.to == id && n.side == side))
             })
         };
-        for (i, s) in specs.iter().enumerate() {
+        for (i, (s, d)) in specs.iter().zip(drafts).enumerate() {
             let (fr, tr) = (self.layout.rect(&s.from), self.layout.rect(&s.to));
             let (exit, entry) = ports[i];
             let sideways = matches!(exit.side, Side::Left | Side::Right) && entry.side == opposite(exit.side);
             if fr.y != tr.y || fr.h != tr.h || !sideways || exit.pos == entry.pos {
                 continue;
             }
-            if alone(ports, i, &s.to, entry.side) {
-                ports[i].1.pos = exit.pos;
-            } else if alone(ports, i, &s.from, exit.side) {
-                ports[i].0.pos = entry.pos;
+            let (to_free, from_free) = (alone(ports, i, &s.to, entry.side), alone(ports, i, &s.from, exit.side));
+            match (d.exit_fixed.is_some(), d.entry_fixed.is_some()) {
+                (true, true) => {}
+                (true, false) if to_free => ports[i].1.pos = exit.pos,
+                (false, true) if from_free => ports[i].0.pos = entry.pos,
+                (false, false) if to_free => ports[i].1.pos = exit.pos,
+                (false, false) if from_free => ports[i].0.pos = entry.pos,
+                _ => {}
             }
         }
     }
@@ -462,7 +574,7 @@ impl<'a> Ctx<'a> {
         let ep = port_point(self.layout.rect(&s.from), exit);
         let np = port_point(self.layout.rect(&s.to), entry);
         let (out, inward) = (outward(exit.side), reverse(outward(entry.side)));
-        if let Some(p) = shape_path(d.shape, ep, np, out) {
+        if let Some(p) = shape_path(&d.shape, ep, np, out) {
             if self.scene.check(&p, &s.from, &s.to, out, inward, placed).is_some() {
                 return Some(p);
             }
@@ -470,20 +582,62 @@ impl<'a> Ctx<'a> {
                 return None;
             }
         }
-        self.scene.search(ep, out, np, inward, (&s.from, &s.to), placed)
+        self.scene.search((ep, out), (np, inward), (&s.from, &s.to), (true, true), placed)
     }
 
-    /// The final path, or Err with the best path there is when none is acceptable.
+    /// The path the draft gives with these ports, unchecked, or None for a draft left to the
+    /// search. A line through a gate keeps its inner part and takes the shape for its outer part.
+    pub(crate) fn draft_path(&self, s: &Line, d: &Draft, (exit, entry): (Port, Port)) -> Option<Vec<Pt>> {
+        let ep = port_point(self.layout.rect(&s.from), exit);
+        let np = port_point(self.layout.rect(&s.to), entry);
+        let (out, inward) = (outward(exit.side), reverse(outward(entry.side)));
+        match &d.keep {
+            Keep::Inner(t) => {
+                let sp = split(t, ep, np, out, inward);
+                let outer = shape_path(&d.shape, sp.start.0, sp.goal.0, sp.start.1)?;
+                Some(sp.join(&outer))
+            }
+            _ => shape_path(&d.shape, ep, np, out),
+        }
+    }
+
+    /// The final path, or Err with the best path there is when none is acceptable. A line kept
+    /// whole is drawn as planned and never searched; a line kept inside searches its outer part only.
     pub(crate) fn lay(&self, s: &Line, d: &Draft, ports: (Port, Port), placed: &[Vec<Pt>]) -> Result<Vec<Pt>, Vec<Pt>> {
-        self.try_route(s, d, ports, placed, true).ok_or_else(|| {
-            let ep = port_point(self.layout.rect(&s.from), ports.0);
-            let np = port_point(self.layout.rect(&s.to), ports.1);
-            let out = outward(ports.0.side);
-            let shape = if d.shape == Shape::Search { Shape::Elbow } else { d.shape };
-            let path = shape_path(shape, ep, np, out).expect("not a search");
-            // Where the exit and the entry meet, the line still keeps both ends.
-            if path.len() < 2 { vec![ep, np] } else { path }
-        })
+        let ep = port_point(self.layout.rect(&s.from), ports.0);
+        let np = port_point(self.layout.rect(&s.to), ports.1);
+        let (out, inward) = (outward(ports.0.side), reverse(outward(ports.1.side)));
+        match &d.keep {
+            Keep::Free => self.try_route(s, d, ports, placed, true).ok_or_else(|| {
+                let shape = if d.shape == Shape::Search { Shape::Elbow } else { d.shape.clone() };
+                let path = shape_path(&shape, ep, np, out).expect("not a search");
+                // Where the exit and the entry meet, the line still keeps both ends.
+                if path.len() < 2 { vec![ep, np] } else { path }
+            }),
+            Keep::Whole => {
+                let path = self.draft_path(s, d, ports).filter(|p| p.len() >= 2).unwrap_or_else(|| vec![ep, np]);
+                match self.scene.check(&path, &s.from, &s.to, out, inward, placed) {
+                    Some(_) => Ok(path),
+                    None => Err(path),
+                }
+            }
+            Keep::Inner(t) => {
+                let sp = split(t, ep, np, out, inward);
+                let ((a, leave), (b, arrive)) = (sp.start, sp.goal);
+                if a == b {
+                    return Ok(sp.join(&[a]));
+                }
+                let ids = (s.from.as_str(), s.to.as_str());
+                let planned = shape_path(&d.shape, a, b, leave).filter(|p| p.len() >= 2);
+                if let Some(p) = planned.as_ref().filter(|p| self.scene.check_part(p, ids, (leave, arrive), sp.own, placed).is_some()) {
+                    return Ok(sp.join(p));
+                }
+                if let Some(p) = self.scene.search((a, leave), (b, arrive), ids, sp.own, placed) {
+                    return Ok(sp.join(&p));
+                }
+                Err(sp.join(&planned.unwrap_or_else(|| vec![a, b])))
+            }
+        }
     }
 
     /// For a line its planned sides cannot carry: a search between the middles of sides no other
@@ -505,15 +659,16 @@ impl<'a> Ctx<'a> {
         })
     }
 
-    /// Whether a draft can be drawn past the icons, labels and frame names, with its ports in the middle of their sides.
+    /// Whether a draft can be drawn past the icons, labels and frame names, with its ports in the
+    /// middle of their sides or where the draft fixes or pins them.
     pub(crate) fn fits(&self, s: &Line, d: &Draft) -> bool {
-        let exit = self.port(&s.from, d.exit, d.exit_pin.unwrap_or(50));
-        let entry = self.port(&s.to, d.entry, d.entry_pin.unwrap_or(50));
+        let exit = self.port(&s.from, d.exit, d.exit_fixed.or(d.exit_pin).unwrap_or(50));
+        let entry = self.port(&s.to, d.entry, d.entry_fixed.or(d.entry_pin).unwrap_or(50));
         self.try_route(s, d, (exit, entry), &[], false).is_some()
     }
 
     pub(crate) fn first_fit(&self, s: &Line, candidates: Vec<Draft>) -> Draft {
-        candidates.iter().find(|d| self.fits(s, d)).copied().unwrap_or(candidates[0])
+        candidates.iter().find(|d| self.fits(s, d)).cloned().unwrap_or_else(|| candidates[0].clone())
     }
 
     /// Sides for the lines in `rest`, which no shape covers: the first of `candidates`, then of
@@ -524,7 +679,7 @@ impl<'a> Ctx<'a> {
         let used: Vec<(&str, Side)> = specs
             .iter()
             .zip(drafts.iter())
-            .filter_map(|(s, d)| d.filter(|d| d.rank == RANK_MAIN).map(|d| [(s.from.as_str(), d.exit), (s.to.as_str(), d.entry)]))
+            .filter_map(|(s, d)| d.as_ref().filter(|d| d.rank == RANK_MAIN).map(|d| [(s.from.as_str(), d.exit), (s.to.as_str(), d.entry)]))
             .flatten()
             .collect();
         for &i in rest {
@@ -536,7 +691,7 @@ impl<'a> Ctx<'a> {
             drafts[i] = Some(
                 candidates
                     .iter()
-                    .copied()
+                    .cloned()
                     .chain(any_sides)
                     .find(|d| free(d) && self.fits(s, d))
                     .unwrap_or_else(|| self.first_fit(s, candidates)),
@@ -568,9 +723,12 @@ impl<'a> Ctx<'a> {
     /// Positions on each side, from `slots`.
     /// Lines on a top or bottom side are ordered by where their other end lies left to right; on a
     /// left or right side, top to bottom, and the farther first among ends at the same height.
+    /// A side with ends the drafts fix takes `slots` for all its ends, takes out for each fixed
+    /// end the spot nearest its position (the smaller at a tie), and gives the rest to the free
+    /// ends in that order, so no free end lands on a fixed one's spot. Pinned ends are left out.
     pub(crate) fn share_out(&self, specs: &[Line], drafts: &[Draft]) -> Vec<(Port, Port)> {
         type Key = (i32, i32, usize);
-        type Ends = Vec<(Key, usize, bool)>;
+        type Ends = Vec<(Key, usize, bool, Option<u8>)>;
         let mut sides: BTreeMap<(&str, u8), Ends> = BTreeMap::new();
         let side_index = |s: Side| s as u8;
         let key = |side: Side, this: Pt, other: Pt, i: usize| -> Key {
@@ -581,18 +739,27 @@ impl<'a> Ctx<'a> {
         };
         for (i, (s, d)) in specs.iter().zip(drafts).enumerate() {
             let (fc, tc) = (center(self.layout.rect(&s.from)), center(self.layout.rect(&s.to)));
-            if d.exit_pin.is_none() {
-                sides.entry((s.from.as_str(), side_index(d.exit))).or_default().push((key(d.exit, fc, tc, i), i, true));
+            if d.exit_fixed.is_some() || d.exit_pin.is_none() {
+                sides.entry((s.from.as_str(), side_index(d.exit))).or_default().push((key(d.exit, fc, tc, i), i, true, d.exit_fixed));
             }
-            if d.entry_pin.is_none() {
-                sides.entry((s.to.as_str(), side_index(d.entry))).or_default().push((key(d.entry, tc, fc, i), i, false));
+            if d.entry_fixed.is_some() || d.entry_pin.is_none() {
+                sides.entry((s.to.as_str(), side_index(d.entry))).or_default().push((key(d.entry, tc, fc, i), i, false, d.entry_fixed));
             }
         }
-        let mut pos: Vec<(u8, u8)> = drafts.iter().map(|d| (d.exit_pin.unwrap_or(50), d.entry_pin.unwrap_or(50))).collect();
+        let mut pos: Vec<(u8, u8)> = drafts
+            .iter()
+            .map(|d| (d.exit_fixed.or(d.exit_pin).unwrap_or(50), d.entry_fixed.or(d.entry_pin).unwrap_or(50)))
+            .collect();
         for (_, mut ends) in sides {
             ends.sort();
-            let spots = slots(ends.len());
-            for (k, &(_, i, is_exit)) in ends.iter().enumerate() {
+            let mut spots = slots(ends.len());
+            for fixed in ends.iter().filter_map(|e| e.3) {
+                let nearest = (0..spots.len())
+                    .min_by_key(|&k| ((spots[k] as i32 - fixed as i32).abs(), spots[k]))
+                    .expect("slots gives a spot for every end");
+                spots.remove(nearest);
+            }
+            for (k, &(_, i, is_exit, _)) in ends.iter().filter(|e| e.3.is_none()).enumerate() {
                 let p = spots[k];
                 if is_exit { pos[i].0 = p } else { pos[i].1 = p }
             }

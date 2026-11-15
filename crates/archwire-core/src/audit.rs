@@ -4,7 +4,7 @@ use crate::layout::{FrameKind, Layout, Rect};
 use crate::measure::{frame_name_box, name_area, Measure};
 use crate::model::Model;
 use crate::path::grow;
-use crate::route::{Port, Side, Wire};
+use crate::route::{Bend, Keep, LinePlan, Port, Side, Track, Wire};
 
 // The final check. It looks at the finished lines with its own arithmetic, not the router's, so
 // a mistake in how the router measures or searches cannot hide itself. Its measures follow the
@@ -87,20 +87,28 @@ fn audit_overlap(s: Seg, t: Seg) -> i32 {
     }
 }
 
+/// Where draw.io puts a line's end on an icon.
+fn audit_end(r: Rect, p: Port) -> (i32, i32) {
+    let f = p.pos as i32;
+    match p.side {
+        Side::Top => (r.x + r.w * f / 100, r.y - p.offset),
+        Side::Bottom => (r.x + r.w * f / 100, r.y + r.h + p.offset),
+        Side::Left => (r.x - p.offset, r.y + r.h * f / 100),
+        Side::Right => (r.x + r.w + p.offset, r.y + r.h * f / 100),
+    }
+}
+
+/// The line as written: its exit, waypoints and entry.
+fn audit_written(w: &Wire, layout: &Layout) -> Vec<(i32, i32)> {
+    let mut raw = vec![audit_end(layout.rect(&w.from), w.exit)];
+    raw.extend(w.points.iter().copied());
+    raw.push(audit_end(layout.rect(&w.to), w.entry));
+    raw
+}
+
 /// The drawn line: its exit, waypoints and entry, a diagonal step drawn as draw.io draws it.
 fn audit_path(w: &Wire, layout: &Layout) -> Vec<(i32, i32)> {
-    let end = |r: Rect, p: Port| {
-        let f = p.pos as i32;
-        match p.side {
-            Side::Top => (r.x + r.w * f / 100, r.y - p.offset),
-            Side::Bottom => (r.x + r.w * f / 100, r.y + r.h + p.offset),
-            Side::Left => (r.x - p.offset, r.y + r.h * f / 100),
-            Side::Right => (r.x + r.w + p.offset, r.y + r.h * f / 100),
-        }
-    };
-    let mut raw = vec![end(layout.rect(&w.from), w.exit)];
-    raw.extend(w.points.iter().copied());
-    raw.push(end(layout.rect(&w.to), w.entry));
+    let raw = audit_written(w, layout);
     let mut out = vec![raw[0]];
     for &p in &raw[1..] {
         let a = *out.last().expect("not empty");
@@ -166,11 +174,101 @@ pub(crate) fn closest_line_to_label(layout: &Layout, wires: &[Wire]) -> Option<(
     best
 }
 
+/// Drops a point repeating the one before; with `straight`, also a point in the middle of a straight run.
+fn audit_points(raw: &[(i32, i32)], straight: bool) -> Vec<(i32, i32)> {
+    let mut out: Vec<(i32, i32)> = Vec::new();
+    for &p in raw {
+        if out.last() == Some(&p) {
+            continue;
+        }
+        if straight && out.len() >= 2 {
+            let (a, b) = (out[out.len() - 2], out[out.len() - 1]);
+            if (a.0 == b.0 && b.0 == p.0) || (a.1 == b.1 && b.1 == p.1) {
+                out.pop();
+            }
+        }
+        out.push(p);
+    }
+    out
+}
+
+/// True if `want` appears in `path` in order, other points allowed between.
+fn audit_in_order(path: &[(i32, i32)], want: &[(i32, i32)]) -> bool {
+    let mut rest = path.iter();
+    want.iter().all(|p| rest.any(|q| q == p))
+}
+
+/// True if the drawn line runs along the track's whole stretch, at its coordinate.
+fn audit_on_track(path: &[(i32, i32)], t: &Track) -> bool {
+    let mut spans: Vec<(i32, i32)> = path
+        .windows(2)
+        .filter_map(|s| {
+            let ((x1, y1), (x2, y2)) = (s[0], s[1]);
+            match t.horizontal {
+                true if y1 == t.at && y2 == t.at && x1 != x2 => Some((x1.min(x2), x1.max(x2))),
+                false if x1 == t.at && x2 == t.at && y1 != y2 => Some((y1.min(y2), y1.max(y2))),
+                _ => None,
+            }
+        })
+        .collect();
+    spans.sort_unstable();
+    let (lo, hi) = (t.from.min(t.to), t.from.max(t.to));
+    let mut reached = lo;
+    for (a, b) in spans {
+        if a <= reached {
+            reached = reached.max(b);
+        }
+    }
+    reached >= hi
+}
+
+/// True if the line keeps its draft: a line kept whole has the draft's ends and waypoints; a line
+/// kept inside has its inner end where the draft puts it and passes the gate and the inner points
+/// in order; every track's stretch lies on its band.
+fn audit_keeps_draft(w: &Wire, p: &LinePlan, layout: &Layout) -> bool {
+    let at = |port: Port, side: Side, pos: Option<u8>| port.side == side && port.pos == pos.unwrap_or(50);
+    let written = audit_written(w, layout);
+    let kept = match &p.keep {
+        Keep::Free => true,
+        Keep::Whole => {
+            let (ep, np) = (written[0], written[written.len() - 1]);
+            let (bend, straight): (Vec<(i32, i32)>, bool) = match &p.bend {
+                Bend::Straight => (Vec::new(), true),
+                Bend::AtX(x) => (vec![(*x, ep.1), (*x, np.1)], true),
+                Bend::AtY(y) => (vec![(ep.0, *y), (np.0, *y)], true),
+                Bend::Elbow if matches!(p.exit, Side::Top | Side::Bottom) => (vec![(ep.0, np.1)], true),
+                Bend::Elbow => (vec![(np.0, ep.1)], true),
+                Bend::Points(v) => (v.clone(), false),
+            };
+            let mut planned = vec![ep];
+            planned.extend(bend);
+            planned.push(np);
+            at(w.exit, p.exit, p.exit_pos) && at(w.entry, p.entry, p.entry_pos) && audit_points(&written, straight) == audit_points(&planned, straight)
+        }
+        Keep::Inner(t) => {
+            let mut want: Vec<(i32, i32)> = Vec::new();
+            if t.inner_is_start {
+                want.extend(t.inner.iter().copied());
+                want.push(t.gate);
+            } else {
+                want.push(t.gate);
+                want.extend(t.inner.iter().copied());
+            }
+            let end = if t.inner_is_start { at(w.exit, p.exit, p.exit_pos) } else { at(w.entry, p.entry, p.entry_pos) };
+            end && audit_in_order(&audit_points(&written, false), &audit_points(&want, false))
+        }
+    };
+    let path = audit_path(w, layout);
+    kept && p.tracks.iter().all(|t| audit_on_track(&path, t))
+}
+
 /// Lines that run over text (an icon's label, a frame's name, another line's label), over an
-/// icon they do not attach to, or on top of another line. Ids in line order, each once.
+/// icon they do not attach to, or on top of another line, or that break their drafts in `plans`
+/// (a kept part moved, a gate missed, a track left); a line is matched to the draft of the
+/// semantic edge it stands for. Ids in line order, each once.
 /// The VPC layout is checked with its own measure of names, written apart from the router's; the
 /// layout without a VPC with the measure it is laid out by, which is never narrower than draw.io draws.
-pub(crate) fn audit(_model: &Model, layout: &Layout, wires: &[Wire], measure: Measure) -> Vec<String> {
+pub(crate) fn audit(_model: &Model, layout: &Layout, wires: &[Wire], plans: &[LinePlan], measure: Measure) -> Vec<String> {
     let icon_labels: Vec<(&str, Rect)> = layout
         .icons
         .iter()
@@ -216,6 +314,11 @@ pub(crate) fn audit(_model: &Model, layout: &Layout, wires: &[Wire], measure: Me
                     bad[m] = true;
                 }
             }
+        }
+    }
+    for (n, w) in wires.iter().enumerate() {
+        if plans.iter().find(|p| p.edge == w.rep).is_some_and(|p| !audit_keeps_draft(w, p, layout)) {
+            bad[n] = true;
         }
     }
     wires.iter().zip(bad).filter(|(_, b)| *b).map(|(w, _)| w.id.clone()).collect()

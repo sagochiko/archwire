@@ -18,8 +18,8 @@ use crate::labels::{path_length, LabelSpot};
 use crate::layout::{Icon, Layout, Rect};
 use crate::lines::{gather, label_parts, Line};
 use crate::measure::Measure;
-use crate::model::{Model, Node};
-use crate::path::{draft, outward, reverse, shape_path, Draft, Pt, Scene, Shape};
+use crate::model::{Axis, Model, Node};
+use crate::path::{outward, reverse, Draft, Pt, Scene};
 use crate::rules::{Rules, Scope};
 
 pub use crate::grid::route;
@@ -58,10 +58,12 @@ pub struct Wire {
     pub label_flip: bool,
     /// The semantic edges this line stands for, in model order; just its own edge if it merges none.
     pub represents: Vec<(String, String)>,
+    /// The representative semantic edge (an index into `Model.edges`): the draft it was drawn from.
+    pub rep: usize,
 }
 
 /// How a planned line bends between its exit and its entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Bend {
     /// Exit and entry face each other on one line.
     Straight,
@@ -71,11 +73,76 @@ pub enum Bend {
     AtY(i32),
     /// One bend where the exit's line meets the entry's line.
     Elbow,
+    /// Through these waypoints, in order, between the exit and the entry.
+    Points(Vec<(i32, i32)>),
 }
 
-/// The sides and bend a line is tried with first; the router may still pick other bends or sides.
+/// The inner part of a line that crosses a frame's side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Through {
+    /// On the frame's side; the line crosses the side here, at a right angle.
+    pub gate: (i32, i32),
+    /// The points between the gate and the inner end's port, in the line's direction.
+    pub inner: Vec<(i32, i32)>,
+    /// The inner end is the source: the line leaves the frame.
+    pub inner_is_start: bool,
+}
+
+/// How much of the draft the router keeps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Keep {
+    /// Drawn exactly as planned: both ends' sides and positions and every waypoint. Never searched again.
+    Whole,
+    /// The inner part (the inner end's side and position, `inner`, the gate) is kept; only the outer part may be searched.
+    Inner(Through),
+    /// The draft is a first try; the router may search, and move to other sides.
+    Free,
+}
+
+/// A stretch of a line that must lie on a band: horizontal at y = `at` from x = `from` to x = `to`,
+/// or vertical at x = `at` from y = `from` to y = `to`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Track {
+    pub horizontal: bool,
+    pub from: i32,
+    pub to: i32,
+    pub at: i32,
+}
+
+/// The draft of the line for one semantic edge: the sides, bend and positions it is tried with,
+/// and how much of it the router keeps.
 #[derive(Debug, Clone, PartialEq)]
-pub struct LinePlan { pub from: String, pub to: String, pub exit: Side, pub entry: Side, pub bend: Bend }
+pub struct LinePlan {
+    /// The semantic edge (an index into `Model.edges`) the draft is for.
+    pub edge: usize,
+    pub from: String,
+    pub to: String,
+    pub exit: Side,
+    pub entry: Side,
+    pub bend: Bend,
+    /// Along the side, 0 to 100; None lets the router share the side out.
+    pub exit_pos: Option<u8>,
+    pub entry_pos: Option<u8>,
+    pub keep: Keep,
+    /// The stretches that must lie on their bands; empty for none.
+    pub tracks: Vec<Track>,
+    /// The axis of the arrangement the line belongs to.
+    pub axis: Axis,
+}
+
+impl LinePlan {
+    /// The positions of the ends the draft fixes: both for a line kept whole, the inner end for a
+    /// line kept inside, none for a free line. A fixed end without a position sits in the middle.
+    pub(crate) fn fixed(&self) -> (Option<u8>, Option<u8>) {
+        let (exit, entry) = (self.exit_pos.unwrap_or(50), self.entry_pos.unwrap_or(50));
+        match &self.keep {
+            Keep::Whole => (Some(exit), Some(entry)),
+            Keep::Inner(t) if t.inner_is_start => (Some(exit), None),
+            Keep::Inner(_) => (None, Some(entry)),
+            Keep::Free => (None, None),
+        }
+    }
+}
 
 /// Where a port sits on an icon's rectangle.
 pub fn port_point(r: Rect, p: Port) -> (i32, i32) {
@@ -119,47 +186,43 @@ pub(crate) struct Ctx<'a> {
 pub fn route_planned(model: &Model, layout: &Layout, rules: &Rules, plans: &[LinePlan]) -> (Vec<Wire>, Vec<String>) {
     let ctx = Ctx { model, layout, rules, scene: Scene::new(layout, Measure::Flow), measure: Measure::Flow };
     let (specs, notes) = gather(model, layout, rules);
+    // A line takes the draft of the semantic edge it stands for.
     let mut drafts: Vec<Option<Draft>> = specs
         .iter()
         .map(|s| {
-            let p = plans.iter().find(|p| p.from == s.from && p.to == s.to)?;
-            let shape = match p.bend {
-                Bend::Straight => Shape::Straight,
-                Bend::AtX(x) => Shape::ChannelX(x),
-                Bend::AtY(y) => Shape::ChannelY(y),
-                Bend::Elbow => Shape::Elbow,
-            };
-            Some(draft(p.exit, p.entry, shape, if s.rel == Rel::Main { RANK_MAIN } else { RANK_SIDE }))
+            let p = plans.iter().find(|p| p.edge == s.rep)?;
+            Some(Draft::from_plan(p, if s.rel == Rel::Main { RANK_MAIN } else { RANK_SIDE }))
         })
         .collect();
     let rest: Vec<usize> = (0..specs.len()).filter(|&i| drafts[i].is_none()).collect();
     ctx.plan_rest(&specs, &rest, &mut drafts);
     let drafts: Vec<Draft> = drafts.into_iter().map(|d| d.expect("every line planned")).collect();
-    // A side line drawn as planned between the middles of its sides, past every icon and name,
-    // is a barrier the other lines go round.
+    // A side line drawn as planned between the middles of its sides (or its fixed spots), past
+    // every icon and name, is a barrier the other lines go round.
     let barriers: Vec<(String, String, Vec<Pt>)> = specs
         .iter()
         .zip(&drafts)
         .filter(|(s, _)| s.rel != Rel::Main)
         .filter_map(|(s, d)| {
-            let (exit, entry) = (ctx.port(&s.from, d.exit, 50), ctx.port(&s.to, d.entry, 50));
-            let (ep, np) = (port_point(layout.rect(&s.from), exit), port_point(layout.rect(&s.to), entry));
+            let exit = ctx.port(&s.from, d.exit, d.exit_fixed.unwrap_or(50));
+            let entry = ctx.port(&s.to, d.entry, d.entry_fixed.unwrap_or(50));
+            let path = ctx.draft_path(s, d, (exit, entry))?;
             let (out, inward) = (outward(d.exit), reverse(outward(d.entry)));
-            let path = shape_path(d.shape, ep, np, out)?;
             ctx.scene.check(&path, &s.from, &s.to, out, inward, &[])?;
             Some((s.from.clone(), s.to.clone(), path))
         })
         .collect();
     let mut ctx = ctx;
     ctx.scene.barriers = barriers;
-    draw(&ctx, &specs, &drafts, notes)
+    draw(&ctx, &specs, &drafts, plans, notes)
 }
 
-/// Shares out the ports, lays every line, places the labels and runs the final check.
-pub(crate) fn draw(ctx: &Ctx, specs: &[Line], drafts: &[Draft], mut notes: Vec<String>) -> (Vec<Wire>, Vec<String>) {
+/// Shares out the ports, lays every line, places the labels and runs the final check, which
+/// also looks at how each line keeps its draft in `plans` (none on the path without drafts).
+pub(crate) fn draw(ctx: &Ctx, specs: &[Line], drafts: &[Draft], plans: &[LinePlan], mut notes: Vec<String>) -> (Vec<Wire>, Vec<String>) {
     let (model, layout, rules, lang) = (ctx.model, ctx.layout, ctx.rules, ctx.model.lang);
     let mut ports = ctx.share_out(specs, drafts);
-    ctx.straighten_level_lines(specs, &mut ports);
+    ctx.straighten_level_lines(specs, drafts, &mut ports);
 
     let mut order: Vec<usize> = (0..specs.len()).collect();
     order.sort_by_key(|&i| (drafts[i].rank, i));
@@ -167,15 +230,21 @@ pub(crate) fn draw(ctx: &Ctx, specs: &[Line], drafts: &[Draft], mut notes: Vec<S
     let mut placed: Vec<Vec<Pt>> = Vec::new();
     for i in order {
         let (s, d) = (&specs[i], &drafts[i]);
+        let unrouted = || rules.text("note.unrouted_line", lang).replace("{line}", &edge_id(&s.from, &s.to));
         let path = match ctx.lay(s, d, ports[i], &placed) {
             Ok(p) => p,
+            // A kept draft is never moved to other sides: it is drawn as planned and named.
+            Err(best) if d.keep != Keep::Free => {
+                notes.push(unrouted());
+                best
+            }
             Err(best) => match ctx.on_free_sides(specs, i, &ports, &placed) {
                 Some((p, moved)) => {
                     ports[i] = moved;
                     p
                 }
                 None => {
-                    notes.push(rules.text("note.unrouted_line", lang).replace("{line}", &edge_id(&s.from, &s.to)));
+                    notes.push(unrouted());
                     best
                 }
             },
@@ -194,14 +263,20 @@ pub(crate) fn draw(ctx: &Ctx, specs: &[Line], drafts: &[Draft], mut notes: Vec<S
         let s = &specs[i];
         let (fr, tr) = (layout.rect(&s.from), layout.rect(&s.to));
         let near_source = ctx.node(&s.from).service == IGW;
-        let level = (fr.y - tr.y).abs() <= LEVEL;
+        let axis = drafts[i].axis;
+        // Running right, ends level in height put the label above the line, else beside it;
+        // running down, ends level left to right put it beside the line, else above it.
+        let level = match axis {
+            Axis::Right => (fr.y - tr.y).abs() <= LEVEL,
+            Axis::Down => (fr.x - tr.x).abs() > LEVEL,
+        };
         // A line of no length was never laid, and its note already names it: there is no spot along it.
         if path_length(&paths[i]) == 0 {
             let text = label_parts(s, model, rules).join(" ");
             spots[i] = Some(LabelSpot { text, above: level, flip: false, at: None, area: None, clear: true });
             continue;
         }
-        let spot = ctx.place_label(&label_parts(s, model, rules), (&paths, i), level, near_source, &areas);
+        let spot = ctx.place_label(&label_parts(s, model, rules), (&paths, i), level, near_source, axis, &areas);
         areas.extend(spot.area);
         spots[i] = Some(spot);
     }
@@ -231,10 +306,11 @@ pub(crate) fn draw(ctx: &Ctx, specs: &[Line], drafts: &[Draft], mut notes: Vec<S
             label_at: spot.at,
             label_flip: spot.flip,
             represents: s.edges.iter().map(|&e| (model.edges[e].from.clone(), model.edges[e].to.clone())).collect(),
+            rep: s.rep,
         });
     }
     // Whatever the router believed, the finished lines are checked once more on their own terms.
-    for id in audit(model, layout, &wires, ctx.measure) {
+    for id in audit(model, layout, &wires, plans, ctx.measure) {
         let note = rules.text("note.unrouted_line", lang).replace("{line}", &id);
         if !notes.contains(&note) {
             notes.push(note);
@@ -600,7 +676,7 @@ mod tests {
         let me = w.iter().position(|x| x.id == "edge-cloudfront-to-s3").unwrap();
         // Labels already placed everywhere: no spot is clear even over frame sides.
         let everywhere = Rect { x: -10_000, y: -10_000, w: 20_000, h: 20_000 };
-        let spot = ctx.place_label(&["Static files".to_string()], (&paths, me), false, false, &[everywhere]);
+        let spot = ctx.place_label(&["Static files".to_string()], (&paths, me), false, false, Axis::Right, &[everywhere]);
         assert!(!spot.clear);
         assert_eq!((spot.text.as_str(), spot.at), ("Static files", None));
     }
@@ -632,14 +708,14 @@ mod tests {
     #[test]
     fn the_final_check_names_lines_that_overlap_or_cross_text_whatever_the_router_thought() {
         let (m, l, mut w, _) = wires(WEB2);
-        assert_eq!(audit(&m, &l, &w, Measure::Grid), Vec::<String>::new());
+        assert_eq!(audit(&m, &l, &w, &[], Measure::Grid), Vec::<String>::new());
         // Lay one line on top of another, one pixel apart, and another across an icon's label.
         let a = w.iter().position(|x| x.id == "edge-ecs-1a-to-aurora-1a").unwrap();
         let b = w.iter().position(|x| x.id == "edge-ecs-1c-to-aurora-1c").unwrap();
         let pa = full_path(&w[a], &l);
         w[b].points = vec![(pa[0].0 + 1, pa[0].1 + 5), (pa[0].0 + 1, pa[pa.len() - 1].1 - 5)];
         w[b].exit = w[a].exit;
-        let named = audit(&m, &l, &w, Measure::Grid);
+        let named = audit(&m, &l, &w, &[], Measure::Grid);
         assert!(named.contains(&"edge-ecs-1a-to-aurora-1a".to_string()) && named.contains(&"edge-ecs-1c-to-aurora-1c".to_string()), "{named:?}");
     }
 
@@ -945,8 +1021,41 @@ mod tests {
         (model, Layout { frames, icons })
     }
 
+    /// A free draft with no edge yet; `route_by_ends` gives it the edge with the same ends.
     fn plan(from: &str, to: &str, exit: Side, entry: Side, bend: Bend) -> LinePlan {
-        LinePlan { from: from.to_string(), to: to.to_string(), exit, entry, bend }
+        draft_for(usize::MAX, from, to, exit, entry, bend, Keep::Free)
+    }
+
+    fn draft_for(edge: usize, from: &str, to: &str, exit: Side, entry: Side, bend: Bend, keep: Keep) -> LinePlan {
+        LinePlan {
+            edge,
+            from: from.to_string(),
+            to: to.to_string(),
+            exit,
+            entry,
+            bend,
+            exit_pos: None,
+            entry_pos: None,
+            keep,
+            tracks: Vec::new(),
+            axis: Axis::Right,
+        }
+    }
+
+    /// `route_planned` with every draft made by `plan` given the model edge with the same ends;
+    /// a draft whose ends are no edge keeps an edge number no line has.
+    fn route_by_ends(m: &Model, l: &Layout, r: &Rules, plans: &[LinePlan]) -> (Vec<Wire>, Vec<String>) {
+        let plans: Vec<LinePlan> = plans
+            .iter()
+            .map(|p| {
+                let mut p = p.clone();
+                if p.edge == usize::MAX {
+                    p.edge = m.edges.iter().position(|e| e.from == p.from && e.to == p.to).unwrap_or(usize::MAX);
+                }
+                p
+            })
+            .collect();
+        route_planned(m, l, r, &plans)
     }
 
     fn wire<'w>(w: &'w [Wire], from: &str, to: &str) -> &'w Wire {
@@ -991,7 +1100,7 @@ mod tests {
     #[test]
     fn planned_lines_take_their_sides_and_bend_without_a_vpc() {
         let (m, l, plans) = three_in_a_row();
-        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        let (w, notes) = route_by_ends(&m, &l, &Rules::builtin(), &plans);
         let ab = wire(&w, "a", "b");
         assert_eq!(ab.exit, Port { side: Side::Right, pos: 50, offset: 0 });
         assert_eq!(ab.entry, Port { side: Side::Left, pos: 50, offset: 0 });
@@ -1004,7 +1113,7 @@ mod tests {
     fn a_bottom_port_clears_a_multi_line_name_and_a_japanese_label_is_placed() {
         let (m, l, plans) = gateway_and_cognito();
         let r = Rules::builtin();
-        let (w, notes) = route_planned(&m, &l, &r, &plans);
+        let (w, notes) = route_by_ends(&m, &l, &r, &plans);
         let cg = wire(&w, "c", "g");
         assert_eq!(cg.entry, Port { side: Side::Bottom, pos: 50, offset: 38 });
         assert_eq!(cg.label, "JWT オーソライザー");
@@ -1020,7 +1129,7 @@ mod tests {
     #[test]
     fn two_lines_into_one_side_share_it() {
         let (m, l, plans) = two_into_one();
-        let (w, _) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        let (w, _) = route_by_ends(&m, &l, &Rules::builtin(), &plans);
         assert_eq!(wire(&w, "a", "c").entry.pos, 25);
         assert_eq!(wire(&w, "b", "c").entry.pos, 75);
     }
@@ -1028,7 +1137,7 @@ mod tests {
     #[test]
     fn a_planned_line_that_hits_an_icon_goes_around_it_on_the_same_side() {
         let (m, l) = scene(&[("a", 0, 0, S3), ("x", 110, 0, S3), ("b", 220, 0, S3)], &[("a", "b", Rel::Main, "https")]);
-        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &[plan("a", "b", Side::Right, Side::Left, Bend::Straight)]);
+        let (w, notes) = route_by_ends(&m, &l, &Rules::builtin(), &[plan("a", "b", Side::Right, Side::Left, Bend::Straight)]);
         let ab = wire(&w, "a", "b");
         let x = l.rect("x");
         let path = full_path(ab, &l);
@@ -1040,7 +1149,7 @@ mod tests {
     #[test]
     fn a_planned_side_that_is_closed_moves_to_another_side() {
         let (m, l) = scene(&[("a", 0, 0, S3), ("w", 62, 0, S3), ("b", 300, 200, S3)], &[("a", "b", Rel::Main, "https")]);
-        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &[plan("a", "b", Side::Right, Side::Left, Bend::AtX(200))]);
+        let (w, notes) = route_by_ends(&m, &l, &Rules::builtin(), &[plan("a", "b", Side::Right, Side::Left, Bend::AtX(200))]);
         let ab = wire(&w, "a", "b");
         assert_ne!(ab.exit.side, Side::Right);
         let wall = l.rect("w");
@@ -1052,7 +1161,7 @@ mod tests {
     #[test]
     fn every_semantic_edge_is_represented_once_in_a_planned_route() {
         for (m, l, plans) in [three_in_a_row(), gateway_and_cognito(), two_into_one()] {
-            let (w, _) = route_planned(&m, &l, &Rules::builtin(), &plans);
+            let (w, _) = route_by_ends(&m, &l, &Rules::builtin(), &plans);
             let mut semantic: Vec<(String, String)> = m.edges.iter().map(|e| (e.from.clone(), e.to.clone())).collect();
             let mut drawn: Vec<(String, String)> = w.iter().flat_map(|x| x.represents.clone()).collect();
             semantic.sort();
@@ -1067,7 +1176,7 @@ mod tests {
             &[("a", 0, 0, S3), ("b", 220, 0, S3), ("c", 440, 0, S3)],
             &[("a", "b", Rel::Main, "https"), ("b", "c", Rel::Main, "https")],
         );
-        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &[]);
+        let (w, notes) = route_by_ends(&m, &l, &Rules::builtin(), &[]);
         let ends: Vec<(&str, &str)> = w.iter().map(|x| (x.from.as_str(), x.to.as_str())).collect();
         assert_eq!(ends, [("a", "b"), ("b", "c")]);
         assert_represented_once(&m, &w);
@@ -1093,7 +1202,7 @@ mod tests {
     #[test]
     fn a_plan_for_some_lines_only_leaves_the_others_to_the_candidates() {
         let (m, l) = row_of_three();
-        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &[plan("a", "b", Side::Bottom, Side::Bottom, Bend::AtY(150))]);
+        let (w, notes) = route_by_ends(&m, &l, &Rules::builtin(), &[plan("a", "b", Side::Bottom, Side::Bottom, Bend::AtY(150))]);
         let ab = wire(&w, "a", "b");
         assert_eq!((ab.exit.side, ab.entry.side), (Side::Bottom, Side::Bottom));
         assert_eq!(ab.points, [(30, 150), (250, 150)]);
@@ -1106,7 +1215,7 @@ mod tests {
     #[test]
     fn a_bend_at_a_y_turns_on_that_y() {
         let (m, l) = scene(&[("a", 0, 0, S3), ("b", 220, 160, S3)], &[("a", "b", Rel::Aux, "logs_metrics")]);
-        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &[plan("a", "b", Side::Bottom, Side::Top, Bend::AtY(130))]);
+        let (w, notes) = route_by_ends(&m, &l, &Rules::builtin(), &[plan("a", "b", Side::Bottom, Side::Top, Bend::AtY(130))]);
         let ab = wire(&w, "a", "b");
         assert_eq!(ab.exit, Port { side: Side::Bottom, pos: 50, offset: 24 });
         assert_eq!(ab.entry, Port { side: Side::Top, pos: 50, offset: 0 });
@@ -1117,7 +1226,7 @@ mod tests {
     #[test]
     fn an_elbow_turns_where_the_exit_line_meets_the_entry_line() {
         let (m, l) = scene(&[("a", 0, 0, S3), ("b", 220, 160, S3)], &[("a", "b", Rel::Main, "https")]);
-        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &[plan("a", "b", Side::Right, Side::Top, Bend::Elbow)]);
+        let (w, notes) = route_by_ends(&m, &l, &Rules::builtin(), &[plan("a", "b", Side::Right, Side::Top, Bend::Elbow)]);
         let ab = wire(&w, "a", "b");
         assert_eq!((ab.exit.side, ab.entry.side), (Side::Right, Side::Top));
         assert_eq!(ab.points, [(250, 30)]);
@@ -1136,7 +1245,7 @@ mod tests {
             plan("a", "b", Side::Right, Side::Left, Bend::Straight),
             plan("b", "c", Side::Right, Side::Left, Bend::AtX(390)),
         ];
-        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        let (w, notes) = route_by_ends(&m, &l, &Rules::builtin(), &plans);
         assert!(wire(&w, "a", "b").points.is_empty());
         assert_eq!(wire(&w, "b", "c").points, [(390, 30), (390, 190)]);
         assert_represented_once(&m, &w);
@@ -1146,7 +1255,7 @@ mod tests {
     #[test]
     fn no_lines_give_no_wires_and_no_notes() {
         let (m, l) = scene(&[("a", 0, 0, S3), ("b", 220, 0, S3)], &[]);
-        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &[plan("a", "b", Side::Right, Side::Left, Bend::Straight)]);
+        let (w, notes) = route_by_ends(&m, &l, &Rules::builtin(), &[plan("a", "b", Side::Right, Side::Left, Bend::Straight)]);
         assert!(w.is_empty());
         assert!(notes.is_empty(), "{notes:?}");
     }
@@ -1154,7 +1263,7 @@ mod tests {
     #[test]
     fn a_plan_names_a_part_with_a_dot_by_its_full_id() {
         let (m, l) = scene(&[("a", 0, 0, S3), ("s3.web", 220, 160, S3)], &[("a", "s3.web", Rel::Main, "https")]);
-        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &[plan("a", "s3.web", Side::Right, Side::Top, Bend::Elbow)]);
+        let (w, notes) = route_by_ends(&m, &l, &Rules::builtin(), &[plan("a", "s3.web", Side::Right, Side::Top, Bend::Elbow)]);
         let x = wire(&w, "a", "s3.web");
         assert_eq!(x.id, "edge-a-to-s3.web");
         assert_eq!((x.exit.side, x.entry.side), (Side::Right, Side::Top));
@@ -1171,7 +1280,7 @@ mod tests {
             plan("nowhere", "c", Side::Bottom, Side::Top, Bend::Straight),
             plan("a", "c", Side::Bottom, Side::Bottom, Bend::AtY(150)),
         ];
-        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        let (w, notes) = route_by_ends(&m, &l, &Rules::builtin(), &plans);
         let ends: Vec<(&str, &str)> = w.iter().map(|x| (x.from.as_str(), x.to.as_str())).collect();
         assert_eq!(ends, [("a", "b"), ("b", "c")]);
         for x in &w {
@@ -1184,7 +1293,7 @@ mod tests {
     #[test]
     fn a_plan_in_the_other_direction_is_not_taken_for_the_line() {
         let (m, l) = scene(&[("a", 0, 0, S3), ("b", 220, 0, S3)], &[("a", "b", Rel::Main, "https")]);
-        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &[plan("b", "a", Side::Bottom, Side::Bottom, Bend::AtY(150))]);
+        let (w, notes) = route_by_ends(&m, &l, &Rules::builtin(), &[plan("b", "a", Side::Bottom, Side::Bottom, Bend::AtY(150))]);
         let ab = wire(&w, "a", "b");
         assert_eq!((ab.exit.side, ab.entry.side), (Side::Right, Side::Left));
         assert!(ab.points.is_empty(), "{:?}", ab.points);
@@ -1196,11 +1305,11 @@ mod tests {
         let (m, l) = scene(&[("a", 0, 0, S3), ("b", 220, 0, S3)], &[("a", "b", Rel::Main, "https")]);
         let straight = plan("a", "b", Side::Right, Side::Left, Bend::Straight);
         let below = plan("a", "b", Side::Bottom, Side::Bottom, Bend::AtY(150));
-        let (w, _) = route_planned(&m, &l, &Rules::builtin(), &[straight.clone(), below.clone()]);
+        let (w, _) = route_by_ends(&m, &l, &Rules::builtin(), &[straight.clone(), below.clone()]);
         let ab = wire(&w, "a", "b");
         assert_eq!((ab.exit.side, ab.entry.side), (Side::Right, Side::Left));
         assert!(ab.points.is_empty(), "{:?}", ab.points);
-        let (w, _) = route_planned(&m, &l, &Rules::builtin(), &[below, straight]);
+        let (w, _) = route_by_ends(&m, &l, &Rules::builtin(), &[below, straight]);
         let ab = wire(&w, "a", "b");
         assert_eq!((ab.exit.side, ab.entry.side), (Side::Bottom, Side::Bottom));
         assert_eq!(ab.points, [(30, 150), (250, 150)]);
@@ -1210,7 +1319,7 @@ mod tests {
     fn a_plan_whose_exit_and_entry_meet_does_not_panic_and_the_line_is_kept() {
         let (m, l) = scene(&[("a", 0, 0, S3), ("b", 60, 0, S3)], &[("a", "b", Rel::Main, "https")]);
         let r = Rules::builtin();
-        let (w, notes) = route_planned(&m, &l, &r, &[plan("a", "b", Side::Right, Side::Left, Bend::Straight)]);
+        let (w, notes) = route_by_ends(&m, &l, &r, &[plan("a", "b", Side::Right, Side::Left, Bend::Straight)]);
         let ab = wire(&w, "a", "b");
         assert_eq!(ab.represents, [("a".to_string(), "b".to_string())]);
         let unrouted = r.text("note.unrouted_line", crate::rules::Lang::En).replace("{line}", &ab.id);
@@ -1229,7 +1338,7 @@ mod tests {
         icons.extend(walls.iter().map(|&(id, x, y)| (id, x, y, "")));
         let (m, l) = scene(&icons, &[("a", "b", Rel::Main, "https")]);
         let r = Rules::builtin();
-        let (w, notes) = route_planned(&m, &l, &r, &[plan("a", "b", Side::Right, Side::Left, Bend::Straight)]);
+        let (w, notes) = route_by_ends(&m, &l, &r, &[plan("a", "b", Side::Right, Side::Left, Bend::Straight)]);
         let ab = wire(&w, "a", "b");
         assert_eq!(ab.represents, [("a".to_string(), "b".to_string())]);
         let unrouted = r.text("note.unrouted_line", crate::rules::Lang::En).replace("{line}", &ab.id);
@@ -1263,5 +1372,233 @@ mod tests {
         let into_1d: Vec<&Wire> = w.iter().filter(|x| x.to == "ecs-1d" && x.from.starts_with("aurora-")).collect();
         assert_eq!(into_1d.len(), 1, "{:?}", w.iter().map(|x| &x.id).collect::<Vec<_>>());
         assert_eq!(into_1d[0].from, "aurora-1a");
+    }
+
+    // Drafts that keep their ends, waypoints, gates and bands.
+
+    const HTTPS: &str = "https";
+
+    /// A draft for the model's edge `edge`, read from the model.
+    fn keep_draft(m: &Model, edge: usize, exit: Side, entry: Side, bend: Bend, keep: Keep) -> LinePlan {
+        let e = &m.edges[edge];
+        draft_for(edge, &e.from, &e.to, exit, entry, bend, keep)
+    }
+
+    fn fixed_25() -> (Model, Layout, Vec<LinePlan>) {
+        let (m, l) = scene(&[("a", 0, 0, S3), ("b", 300, 0, S3)], &[("a", "b", Rel::Main, HTTPS)]);
+        let mut p = keep_draft(&m, 0, Side::Right, Side::Left, Bend::Straight, Keep::Whole);
+        (p.exit_pos, p.entry_pos) = (Some(25), Some(25));
+        (m, l, vec![p])
+    }
+
+    fn waypoints() -> (Model, Layout, Vec<LinePlan>) {
+        let (m, l) = scene(&[("a", 0, 0, S3), ("b", 300, 200, S3)], &[("a", "b", Rel::Main, HTTPS)]);
+        let p = keep_draft(&m, 0, Side::Right, Side::Left, Bend::Points(vec![(150, 30), (150, 230)]), Keep::Whole);
+        (m, l, vec![p])
+    }
+
+    /// `b` inside the frame `f`, whose left side is at x = 200; `a` outside it.
+    fn crossing() -> (Model, Layout, Vec<LinePlan>) {
+        let (m, mut l) = scene(&[("a", 0, 100, S3), ("b", 400, 100, S3)], &[("a", "b", Rel::Main, HTTPS)]);
+        l.frames.push(Frame { id: "f".to_string(), kind: FrameKind::Vpc, label: "F".to_string(), rect: Rect { x: 200, y: -100, w: 400, h: 400 }, parent: Some("region".to_string()) });
+        l.icons[1].parent = Some("f".to_string());
+        let through = Through { gate: (200, 130), inner: vec![(300, 130)], inner_is_start: false };
+        let p = keep_draft(&m, 0, Side::Right, Side::Left, Bend::Straight, Keep::Inner(through));
+        (m, l, vec![p])
+    }
+
+    /// The exit, the waypoints and the entry, as written: no step folded, no point dropped.
+    fn drawn(x: &Wire, l: &Layout) -> Vec<(i32, i32)> {
+        let mut p = vec![port_point(l.rect(&x.from), x.exit)];
+        p.extend(x.points.iter().copied());
+        p.push(port_point(l.rect(&x.to), x.entry));
+        p
+    }
+
+    // Fails if a fixed position is not read and the end is shared out with the side's other ends instead.
+    #[test]
+    fn a_fixed_position_is_kept() {
+        let (m, l, plans) = fixed_25();
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        let ab = wire(&w, "a", "b");
+        assert_eq!((ab.exit.pos, ab.entry.pos), (25, 25));
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    // Fails if a free end is shared out without leaving the fixed end's spot, and lands on it.
+    #[test]
+    fn a_free_end_does_not_take_a_fixed_spot() {
+        let (m, l) = scene(
+            &[("a", 0, 100, S3), ("c", 0, 300, S3), ("b", 300, 100, S3)],
+            &[("a", "b", Rel::Main, HTTPS), ("c", "b", Rel::Main, HTTPS)],
+        );
+        let mut fixed = keep_draft(&m, 0, Side::Right, Side::Left, Bend::Straight, Keep::Whole);
+        fixed.entry_pos = Some(50);
+        let free = keep_draft(&m, 1, Side::Right, Side::Left, Bend::AtX(180), Keep::Free);
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &[fixed, free]);
+        assert_eq!(wire(&w, "a", "b").entry.pos, 50);
+        // b's left side has two ends, slots(2) = [25, 75]: 25 and 75 are as near the fixed 50, so
+        // the smaller, 25, is taken out and the free end gets 75.
+        assert_eq!(wire(&w, "c", "b").entry.pos, 75);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    // Fails if straightening a line moves its fixed exit.
+    #[test]
+    fn straightening_keeps_a_fixed_exit() {
+        let (m, l) = scene(&[("a", 0, 0, S3), ("b", 300, 0, S3)], &[("a", "b", Rel::Main, HTTPS)]);
+        let through = Through { gate: (60, 15), inner: Vec::new(), inner_is_start: true };
+        let mut p = keep_draft(&m, 0, Side::Right, Side::Left, Bend::Straight, Keep::Inner(through));
+        p.exit_pos = Some(25);
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &[p]);
+        let ab = wire(&w, "a", "b");
+        assert_eq!((ab.exit.pos, ab.entry.pos), (25, 25));
+        assert!(ab.points.is_empty(), "{:?}", ab.points);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    // Fails if straightening moves a fixed entry level with the exit instead of the free exit level with the entry.
+    #[test]
+    fn straightening_keeps_a_fixed_entry() {
+        let (m, l) = scene(&[("a", 0, 0, S3), ("b", 300, 0, S3)], &[("a", "b", Rel::Main, HTTPS)]);
+        let through = Through { gate: (300, 15), inner: Vec::new(), inner_is_start: false };
+        let mut p = keep_draft(&m, 0, Side::Right, Side::Left, Bend::Straight, Keep::Inner(through));
+        p.entry_pos = Some(25);
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &[p]);
+        let ab = wire(&w, "a", "b");
+        assert_eq!((ab.entry.pos, ab.exit.pos), (25, 25));
+        assert!(ab.points.is_empty(), "{:?}", ab.points);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    // Fails if the waypoints of a draft are not read.
+    #[test]
+    fn waypoints_are_drawn_as_planned() {
+        let (m, l, plans) = waypoints();
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        assert_eq!(wire(&w, "a", "b").points, [(150, 30), (150, 230)]);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    /// `c` touches `b`'s left side, so every line into the middle of that side passes over `c`.
+    fn blocked_left(keep: Keep) -> (Model, Layout, Vec<LinePlan>) {
+        let (m, l) = scene(&[("a", 0, 100, S3), ("b", 300, 100, S3), ("c", 240, 100, S3)], &[("a", "b", Rel::Main, HTTPS)]);
+        let p = keep_draft(&m, 0, Side::Right, Side::Left, Bend::Straight, keep);
+        (m, l, vec![p])
+    }
+
+    // Fails if a line kept whole is searched again, moved to another side, or drawn over an icon without a note.
+    #[test]
+    fn a_whole_line_is_never_searched() {
+        let (m, l, plans) = blocked_left(Keep::Whole);
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        let ab = wire(&w, "a", "b");
+        assert_eq!(ab.entry.side, Side::Left);
+        assert!(ab.points.is_empty(), "{:?}", ab.points);
+        assert!(notes.iter().any(|n| n.contains("edge-a-to-b")), "{notes:?}");
+    }
+
+    // Fails if the way a draft is kept is applied to every line, free ones included.
+    #[test]
+    fn a_free_line_may_move() {
+        let (m, l, plans) = blocked_left(Keep::Free);
+        let (w, _) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        assert_ne!(wire(&w, "a", "b").entry.side, Side::Left);
+    }
+
+    // Fails if a line crosses the frame's side away from its gate, or the inner points are searched again.
+    #[test]
+    fn a_crossing_line_passes_its_gate() {
+        let (m, l, plans) = crossing();
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        let ab = wire(&w, "a", "b");
+        let path = drawn(ab, &l);
+        let gate = path.iter().position(|&p| p == (200, 130)).unwrap_or_else(|| panic!("no gate in {path:?}"));
+        assert_eq!(path.get(gate + 1), Some(&(300, 130)), "{path:?}");
+        assert_eq!((ab.entry.side, ab.entry.pos), (Side::Left, 50));
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    // Fails if the label ignores the line's axis and always takes the horizontal stretch first.
+    #[test]
+    fn labels_follow_the_line_axis() {
+        let (m, l) = scene(&[("a", 0, 0, S3), ("b", 400, 300, S3)], &[("a", "b", Rel::Main, HTTPS)]);
+        let mut horizontal = Vec::new();
+        for axis in [Axis::Right, Axis::Down] {
+            let mut p = keep_draft(&m, 0, Side::Right, Side::Top, Bend::Elbow, Keep::Free);
+            p.axis = axis;
+            let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &[p]);
+            let ab = wire(&w, "a", "b");
+            // Out of (60, 30), 370 right to (430, 30), then 270 down into (430, 300).
+            assert_eq!(drawn(ab, &l), [(60, 30), (430, 30), (430, 300)]);
+            assert!(notes.is_empty(), "{notes:?}");
+            horizontal.push(ab.horizontal_label);
+        }
+        assert_eq!(horizontal, [true, false]);
+    }
+
+    // Fails if the draft is chosen by the pair of ends, first found, instead of by the edge.
+    #[test]
+    fn drafts_are_chosen_by_edge() {
+        let (m, l) = scene(&[("a", 0, 0, S3), ("b", 300, 0, S3)], &[("a", "b", Rel::Main, HTTPS)]);
+        let mut other = draft_for(1, "a", "b", Side::Right, Side::Left, Bend::Straight, Keep::Whole);
+        (other.exit_pos, other.entry_pos) = (Some(25), Some(25));
+        let mut own = draft_for(0, "a", "b", Side::Right, Side::Left, Bend::Straight, Keep::Whole);
+        (own.exit_pos, own.entry_pos) = (Some(75), Some(75));
+        for plans in [[other.clone(), own.clone()], [own, other]] {
+            let (w, _) = route_planned(&m, &l, &Rules::builtin(), &plans);
+            let ab = wire(&w, "a", "b");
+            assert_eq!((ab.entry.pos, ab.rep), (75, 0));
+        }
+    }
+
+    // Fails if a line kept whole may run another way inside, as long as it overlaps nothing.
+    #[test]
+    fn audit_finds_a_changed_whole_line() {
+        let (m, l, plans) = waypoints();
+        let (mut w, _) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        assert_eq!(audit(&m, &l, &w, &plans, Measure::Flow), Vec::<String>::new());
+        w[0].points = vec![(160, 30), (160, 230)];
+        assert_eq!(audit(&m, &l, &w, &[], Measure::Flow), Vec::<String>::new(), "the changed line overlaps nothing");
+        assert!(audit(&m, &l, &w, &plans, Measure::Flow).contains(&"edge-a-to-b".to_string()));
+    }
+
+    // Fails if the final check does not look for the gate.
+    #[test]
+    fn audit_finds_a_line_missing_its_gate() {
+        let (m, l, plans) = crossing();
+        let (mut w, _) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        assert_eq!(audit(&m, &l, &w, &plans, Measure::Flow), Vec::<String>::new());
+        w[0].points = vec![(150, 130), (150, 160), (250, 160), (250, 130), (300, 130)];
+        assert!(audit(&m, &l, &w, &plans, Measure::Flow).contains(&"edge-a-to-b".to_string()));
+    }
+
+    // Fails if the final check does not look at the fixed ends.
+    #[test]
+    fn audit_finds_a_moved_fixed_end() {
+        let (m, l, plans) = fixed_25();
+        let (mut w, _) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        assert_eq!(audit(&m, &l, &w, &plans, Measure::Flow), Vec::<String>::new());
+        w[0].entry.pos = 50;
+        assert!(audit(&m, &l, &w, &plans, Measure::Flow).contains(&"edge-a-to-b".to_string()));
+    }
+
+    // Fails if the final check does not look at where a line runs on its band.
+    #[test]
+    fn audit_finds_a_line_off_its_track() {
+        let (m, l, mut plans) = crossing();
+        plans[0].tracks = vec![Track { horizontal: true, from: 220, to: 380, at: 130 }];
+        let (mut w, _) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        assert_eq!(audit(&m, &l, &w, &plans, Measure::Flow), Vec::<String>::new());
+        // Through the gate and the inner point still, but at 140 between them.
+        w[0].points = vec![(200, 130), (200, 140), (300, 140), (300, 130)];
+        assert!(audit(&m, &l, &w, &plans, Measure::Flow).contains(&"edge-a-to-b".to_string()));
+    }
+
+    // Fails if the checks of drafts are applied on the path without drafts.
+    #[test]
+    fn audit_ignores_drafts_on_the_old_path() {
+        let (m, l, w, _) = wires(include_str!("../../../tests/cases/web-2az-ja/def.yaml"));
+        assert_eq!(audit(&m, &l, &w, &[], Measure::Grid), Vec::<String>::new());
     }
 }
