@@ -128,6 +128,7 @@ icon = "service"
 shape = "aurora"
 color = "#C925D1"
 label = "Amazon Aurora"
+vpc_reasons = { vpc = "aurora-cluster-in-vpc", az = ["aurora-subnet-group-two-azs"], default_azs = "default-two-azs-for-database" }
 
 [[service]]
 key = "s3"
@@ -177,6 +178,7 @@ shape = "lambda"
 color = "#ED7100"
 label = "AWS Lambda"
 separate_from_vpc = true
+nat_rule = "attached-function-internet-through-nat"
 
 [[service]]
 key = "dynamodb"

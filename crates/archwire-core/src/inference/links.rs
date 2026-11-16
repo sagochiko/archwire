@@ -1,11 +1,12 @@
 //! The checks on what a definition writes: its names, its connections, whether every main flow
 //! is reached from an origin, the limits of a connection, and the answers given to its holes.
 
-use super::{problem, strings, ROUTE_CHOICES};
+use super::{area_of, problem, strings, ROUTE_CHOICES};
 use crate::def::{Definition, Link, Ref, Rel};
 use crate::diag::Problem;
 use crate::ids::{kind_hole, route_hole};
-use crate::rules::{LinkRule, Rules, Scope, Subnet};
+use crate::model::{Area, Tier};
+use crate::rules::{LinkRule, Rules, Subnet};
 
 fn arrow(rel: Rel) -> &'static str {
     match rel {
@@ -72,8 +73,34 @@ pub(super) fn parts(def: &Definition) -> Vec<&Ref> {
     parts
 }
 
+/// The model's tier for a subnet tier of the rules data.
+fn tier(subnet: Subnet) -> Tier {
+    match subnet {
+        Subnet::Public => Tier::Public,
+        Subnet::Private => Tier::Private,
+    }
+}
+
+/// The accepted connection that places a part in a subnet tier of the VPC (`from_subnet`), if
+/// any: the first such connection from the part among all of them, so where a part belongs is
+/// decided after every line is read, whatever their order.
+pub(super) fn attached_by<'r>(accepted: &[(&Link, &'r LinkRule)], name: &str) -> Option<&'r LinkRule> {
+    accepted.iter().find(|(l, rule)| l.from.name == name && rule.from_subnet.is_some()).map(|(_, rule)| *rule)
+}
+
+/// Where a written part belongs: the subnet tier an accepted connection places it in, else the
+/// area its service gives. The checks, the model and the reasons all read this one answer.
+/// None for a part of an unknown service.
+pub(super) fn area(rules: &Rules, accepted: &[(&Link, &LinkRule)], r: &Ref) -> Option<Area> {
+    match attached_by(accepted, &r.name).and_then(|rule| rule.from_subnet) {
+        Some(subnet) => Some(Area::Subnet(tier(subnet))),
+        None => rules.service(&r.service).map(area_of),
+    }
+}
+
 /// The connections the rules data lists, in the order written; any other stops with UNSUPPORTED.
-/// Then whether the main flows are reached, and the limits of each connection.
+/// Then whether traffic leaving the VPC leaves from inside it, whether the main flows are
+/// reached, and the limits of each connection.
 pub(super) fn check_links<'a>(
     def: &'a Definition,
     rules: &'a Rules,
@@ -90,9 +117,23 @@ pub(super) fn check_links<'a>(
             }
         }
     }
+    check_egress(rules, &accepted, errors);
     check_main_flows(def, rules, parts, &accepted, errors);
     check_limits(&accepted, errors);
     accepted
+}
+
+/// A main flow to where traffic leaves the VPC (`egress`) needs its `from` part in a private
+/// subnet, as all the accepted connections place it; anywhere else there is nothing to draw it through.
+fn check_egress(rules: &Rules, accepted: &[(&Link, &LinkRule)], errors: &mut Vec<Problem>) {
+    let leaving = |l: &Link| l.rel == Rel::Main && rules.service(&l.to.service).is_some_and(|s| s.egress);
+    for (l, _) in accepted.iter().filter(|(l, _)| leaving(l)) {
+        if area(rules, accepted, &l.from) != Some(Area::Subnet(Tier::Private)) {
+            let got = written(l);
+            let message = format!("`{got}` needs `{}` in a VPC; connect it to a part in a private subnet", l.from.name);
+            errors.push(problem("UNSUPPORTED", &l.at, &got, Vec::new(), message));
+        }
+    }
 }
 
 /// At least one main flow; every main flow reachable from an `origin` part; every auxiliary
@@ -174,11 +215,12 @@ pub(super) fn kind_holes<'a>(rules: &Rules, parts: &[&'a Ref]) -> Vec<(String, &
         .collect()
 }
 
-/// A main flow from a part in a private subnet to a Regional part outside the VPC: its route is
-/// a hole, in the order the lines are written, with the line it is on.
-pub(super) fn route_holes<'a>(def: &'a Definition, rules: &Rules) -> Vec<(String, &'a Link)> {
-    let private = |r: &Ref| rules.service(&r.service).is_some_and(|s| s.scope == Scope::Vpc && s.subnet == Some(Subnet::Private));
-    let regional = |r: &Ref| rules.service(&r.service).is_some_and(|s| s.scope == Scope::Regional);
+/// A main flow from a part in a private subnet to a Regional part outside the VPC, where each
+/// part belongs as `area` decides from all the accepted connections: its route is a hole, in the
+/// order the lines are written, with the line it is on.
+pub(super) fn route_holes<'a>(def: &'a Definition, rules: &Rules, accepted: &[(&Link, &LinkRule)]) -> Vec<(String, &'a Link)> {
+    let private = |r: &Ref| area(rules, accepted, r) == Some(Area::Subnet(Tier::Private));
+    let regional = |r: &Ref| area(rules, accepted, r) == Some(Area::Region);
     def.links
         .iter()
         .filter(|l| l.rel == Rel::Main && private(&l.from) && regional(&l.to))

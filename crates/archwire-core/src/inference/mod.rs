@@ -137,7 +137,7 @@ fn check<'a>(def: &'a Definition, rules: &'a Rules, diag: &mut Diagnostics) -> O
     let parts = links::parts(def);
     let accepted = if names_ok { links::check_links(def, rules, &parts, errors) } else { Vec::new() };
     let kinds = links::kind_holes(rules, &parts);
-    let routes = links::route_holes(def, rules);
+    let routes = links::route_holes(def, rules, &accepted);
     links::check_choices(def, rules, &kinds, &routes, errors);
     if !diag.errors.is_empty() {
         return None;
@@ -343,7 +343,41 @@ mod tests {
         ("reasons.rs", include_str!("reasons.rs")),
     ];
 
-    // Fails if the code names a rule missing from RULES, or a file of this module is not read for it.
+    /// Rust source without its comments: what follows `//` to the end of a line, outside string literals.
+    fn without_comments(src: &str) -> String {
+        let mut out = String::new();
+        for line in src.lines() {
+            let mut in_string = false;
+            let mut escaped = false;
+            let mut end = line.len();
+            let bytes = line.as_bytes();
+            for (i, &c) in bytes.iter().enumerate() {
+                match c {
+                    _ if escaped => escaped = false,
+                    b'\\' if in_string => escaped = true,
+                    b'"' => in_string = !in_string,
+                    b'/' if !in_string && bytes.get(i + 1) == Some(&b'/') => {
+                        end = i;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            out.push_str(&line[..end]);
+            out.push('\n');
+        }
+        out
+    }
+
+    // Fails if a rule id written only in a comment is counted as one the code names.
+    #[test]
+    fn a_rule_named_only_in_a_comment_is_not_used() {
+        let src = "let a = \"nat-per-az\"; // \"default-region\"\n/// \"compute-in-private\"\nlet b = \"a // b\";\n";
+        assert_eq!(without_comments(src), "let a = \"nat-per-az\"; \n\nlet b = \"a // b\";\n");
+    }
+
+    // Fails if the code names a rule missing from RULES, or a file of this module is not read for it,
+    // or a rule id in a comment is counted as named.
     #[test]
     fn the_rule_lists_hold_every_rule_the_code_names() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("inference");
@@ -359,7 +393,7 @@ mod tests {
         // and outside the declaration of RULES itself.
         let mut used: Vec<String> = Vec::new();
         for (name, src) in SOURCES {
-            let mut code = src.find("#[cfg(test)]").map_or(src, |i| &src[..i]).to_string();
+            let mut code = without_comments(src.find("#[cfg(test)]").map_or(src, |i| &src[..i]));
             if let Some(start) = code.find("pub(crate) const RULES") {
                 let end = start + code[start..].find("];").expect("the list ends") + 2;
                 assert!(name == "mod.rs" && code[end..].find("const RULES").is_none(), "RULES is declared once, in mod.rs");
@@ -406,7 +440,7 @@ mod tests {
 
     #[test]
     fn pairs_outside_the_list_stop() {
-        for line in ["user -> s3", "cloudfront -> lambda", "dynamodb -> lambda", "lambda -> internet", "apigateway -- cognito", "waf -- apigateway"] {
+        for line in ["user -> s3", "cloudfront -> lambda", "dynamodb -> lambda", "apigateway -- cognito", "waf -- apigateway"] {
             let (m, d) = run(&format!("{B}  - {line}\n"));
             assert!(m.is_none(), "{line}");
             assert_eq!(first(&d), ("UNSUPPORTED", Some("flows[1]"), Some(line)), "{line}");
@@ -608,15 +642,28 @@ mod tests {
         Same,
         /// Both stop with the same errors; these are the `at` of the new order.
         ErrorOrder(&'static [&'static str]),
+        /// The old inference gives a model; this one stops with these errors: code, at, got, text.
+        NewlyStopped(&'static [(&'static str, &'static str, &'static str, &'static str)]),
     }
 
     /// The inputs whose answer changes on purpose, by their name in the lists.
-    const CHANGED: [(&str, Expect); 1] = [
+    const CHANGED: [(&str, Expect); 2] = [
         // Unknown keys are reported after the values of the known settings.
         ("FLOW_INFER_TEST_DEFINITIONS#36", Expect::ErrorOrder(&["set.region", "set.lang", "set.direction", "set.azs"])),
+        // A function outside the VPC has no NAT gateway to send traffic to the internet through.
+        (
+            "FLOW_INFER_TEST_DEFINITIONS#8",
+            Expect::NewlyStopped(&[(
+                "UNSUPPORTED",
+                "flows[1]",
+                "lambda -> internet",
+                "`lambda -> internet` needs `lambda` in a VPC; connect it to a part in a private subnet",
+            )]),
+        ),
     ];
-    const SAME_COUNT: usize = 1264;
+    const SAME_COUNT: usize = 1263;
     const ERROR_ORDER_COUNT: usize = 1;
+    const NEWLY_STOPPED_COUNT: usize = 1;
     const INPUT_COUNT: usize = 1265;
 
     // Fails if the model, labels, reasons, holes or errors of a definition without a VPC change
@@ -643,7 +690,7 @@ mod tests {
         inputs.push(("tests/cases/err-unsupported".into(), include_str!("../../../../tests/cases/err-unsupported/def.yaml").into()));
 
         let rules = Rules::builtin();
-        let (mut same, mut error_order) = (0, 0);
+        let (mut same, mut error_order, mut stopped) = (0, 0, 0);
         for (id, src) in &inputs {
             let def = crate::def::parse(src).unwrap_or_else(|e| panic!("{id}: {e:?}"));
             let (old_model, old) = crate::flow_infer::infer(&def, &rules);
@@ -674,11 +721,24 @@ mod tests {
                     assert_eq!(reordered.to_json(), new.to_json(), "{id}:\n{src}");
                     error_order += 1;
                 }
+                Expect::NewlyStopped(want) => {
+                    assert!(old_model.is_some() && old.errors.is_empty(), "{id}:\n{src}\nold {}", old.to_json());
+                    assert!(new_model.is_none(), "{id}:\n{src}");
+                    let got: Vec<_> = new
+                        .errors
+                        .iter()
+                        .map(|e| (e.code.as_str(), e.at.as_deref().unwrap_or(""), e.got.as_deref().unwrap_or(""), e.message.as_str()))
+                        .collect();
+                    assert_eq!(got, *want, "{id}:\n{src}");
+                    assert!(new.derived.is_empty() && new.holes.is_empty() && new.notes.is_empty(), "{id}:\n{src}");
+                    stopped += 1;
+                }
             }
         }
-        assert_eq!((same, error_order), (SAME_COUNT, ERROR_ORDER_COUNT));
+        assert_eq!((same, error_order, stopped), (SAME_COUNT, ERROR_ORDER_COUNT, NEWLY_STOPPED_COUNT));
         assert_eq!(inputs.len(), INPUT_COUNT);
-        assert_eq!(SAME_COUNT + ERROR_ORDER_COUNT, INPUT_COUNT);
+        assert_eq!(SAME_COUNT + ERROR_ORDER_COUNT + NEWLY_STOPPED_COUNT, INPUT_COUNT);
+        assert_eq!(CHANGED.len(), INPUT_COUNT - SAME_COUNT);
     }
 
     /// The model of a definition with a VPC that passes the checks, built with these rules.
@@ -901,11 +961,15 @@ mod tests {
         assert_eq!(rules_of(&d, "vpc"), ["compute-in-private"]);
         assert_eq!(rules_of(&d, "az"), ["database-in-private", "nat-per-az"]);
         // Without any part that has them, the definition stops as a rule the data lacks does.
-        let none = ecs_only.replacen(
-            "vpc_reasons = { vpc = \"compute-in-private\", az = [\"database-in-private\"], default_azs = \"nat-per-az\" }\n",
-            "",
-            1,
-        );
+        let aurora_line = "vpc_reasons = { vpc = \"aurora-cluster-in-vpc\", az = [\"aurora-subnet-group-two-azs\"], default_azs = \"default-two-azs-for-database\" }\n";
+        assert_eq!(ecs_only.matches(aurora_line).count(), 1);
+        let none = ecs_only
+            .replacen(
+                "vpc_reasons = { vpc = \"compute-in-private\", az = [\"database-in-private\"], default_azs = \"nat-per-az\" }\n",
+                "",
+                1,
+            )
+            .replacen(aurora_line, "", 1);
         let (m, d) = infer(&def, &load(&none));
         assert!(m.is_none());
         assert!(d.derived.is_empty());
@@ -1500,6 +1564,181 @@ mod tests {
             assert_eq!(d.notes, notes, "{src}");
             assert_eq!(d.exit_code(), 2, "{src}");
         }
+    }
+
+    /// A node of a model by its id.
+    fn node<'m>(m: &'m Model, id: &str) -> &'m crate::model::Node {
+        m.nodes.iter().find(|n| n.id == id).unwrap_or_else(|| panic!("no node {id}: {:?}", node_ids(m)))
+    }
+    /// A node's area, zone and role.
+    fn spot<'m>(m: &'m Model, id: &str) -> (Area, Option<usize>, Option<&'m str>) {
+        let n = node(m, id);
+        (n.area, n.az, n.role.as_deref())
+    }
+    fn hole_ids(d: &Diagnostics) -> Vec<&str> { d.holes.iter().map(|h| h.hole.as_str()).collect() }
+    /// A definition that passes the checks: its model and diagnostics.
+    fn passes(src: &str) -> (Model, Diagnostics) {
+        let (m, d) = run(src);
+        assert!(d.errors.is_empty(), "{src}: {:?}", d.errors);
+        (m.unwrap_or_else(|| panic!("{src}")), d)
+    }
+    const PRIVATE: Area = Area::Subnet(Tier::Private);
+    const FUNCTION_IN_VPC: [&str; 2] = ["function-attaches-to-resource-vpc", "attached-function-per-az"];
+
+    // Fails if the function's place is not taken from its connection to the database, or the
+    // reasons of the function, the VPC, its zones or subnets are dropped.
+    #[test]
+    fn a_function_reaching_a_database_is_attached_to_the_vpc() {
+        let (m, d) = passes(crate::test_inputs::MIX_SMALLEST);
+        assert_eq!(spot(&m, "lambda-1a"), (PRIVATE, Some(0), None));
+        assert_eq!(spot(&m, "lambda-1c"), (PRIVATE, Some(1), None));
+        assert_eq!(spot(&m, "aurora-1a"), (PRIVATE, Some(0), Some("writer")));
+        assert_eq!(spot(&m, "aurora-1c"), (PRIVATE, Some(1), Some("reader")));
+        assert!(!node_ids(&m).contains(&"lambda"), "{:?}", node_ids(&m));
+        // No public part, NAT gateway or entry gateway.
+        assert!(m.nodes.iter().all(|n| !matches!(n.area, Area::Subnet(Tier::Public) | Area::VpcEdge)), "{:?}", node_ids(&m));
+        assert!(m.nodes.iter().all(|n| !n.added), "{:?}", node_ids(&m));
+        let holes: Vec<_> = d.holes.iter().map(|h| (h.hole.as_str(), h.at.as_str(), h.choices.clone())).collect();
+        assert_eq!(holes, [("route.lambda.s3", "flows[1]", strings(&["endpoint", "nat"]))]);
+        assert_eq!(rules_of(&d, "lambda"), FUNCTION_IN_VPC);
+        assert_eq!(rules_of(&d, "vpc"), ["aurora-cluster-in-vpc"]);
+        assert_eq!(rules_of(&d, "az"), ["aurora-subnet-group-two-azs", "default-two-azs-for-database"]);
+        assert_eq!(rules_of(&d, "subnet"), ["private-subnet-per-az"]);
+        assert_eq!(d.notes, [Rules::builtin().text("note.aux_not_routed", Lang::Ja)]);
+        assert_eq!(d.exit_code(), 2);
+    }
+
+    // Fails if answering `nat` for an attached function does not add the NAT gateways, the entry
+    // gateway, the lines out through them, or their reasons.
+    #[test]
+    fn answering_nat_adds_the_public_tier() {
+        let (m, d) = passes(crate::test_inputs::MIX_NAT);
+        let public = Area::Subnet(Tier::Public);
+        assert_eq!(spot(&m, "nat-1a"), (public, Some(0), None));
+        assert_eq!(spot(&m, "nat-1c"), (public, Some(1), None));
+        assert_eq!(spot(&m, "igw"), (Area::VpcEdge, None, None));
+        let out = lines(&m).into_iter().filter(|(_, to, _, _)| to.starts_with("nat") || *to == "igw").collect::<Vec<_>>();
+        assert_eq!(
+            out,
+            [
+                ("lambda-1a", "nat-1a", Main, "outbound"),
+                ("lambda-1c", "nat-1c", Main, "outbound"),
+                ("nat-1a", "igw", Main, "outbound"),
+                ("nat-1c", "igw", Main, "outbound"),
+            ]
+        );
+        assert_eq!(rules_of(&d, "lambda"), [FUNCTION_IN_VPC[0], FUNCTION_IN_VPC[1], "attached-function-internet-through-nat"]);
+        assert_eq!(rules_of(&d, "igw"), ["private-egress-through-nat"]);
+        assert_eq!(rules_of(&d, "subnet"), ["public-and-private-subnet-per-az"]);
+        assert!(d.holes.is_empty(), "{:?}", d.holes);
+        assert_eq!(d.exit_code(), 0);
+    }
+
+    // Fails if where a part belongs is decided line by line, so a line written before the one to
+    // the database leaves the function outside the VPC or opens no route hole for it.
+    #[test]
+    fn the_line_order_does_not_move_a_function() {
+        let answers: Vec<(Model, Diagnostics)> = crate::test_inputs::ONE_FUNCTION_THREE_WAYS.iter().map(|src| passes(src)).collect();
+        let placed = |m: &Model| {
+            let mut v: Vec<_> = m.nodes.iter().map(|n| (n.id.clone(), format!("{:?}", n.area), n.az, n.role.clone())).collect();
+            v.sort();
+            v
+        };
+        let sorted_holes = |d: &Diagnostics| {
+            let mut v = hole_ids(d).into_iter().map(String::from).collect::<Vec<_>>();
+            v.sort();
+            v
+        };
+        let reasons = |d: &Diagnostics| {
+            let mut v: Vec<_> = d.derived.iter().map(|x| (x.target.clone(), x.rule.clone())).collect();
+            v.sort();
+            v
+        };
+        let (first_m, first_d) = &answers[0];
+        assert_eq!(spot(first_m, "lambda-1a"), (PRIVATE, Some(0), None));
+        assert_eq!(spot(first_m, "lambda-1c"), (PRIVATE, Some(1), None));
+        for (i, (m, d)) in answers.iter().enumerate() {
+            assert_eq!(placed(m), placed(first_m), "order {i}");
+            assert_eq!(sorted_holes(d), ["route.lambda.dynamodb", "route.lambda.s3"], "order {i}");
+            assert_eq!(reasons(d), reasons(first_d), "order {i}");
+            assert!(!rules_of(d, "lambda").contains(&"regional-service-outside-vpc".to_string()), "order {i}");
+        }
+        let at = |d: &Diagnostics, id: &str| d.holes.iter().find(|h| h.hole == id).unwrap().at.clone();
+        let want = [("flows[1]", "flows[2]"), ("flows[2]", "flows[1]"), ("flows[1]", "flows[0]")];
+        for ((_, d), (dynamodb, s3)) in answers.iter().zip(want) {
+            assert_eq!((at(d, "route.lambda.dynamodb").as_str(), at(d, "route.lambda.s3").as_str()), (dynamodb, s3));
+        }
+    }
+
+    // Fails if where a function belongs is decided by its service rather than by the part, so a
+    // named function reaching the database and one reaching only a table share a place.
+    #[test]
+    fn functions_inside_and_outside_the_vpc() {
+        let (m, d) = passes(crate::test_inputs::MIX_WEB);
+        assert_eq!(spot(&m, "lambda.api@1a"), (PRIVATE, Some(0), None));
+        assert_eq!(spot(&m, "lambda.api@1c"), (PRIVATE, Some(1), None));
+        assert_eq!(spot(&m, "lambda.report"), (Area::Region, None, None));
+        assert_eq!(hole_ids(&d), ["route.ecs.dynamodb"]);
+        assert_eq!(rules_of(&d, "lambda.api"), FUNCTION_IN_VPC);
+        assert_eq!(rules_of(&d, "lambda.report"), ["regional-service-outside-vpc"]);
+    }
+
+    // Fails if the zone copies of a named function take the id of a part named like them.
+    #[test]
+    fn a_named_function_and_a_part_named_like_its_copy_differ() {
+        let (m, _) = passes(crate::test_inputs::ID_CLASH);
+        assert_eq!(node(&m, "lambda.api@1a").part, "lambda.api");
+        assert_eq!(node(&m, "lambda.api@1c").part, "lambda.api");
+        assert_eq!(spot(&m, "lambda.api@1a"), (PRIVATE, Some(0), None));
+        let clash = node(&m, "lambda.api-1a");
+        assert_eq!((clash.part.as_str(), clash.area, clash.az), ("lambda.api-1a", Area::Region, None));
+        let ids: Vec<&str> = node_ids(&m);
+        let mut unique = ids.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), ids.len(), "{ids:?}");
+        let edges: Vec<String> = m.edges.iter().map(|e| crate::ids::edge_id(&e.from, &e.to)).collect();
+        let mut unique = edges.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), edges.len(), "{edges:?}");
+        assert!(edges.iter().all(|e| !ids.contains(&e.as_str())));
+    }
+
+    // Fails if a main flow to the internet is accepted from a function outside the VPC, where
+    // there is no NAT gateway to draw it through.
+    #[test]
+    fn a_function_outside_the_vpc_cannot_reach_the_internet() {
+        let (m, d) = run("flows:\n  - user -> apigateway(http) -> lambda -> internet\n");
+        assert!(m.is_none());
+        assert_eq!(d.errors.len(), 1, "{:?}", d.errors);
+        assert_eq!(first(&d), ("UNSUPPORTED", Some("flows[0]"), Some("lambda -> internet")));
+        assert_eq!(d.errors[0].message, "`lambda -> internet` needs `lambda` in a VPC; connect it to a part in a private subnet");
+    }
+
+    // Fails if the VPC's reasons are not taken from the first part written that has them.
+    #[test]
+    fn the_first_part_with_vpc_reasons_wins() {
+        let (_, d) = passes(crate::test_inputs::MIX_WEB);
+        assert_eq!(rules_of(&d, "vpc"), ["load-balancer-in-vpc"]);
+        assert_eq!(rules_of(&d, "az"), ["alb-spans-two-azs", "default-two-azs"]);
+        let (_, d) = passes(crate::test_inputs::MIX_SMALLEST);
+        assert_eq!(rules_of(&d, "vpc"), ["aurora-cluster-in-vpc"]);
+    }
+
+    // Fails if the route hole of a named attached function cannot be answered by its bracketed id.
+    #[test]
+    fn a_bracketed_hole_is_answered() {
+        let base = crate::test_inputs::MIX_WEB.replace("set:\n", "  - lambda.api -> s3\nset:\n");
+        let (m, d) = passes(&format!("{base}choose:\n  route.[lambda.api].s3: endpoint\n"));
+        assert_eq!(hole_ids(&d), ["route.ecs.dynamodb"]);
+        let to_s3: Vec<_> = m.edges.iter().filter(|e| e.from.starts_with("lambda.api@") && e.to == "s3").map(|e| (e.hole.clone(), e.endpoint)).collect();
+        assert_eq!(to_s3, [(None, true), (None, true)]);
+        let (m, d) = run(&format!("{base}choose:\n  route.lambda.api.s3: endpoint\n"));
+        assert!(m.is_none());
+        assert_eq!(d.errors.len(), 1, "{:?}", d.errors);
+        assert_eq!(first(&d), ("UNKNOWN_HOLE", Some("choose.route.lambda.api.s3"), Some("route.lambda.api.s3")));
+        assert_eq!(d.errors[0].allowed, ["route.ecs.dynamodb", "route.[lambda.api].s3"]);
     }
 
     /// The tests of the inference with a VPC, run on this one.

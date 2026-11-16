@@ -57,6 +57,23 @@ label = "read_write"
 
 [[link]]
 from = "lambda"
+to = "aurora"
+rel = "main"
+label = "read_write"
+to_role.writer = "read_write"
+to_role.reader = "read"
+from_subnet = "private"
+from_subnet_rule = "function-attaches-to-resource-vpc"
+from_copies_rule = "attached-function-per-az"
+
+[[link]]
+from = "lambda"
+to = "internet"
+rel = "main"
+label = "outbound"
+
+[[link]]
+from = "lambda"
 to = "cloudwatch"
 rel = "aux"
 label = "logs_metrics"
@@ -126,6 +143,12 @@ label = "http"
 [[link]]
 from = "ecs"
 to = "s3"
+rel = "main"
+label = "read_write"
+
+[[link]]
+from = "ecs"
+to = "dynamodb"
 rel = "main"
 label = "read_write"
 

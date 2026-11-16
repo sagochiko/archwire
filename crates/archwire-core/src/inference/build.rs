@@ -2,12 +2,13 @@
 //! and every accepted connection one edge. With one, parts in a private subnet are copied per
 //! zone, and the gateways the traffic needs are added with the lines that join them.
 
+use super::links::{area as area_in, attached_by};
 use super::{area_of, Checked, Settings};
 use crate::def::{Definition, Link, Ref, Rel};
 use crate::diag::Problem;
 use crate::ids::{copy_id, kind_hole};
 use crate::model::{Area, Edge, Model, Node, Tier};
-use crate::rules::{DerivedLink, DerivedRole, LinkRule, Place, Rules, Scope, Service, Subnet};
+use crate::rules::{DerivedLink, DerivedRole, LinkRule, Place, Rules, Scope, Service};
 
 /// The letters after the Region of the zones a definition with a VPC uses, in order.
 const AZ_LETTERS: [&str; 3] = ["a", "c", "d"];
@@ -77,13 +78,6 @@ fn line_label(rule: &LinkRule, to: &Node) -> String {
     by_kind.or(by_role).unwrap_or(&rule.label).clone()
 }
 
-fn tier(subnet: Subnet) -> Tier {
-    match subnet {
-        Subnet::Public => Tier::Public,
-        Subnet::Private => Tier::Private,
-    }
-}
-
 /// The service that plays this role at the VPC's edge. Loading allows at most one; a missing one
 /// adds DERIVED_ROLE_MISSING.
 fn by_role<'r>(rules: &'r Rules, role: DerivedRole, missing: &mut Vec<Problem>) -> Option<&'r Service> {
@@ -133,10 +127,10 @@ pub(super) fn vpc_model(def: &Definition, rules: &Rules, checked: &Checked) -> R
     let azs: Vec<String> = AZ_LETTERS[..settings.azs].iter().map(|l| format!("{}{l}", settings.region)).collect();
     let suffix = |i: usize| azs[i][azs[i].len() - 2..].to_string();
 
-    // Where every written part belongs, read from all the connections before any node is made:
-    // a connection with `from_subnet` puts its `from` part in that tier, one copy per zone.
-    let into_subnet = |r: &Ref| accepted.iter().find(|(l, rule)| l.from.name == r.name && rule.from_subnet.is_some()).and_then(|(_, rule)| rule.from_subnet);
-    let area = |r: &Ref| into_subnet(r).map_or_else(|| area_of(svc(&r.service)), |s| Area::Subnet(tier(s)));
+    // Where every written part belongs, as the checks decided it from all the connections: a
+    // connection with `from_subnet` puts its `from` part in that tier, one copy per zone.
+    let into_subnet = |r: &Ref| attached_by(accepted, &r.name).is_some();
+    let area = |r: &Ref| area_in(rules, accepted, r).expect("names were checked");
     let egress = |r: &Ref| svc(&r.service).egress;
     let private = |r: &Ref| area(r) == Area::Subnet(Tier::Private);
 
@@ -194,7 +188,7 @@ pub(super) fn vpc_model(def: &Definition, rules: &Rules, checked: &Checked) -> R
     // A part in a subnet: one per zone, a Writer and its Readers, or one spanning the zones.
     let in_subnet = |r: &Ref, nodes: &mut Vec<Node>| {
         let place = svc(&r.service).place;
-        if into_subnet(r).is_some() || (private(r) && place == Place::PerAz) {
+        if into_subnet(r) || (private(r) && place == Place::PerAz) {
             for i in 0..settings.azs {
                 nodes.push(written(r, copy_id(&r.name, &suffix(i)), Some(i), None));
             }

@@ -966,14 +966,22 @@ mod tests {
         assert_eq!(egress, ["internet"]);
     }
 
-    // Fails if the reasons the VPC and its zones get cannot be read from the load balancer's data.
+    // Fails if the reasons the VPC and its zones get cannot be read from the data of the load
+    // balancer or of Aurora, if either is written wrong, or if another service is given them.
     #[test]
-    fn the_load_balancer_gives_the_vpc_its_reasons() {
+    fn the_load_balancer_and_aurora_give_the_vpc_its_reasons() {
         let r = Rules::builtin();
-        let want = VpcReasons { vpc: "load-balancer-in-vpc".into(), az: vec!["alb-spans-two-azs".into()], default_azs: "default-two-azs".into() };
-        assert_eq!(r.service("alb").unwrap().vpc_reasons.as_ref(), Some(&want));
-        let with: Vec<_> = r.service_keys().into_iter().filter(|k| r.service(k).unwrap().vpc_reasons.is_some()).collect();
-        assert_eq!(with, ["alb"]);
+        let alb = VpcReasons { vpc: "load-balancer-in-vpc".into(), az: vec!["alb-spans-two-azs".into()], default_azs: "default-two-azs".into() };
+        let aurora = VpcReasons {
+            vpc: "aurora-cluster-in-vpc".into(),
+            az: vec!["aurora-subnet-group-two-azs".into()],
+            default_azs: "default-two-azs-for-database".into(),
+        };
+        assert_eq!(r.service("alb").unwrap().vpc_reasons.as_ref(), Some(&alb));
+        assert_eq!(r.service("aurora").unwrap().vpc_reasons.as_ref(), Some(&aurora));
+        for k in r.service_keys().into_iter().filter(|k| k != "alb" && k != "aurora") {
+            assert_eq!(r.service(&k).unwrap().vpc_reasons, None, "{k}");
+        }
     }
 
     #[test]

@@ -404,7 +404,7 @@ mod tests {
 
     #[test]
     fn pairs_outside_the_list_stop() {
-        for line in ["user -> s3", "cloudfront -> lambda", "dynamodb -> lambda", "lambda -> internet", "apigateway -- cognito", "waf -- apigateway"] {
+        for line in ["user -> s3", "cloudfront -> lambda", "dynamodb -> lambda", "apigateway -- cognito", "waf -- apigateway"] {
             let (m, d) = run(&format!("{B}  - {line}\n"));
             assert!(m.is_none(), "{line}");
             assert_eq!(first(&d), ("UNSUPPORTED", Some("flows[1]"), Some(line)), "{line}");

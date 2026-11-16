@@ -1,6 +1,7 @@
 //! The reasons for every frame, place and kind archwire decides, the holes left open, and the notes.
 
 use super::build::moved;
+use super::links::attached_by;
 use super::{Checked, ROUTE_CHOICES};
 use crate::def::{Definition, Ref, Rel};
 use crate::diag::{Derived, Diagnostics, Hole};
@@ -75,18 +76,31 @@ pub(super) fn explain(def: &Definition, rules: &Rules, model: &Model, checked: &
     for r in &drawn {
         let s = svc(&r.service);
         let private = area_of_part(model, &r.name) == Some(Area::Subnet(Tier::Private));
-        let place: Vec<String> = match (moved(accepted, &r.name), &s.place_rule, s.scope) {
-            (Some(rule), _, _) => rule.from_rule.iter().cloned().collect(),
-            (None, Some(id), _) => vec![id.clone()],
-            (None, None, Scope::Global) => vec!["global-service-outside-region".into()],
-            (None, None, Scope::Regional) => vec!["regional-service-outside-vpc".into()],
-            (None, None, Scope::Vpc) if private && s.place == Place::PerAz => vec!["compute-in-private".into()],
-            (None, None, Scope::Vpc) if private && s.place == Place::WriterReader => {
-                vec!["database-in-private".into(), "aurora-writer-reader".into()]
+        // A part a connection places in a subnet tier is explained by that connection.
+        let place: Vec<String> = if let Some(rule) = attached_by(accepted, &r.name) {
+            rule.from_subnet_rule.iter().chain(rule.from_copies_rule.iter()).cloned().collect()
+        } else {
+            match (moved(accepted, &r.name), &s.place_rule, s.scope) {
+                (Some(rule), _, _) => rule.from_rule.iter().cloned().collect(),
+                (None, Some(id), _) => vec![id.clone()],
+                (None, None, Scope::Global) => vec!["global-service-outside-region".into()],
+                (None, None, Scope::Regional) => vec!["regional-service-outside-vpc".into()],
+                (None, None, Scope::Vpc) if private && s.place == Place::PerAz => vec!["compute-in-private".into()],
+                (None, None, Scope::Vpc) if private && s.place == Place::WriterReader => {
+                    vec!["database-in-private".into(), "aurora-writer-reader".into()]
+                }
+                (None, None, Scope::Outside | Scope::Vpc) => Vec::new(),
             }
-            (None, None, Scope::Outside | Scope::Vpc) => Vec::new(),
         };
         for id in &place {
+            why(&r.name, id);
+        }
+        // A part whose traffic leaves the VPC through a NAT gateway, when its service says why.
+        let to_nat = |to: &str| {
+            model.nodes.iter().any(|n| n.id == to && rules.service(&n.service).and_then(|s| s.derived_role) == Some(DerivedRole::EgressNat))
+        };
+        let from_part = |from: &str| model.nodes.iter().any(|n| n.id == from && n.part == r.name && !n.added);
+        if let Some(id) = s.nat_rule.as_ref().filter(|_| model.edges.iter().any(|e| from_part(&e.from) && to_nat(&e.to))) {
             why(&r.name, id);
         }
         let Some(kind) = kind_of(&r.name) else { continue };
