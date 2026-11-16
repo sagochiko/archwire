@@ -26,8 +26,9 @@ const CLOUDFRONT: &str = "cloudfront";
 const CLOUDFRONT_CERTIFICATE_REGION: &str = "us-east-1";
 
 /// The rules this code names itself.
-pub(crate) const RULES: [&str; 15] = [
+pub(crate) const RULES: [&str; 16] = [
     "resources-inside-aws-cloud-frame",
+    "resources-inside-region-frame",
     "default-region",
     "load-balancer-in-vpc",
     "alb-spans-two-azs",
@@ -539,6 +540,7 @@ fn build(def: &Definition, rules: &Rules, s: &Settings, routes: &[Route], diag: 
     let written: Vec<&str> = parts.iter().map(|(n, _)| *n).collect();
     let mut why = |target: &str, id: &str| diag.derived.push(derived(rules, lang, target, id, !written.contains(&target)));
     why("aws-cloud", "resources-inside-aws-cloud-frame");
+    why("region", "resources-inside-region-frame");
     if !def.set.contains_key("region") {
         why("region", "default-region");
     }
@@ -762,6 +764,23 @@ mod tests {
         assert_eq!(igw.reason, Rules::builtin().rule("internet-facing-alb-in-vpc-with-igw").reason_ja);
         assert_eq!(d.versions.rules, Rules::builtin().version);
         assert!(!d.versions.archwire.is_empty());
+    }
+
+    // Breaks when the Region frame of a VPC definition loses its reason, gets it twice, or moves it away from just after the AWS Cloud frame's.
+    #[test]
+    fn vpc_region_frames_have_their_reasons_once() {
+        let web = include_str!("../../../tests/cases/web-2az-ja/def.yaml");
+        let written = web.replace("set:\n", "set:\n  region: ap-northeast-1\n");
+        assert_ne!(web, written);
+        for (src, want) in [(web.to_string(), vec!["resources-inside-region-frame", "default-region"]), (written, vec!["resources-inside-region-frame"])] {
+            let (_, d) = run(&src);
+            let region: Vec<&str> = d.derived.iter().filter(|x| x.target == "region").map(|x| x.rule.as_str()).collect();
+            assert_eq!(region, want, "{src}");
+            assert!(d.derived.iter().filter(|x| x.target == "region").all(|x| x.added), "{src}");
+            let cloud = d.derived.iter().position(|x| x.target == "aws-cloud").unwrap();
+            assert_eq!(d.derived[cloud + 1].target, "region", "{src}");
+            assert_eq!(d.derived[cloud + 1].rule, "resources-inside-region-frame", "{src}");
+        }
     }
 
     #[test]
