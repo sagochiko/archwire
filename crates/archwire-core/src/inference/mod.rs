@@ -343,24 +343,63 @@ mod tests {
         ("reasons.rs", include_str!("reasons.rs")),
     ];
 
-    /// Rust source without its line comments (`//` to the end of the line, outside a string).
-    /// Only line comments and ordinary strings closed on their own line are read; any other way
-    /// of writing that could hide or split a string (`/*`, a raw string `r"` or `r#"`, a string
-    /// left open at the end of its line) is an error naming the file and the line.
-    fn without_comments(file: &str, src: &str) -> Result<String, String> {
+    /// Rust source read once: the code without its line comments, and each ordinary string in
+    /// it, with the place in that code where the string opens.
+    struct Code {
+        text: String,
+        strings: Vec<(usize, String)>,
+    }
+
+    /// Reads Rust source in one pass. Line comments (`//` to the end of the line, outside a string
+    /// or a character literal) are left out, and each ordinary string is kept as written between
+    /// its quotes. Only line comments, ordinary strings closed on their own line and character
+    /// literals without a `"` are read; any other way of writing that could hide or split a string
+    /// (`/*`, a raw string `r"` or `r#"`, a string left open at the end of its line, a character
+    /// literal holding `"`) is an error naming the file and the line. A `'` opens a character
+    /// literal when one character, or one escape, and a `'` follow it; otherwise it is a lifetime
+    /// or a label.
+    fn read_code(file: &str, src: &str) -> Result<Code, String> {
         let ident = |c: Option<&u8>| c.is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_');
-        let mut out = String::new();
+        let mut code = Code { text: String::new(), strings: Vec::new() };
         for (n, line) in src.lines().enumerate() {
             let at = |what: &str| format!("{file}:{}: {what} is not read by this test; write it with `//` and strings on one line", n + 1);
             let bytes = line.as_bytes();
-            let (mut in_string, mut escaped, mut end) = (false, false, line.len());
-            for (i, &c) in bytes.iter().enumerate() {
+            let base = code.text.len();
+            let (mut open, mut escaped, mut end) = (None::<usize>, false, line.len());
+            let mut i = 0;
+            while i < bytes.len() {
+                let c = bytes[i];
+                if let Some(from) = open {
+                    match c {
+                        _ if escaped => escaped = false,
+                        b'\\' => escaped = true,
+                        b'"' => {
+                            code.strings.push((base + from, line[from + 1..i].to_string()));
+                            open = None;
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                    continue;
+                }
                 let before = |k: usize| if i >= k { bytes.get(i - k) } else { None };
                 match c {
-                    _ if escaped => escaped = false,
-                    b'\\' if in_string => escaped = true,
-                    b'"' => in_string = !in_string,
-                    _ if in_string => {}
+                    b'"' => open = Some(i),
+                    b'\'' => {
+                        let close = if bytes.get(i + 1) == Some(&b'\\') {
+                            bytes.get(i + 3..).and_then(|rest| rest.iter().position(|&b| b == b'\'')).map(|p| i + 3 + p)
+                        } else {
+                            let len = line[i + 1..].chars().next().map_or(0, char::len_utf8);
+                            (len > 0 && bytes.get(i + 1 + len) == Some(&b'\'')).then_some(i + 1 + len)
+                        };
+                        if let Some(close) = close {
+                            if line[i + 1..close].contains('"') {
+                                return Err(at("a character literal holding `\"`"));
+                            }
+                            i = close + 1;
+                            continue;
+                        }
+                    }
                     b'/' if bytes.get(i + 1) == Some(&b'/') => {
                         end = i;
                         break;
@@ -374,35 +413,48 @@ mod tests {
                     }
                     _ => {}
                 }
+                i += 1;
             }
-            if in_string {
+            if open.is_some() {
                 return Err(at("a string that goes on past its line"));
             }
-            out.push_str(&line[..end]);
-            out.push('\n');
+            code.text.push_str(&line[..end]);
+            code.text.push('\n');
         }
-        Ok(out)
+        Ok(code)
     }
 
-    // Fails if a rule id written only in a line comment is counted as one the code names, or a
-    // way of writing the reading does not follow (`/*`, raw strings, strings over lines) passes.
+    // Fails if a rule id written only in a line comment is counted as one the code names, a string
+    // is read apart from the comments around it, or a way of writing the reading does not follow
+    // (`/*`, raw strings, strings over lines, a `"` in a character literal) passes.
     #[test]
     fn a_rule_named_only_in_a_comment_is_not_used() {
+        let strings = |src: &str| read_code("x.rs", src).unwrap().strings.into_iter().map(|(_, s)| s).collect::<Vec<_>>();
         let src = "let a = \"nat-per-az\"; // \"default-region\"\n/// \"compute-in-private\"\nlet b = \"a // b \\\" c\";\n";
-        assert_eq!(without_comments("x.rs", src).unwrap(), "let a = \"nat-per-az\"; \n\nlet b = \"a // b \\\" c\";\n");
+        let code = read_code("x.rs", src).unwrap();
+        assert_eq!(code.text, "let a = \"nat-per-az\"; \n\nlet b = \"a // b \\\" c\";\n");
+        assert_eq!(code.strings, [(8, "nat-per-az".to_string()), (32, "a // b \\\" c".to_string())]);
         let fails = [
             ("let a = 1;\nlet b = 2; /* \"default-region\" */\n", "x.rs:2: a block comment `/*`"),
             ("let a = r\"default-region\";\n", "x.rs:1: a raw string"),
             ("let a = r#\"de\"fault\"#;\n", "x.rs:1: a raw string"),
             ("let a = br\"x\";\n", "x.rs:1: a raw string"),
             ("let a = 1;\n\nlet b = \"one\ntwo\";\n", "x.rs:3: a string that goes on past its line"),
+            ("let a = '\"'; /* comment */ let b = '\"';\n", "x.rs:1: a character literal holding `\"`"),
+            ("let a = 1;\nlet b = b'\"';\n", "x.rs:2: a character literal holding `\"`"),
+            ("let a = '\\\"';\n", "x.rs:1: a character literal holding `\"`"),
         ];
         for (src, want) in fails {
-            let e = without_comments("x.rs", src).unwrap_err();
+            let e = read_code("x.rs", src).err().unwrap_or_else(|| panic!("{src:?} was read"));
             assert!(e.starts_with(want), "{src:?}: {e}");
         }
         // Names that only end in `r` before a string are not raw strings.
-        assert!(without_comments("x.rs", "let a = for_r(\"x\"); let b = matches!(c, br);\n").is_ok());
+        assert!(read_code("x.rs", "let a = for_r(\"x\"); let b = matches!(c, br);\n").is_ok());
+        // Lifetimes, labels and character literals without `"` are read past, and a `/` or a `'`
+        // in a character literal neither starts a comment nor hides a string.
+        assert_eq!(strings("fn f<'a>(x: &'a str) -> &'a str { 'outer: loop { break 'outer; } x }\n"), Vec::<String>::new());
+        assert_eq!(strings("let c = '/'; let d = '\\''; let s = \"nat-per-az\"; // \"default-region\"\n"), ["nat-per-az"]);
+        assert_eq!(strings("let c = 'é'; let s = \"nat-per-az\"; let u = '\\u{1F600}';\n"), ["nat-per-az"]);
     }
 
     // Fails if the code names a rule missing from RULES, or a file of this module is not read for it,
@@ -422,13 +474,14 @@ mod tests {
         // and outside the declaration of RULES itself.
         let mut used: Vec<String> = Vec::new();
         for (name, src) in SOURCES {
-            let mut code = without_comments(name, src.find("#[cfg(test)]").map_or(src, |i| &src[..i])).unwrap_or_else(|e| panic!("{e}"));
-            if let Some(start) = code.find("pub(crate) const RULES") {
-                let end = start + code[start..].find("];").expect("the list ends") + 2;
-                assert!(name == "mod.rs" && code[end..].find("const RULES").is_none(), "RULES is declared once, in mod.rs");
-                code.replace_range(start..end, "");
-            }
-            for lit in code.split('"').skip(1).step_by(2) {
+            let code = read_code(name, src.find("#[cfg(test)]").map_or(src, |i| &src[..i])).unwrap_or_else(|e| panic!("{e}"));
+            let declared = code.text.find("pub(crate) const RULES").map(|start| {
+                let end = start + code.text[start..].find("];").expect("the list ends") + 2;
+                assert!(name == "mod.rs" && code.text[end..].find("const RULES").is_none(), "RULES is declared once, in mod.rs");
+                start..end
+            });
+            for (_, lit) in code.strings.iter().filter(|(at, _)| !declared.as_ref().is_some_and(|d| d.contains(at))) {
+                let lit = lit.as_str();
                 if r.require(&[lit]).is_empty() && !used.iter().any(|u| u == lit) {
                     used.push(lit.to_string());
                 }
