@@ -133,7 +133,8 @@ enum Kind {
     Elbow,
     /// From outside, through a gate straight onto the end.
     InGate,
-    /// From outside, through a gate on the left side and along a track of the band above the tier.
+    /// From outside, through a gate on the left side (or, running down, on the top above a gap
+    /// between the zones and down that gap) and along a track of the band above the tier.
     InTrack,
     /// To outside, out of the right side straight to a gate on the VPC's right side.
     Out,
@@ -194,6 +195,9 @@ struct Across {
     spans: Vec<i32>,
     entry: i32,
     vpc_w: i32,
+    /// What the zones were widened by and the columns moved right by.
+    extra: i32,
+    shift: i32,
 }
 
 impl Across {
@@ -456,7 +460,7 @@ impl<'a> Grid<'a> {
         let w = (right + PAD + SUB_INSET).max(self.names_right + PAD) + extra;
         let has_entry = self.groups.iter().any(|g| g.place == Place::Entry);
         let left = if self.axis == Axis::Right && has_entry { FRAME_ROOM + 2 * self.entry_half + IGW_GAP } else { VPC_SIDE };
-        let mut a = Across { left, w, gap, cols, pubs, spans: Vec::new(), entry: 0, vpc_w: 0 };
+        let mut a = Across { left, w, gap, cols, pubs, spans: Vec::new(), entry: 0, vpc_w: 0, extra, shift };
         let zones_end = a.az_x(n as usize - 1) + w;
         let base = if n % 2 == 0 { a.az_x(n as usize / 2) - gap / 2 } else { a.az_x(n as usize / 2) + a.cols[0] };
         let span_g: Vec<&Group> = self.spans().collect();
@@ -592,7 +596,12 @@ impl<'a> Grid<'a> {
                     r.entry = if self.axis == Axis::Down { Side::Top } else { Side::Left };
                     if y == Place::Private {
                         r.entry = Side::Top;
-                        if self.axis == Axis::Right {
+                        // Running right, the line comes in by the left side along the band above
+                        // the private tier; running down, it comes straight down onto the copy,
+                        // unless a part above the zones stands in the way and moves with the copy
+                        // as the zones widen, and then down the gap beside the copy's zone and
+                        // along the same band.
+                        if self.axis == Axis::Right || self.in_the_way_however_wide(a, t) {
                             (r.kind, r.band) = (Kind::InTrack, Some(Band::Fan));
                         }
                     }
@@ -630,6 +639,53 @@ impl<'a> Grid<'a> {
         let into_span = self.model.edges.iter().any(|e| self.place(self.index(&e.from)) == Some(Place::Entry) && self.place(self.index(&e.to)) == Some(Place::Span));
         let from_side = self.axis == Axis::Right && into_span;
         self.spans().next().is_some() && !self.above() && self.groups.iter().any(|g| g.place == Place::Public) && !from_side
+    }
+
+    /// The parts a line coming down from the VPC's top passes before the zones, when lines run
+    /// down: the parts spanning the zones and the entry gateway, each as its centre across, half
+    /// its width and its id.
+    fn items_above(&self, a: &Across) -> Vec<(i32, i32, String)> {
+        let id = |i: usize| self.model.nodes[i].id.clone();
+        let mut items: Vec<(i32, i32, String)> = self.spans().zip(&a.spans).map(|(g, &x)| (x, g.half, id(g.nodes[0]))).collect();
+        if self.axis == Axis::Down {
+            if let Some(g) = self.groups.iter().find(|g| g.place == Place::Entry) {
+                items.push((a.entry, self.entry_half, id(g.nodes[0])));
+            }
+        }
+        items
+    }
+
+    /// The first part above the zones a line coming straight down at `x` would pass, with how
+    /// much further from it the line has to be.
+    fn above_the_zones(&self, a: &Across, x: i32) -> Option<(String, i32)> {
+        self.items_above(a).into_iter().map(|(c, h, it)| (it, h + ROOM - (x - c).abs())).find(|&(_, short)| short > 0)
+    }
+
+    /// Whether a line coming straight down onto `t` passes a part above the zones exactly as
+    /// close with the zones widened: no widening then keeps it clear.
+    fn in_the_way_however_wide(&self, a: &Across, t: usize) -> bool {
+        let wider = self.across(a.extra + 2, a.gap, a.shift);
+        match (self.above_the_zones(a, self.cx(a, t)), self.above_the_zones(&wider, self.cx(&wider, t))) {
+            (Some(now), Some(then)) => now == then,
+            _ => false,
+        }
+    }
+
+    /// Where a line from outside along the band above the private tier comes in across: the VPC's
+    /// left side when lines run right; when they run down, the middle of the gap left of the
+    /// zone of the copy it comes into.
+    fn gate_x(&self, a: &Across, r: &Run) -> i32 {
+        match self.axis {
+            Axis::Right => 0,
+            Axis::Down => a.az_x(self.az(r.to)) - a.gap / 2,
+        }
+    }
+
+    /// The side a part's line to its zone's NAT gateway leaves by, when a line from a part on the
+    /// other side of the NAT gateway comes into its bottom too.
+    fn nat_beside(&self, runs: &[Run], i: usize) -> Option<Side> {
+        let mine = runs.iter().find(|r| r.drawn && r.kind == Kind::NatIn && r.from == i)?;
+        runs.iter().any(|o| o.drawn && o.kind == Kind::NatIn && o.to == mine.to && o.exit != mine.exit).then_some(mine.exit)
     }
 
     /// Whether a part sits in the column of two copies of one zone, in a row between theirs.
@@ -753,9 +809,17 @@ impl<'a> Grid<'a> {
             let p = r.pin.unwrap_or(50);
             (r.exit_pos, r.entry_pos) = (p, p);
         }
-        for ((shared, _, side, _), mut ends) in sides {
+        for ((shared, node, side, _), mut ends) in sides {
             ends.sort();
             let pinned = ends.iter().filter(|e| runs[e.2].pin.is_some()).count();
+            // A line from outside alone on a part's top keeps away from the side the part's line
+            // to its NAT gateway rises on when that NAT gateway takes a line from its other side
+            // too: the rising line then runs off the NAT gateway's middle, toward this part, and
+            // its label needs the room between them.
+            let away = match (shared, ends.as_slice()) {
+                (0, [(_, _, k, false)]) if side == Side::Top as usize && matches!(runs[*k].kind, Kind::InGate | Kind::InTrack) => self.nat_beside(runs, node),
+                _ => None,
+            };
             // A line coming down into a part beside one straight line takes the middle, away
             // from where the straight line comes down.
             let into_top = shared == 0 && side == Side::Top as usize && pinned == 1 && ends.len() == 2;
@@ -772,6 +836,11 @@ impl<'a> Grid<'a> {
             if into_top {
                 free = vec![50];
             }
+            match away {
+                Some(Side::Left) => free = vec![75],
+                Some(Side::Right) => free = vec![25],
+                _ => {}
+            }
             let mut next = free.into_iter();
             for &(_, _, k, is_exit) in &ends {
                 if runs[k].pin.is_some() {
@@ -784,9 +853,11 @@ impl<'a> Grid<'a> {
     }
 
     /// Numbers the tracks of each band: the line running furthest along it takes the top one, so
-    /// lines turning into one band do not cross on the way in.
+    /// lines turning into one band do not cross on the way in. A line from outside that comes down
+    /// off the band where a line from a part above leaves down into it takes a track below all
+    /// the others, so the two do not run down one stretch together.
     fn number_tracks(&self, a: &Across, runs: &mut [Run]) {
-        let mut bands: BTreeMap<Band, Vec<(i32, usize, usize)>> = BTreeMap::new();
+        let mut bands: BTreeMap<Band, Vec<(bool, i32, usize, usize)>> = BTreeMap::new();
         let mut straight = Vec::new();
         for (k, r) in runs.iter().enumerate() {
             let Some(b) = r.band else { continue };
@@ -798,15 +869,26 @@ impl<'a> Grid<'a> {
                 straight.push(k);
                 continue;
             }
-            bands.entry(b).or_default().push((-(x1 - x0).abs(), r.edge, k));
+            bands.entry(b).or_default().push((false, -(x1 - x0).abs(), r.edge, k));
         }
         // A line running straight on needs no track.
         for k in straight {
             runs[k].band = None;
         }
         for (_, mut users) in bands {
+            let from_above: Vec<i32> = users
+                .iter()
+                .map(|u| &runs[u.3])
+                .filter(|f| f.exit == Side::Bottom && self.place(f.from).is_some_and(|p| p != Place::Private))
+                .map(|f| self.track_ends(a, f).0)
+                .collect();
+            for u in users.iter_mut() {
+                let r = &runs[u.3];
+                let down = self.track_ends(a, r).1;
+                u.0 = r.kind == Kind::InTrack && from_above.iter().any(|&x| (x - down).abs() < ROOM);
+            }
             users.sort();
-            for (n, &(_, _, k)) in users.iter().enumerate() {
+            for (n, &(_, _, _, k)) in users.iter().enumerate() {
                 runs[k].track = Some(n);
             }
         }
@@ -824,7 +906,7 @@ impl<'a> Grid<'a> {
         };
         let (from, to) = (|| at(r.from, r.exit, r.exit_pos), || at(r.to, r.entry, r.entry_pos));
         match r.kind {
-            Kind::InTrack => (0, to()),
+            Kind::InTrack => (self.gate_x(a, r), to()),
             Kind::OutTrack | Kind::OutFan => (from(), a.vpc_w),
             Kind::NatAcross => (self.gap_beside(a, r.from, r.to), to()),
             Kind::NatOut => (self.cx(a, r.from), to()),
@@ -839,12 +921,7 @@ impl<'a> Grid<'a> {
     fn conflict(&self, a: &Across, runs: &[Run]) -> Option<(Fix, Clash)> {
         let n = self.zones();
         let id = |i: usize| self.model.nodes[i].id.clone();
-        let mut items: Vec<(i32, i32, String)> = self.spans().zip(&a.spans).map(|(g, &x)| (x, g.half, id(g.nodes[0]))).collect();
-        if self.axis == Axis::Down {
-            if let Some(g) = self.groups.iter().find(|g| g.place == Place::Entry) {
-                items.push((a.entry, self.entry_half, id(g.nodes[0])));
-            }
-        }
+        let items = self.items_above(a);
         // How much further a line at x has to be from a part centred at c, half as wide as h.
         let short = |x: i32, c: i32, h: i32| h + ROOM - (x - c).abs();
         let line = |r: &Run| edge_id(&self.model.edges[r.edge].from, &self.model.edges[r.edge].to);
@@ -864,6 +941,7 @@ impl<'a> Grid<'a> {
             let pass = match (r.kind, self.place(r.to)) {
                 (Kind::NatOut, _) => Some(self.cx(a, r.from)),
                 (Kind::InGate, Some(Place::Private)) if self.axis == Axis::Down => Some(self.cx(a, r.to)),
+                (Kind::InTrack, _) if self.axis == Axis::Down => Some(self.gate_x(a, r)),
                 _ => None,
             };
             let Some(x) = pass else { continue };
@@ -1107,7 +1185,13 @@ impl<'a> Grid<'a> {
                 Kind::InTrack => {
                     let n = n.expect("inside");
                     let y = ty.unwrap_or(n.1 - SUB_HEAD);
-                    vec![base(vec![(n.0, y)], Some((0, y)))]
+                    match self.axis {
+                        Axis::Right => vec![base(vec![(n.0, y)], Some((0, y)))],
+                        Axis::Down => {
+                            let x = self.gate_x(a, r);
+                            vec![base(vec![(x, y), (n.0, y)], Some((x, 0)))]
+                        }
+                    }
                 }
                 Kind::Out => {
                     let e = e.expect("inside");
@@ -1550,13 +1634,95 @@ pub(in crate::arrange) mod tests {
         assert_eq!(cf.rect.y - cloud.y, 45);
     }
 
+    // Fails if a line from outside into the copy right below the load balancer comes straight
+    // down through it, or runs along the load balancer's line down to its own track, instead of
+    // along a track of the band above the private tier below the load balancer's tracks.
+    #[test]
+    fn lines_from_outside_into_copies_take_the_band() {
+        let m = lambda_under_the_balancer();
+        let into = |zone: &str| m.edges.iter().position(|e| e.from == "apigateway" && e.to == crate::ids::copy_id("lambda.api", zone)).unwrap();
+        let fan_of_alb: Vec<usize> = (0..m.edges.len()).filter(|&k| m.edges[k].from == "alb").collect();
+        assert_eq!(fan_of_alb.len(), 3);
+        for axis in [Axis::Right, Axis::Down] {
+            let p = lays_out_cleanly("a function below the load balancer", &m, &Diagnostics::default(), axis);
+            let alb = icon(&p, "alb").rect;
+            let below = icon(&p, "lambda.api@1c").rect;
+            assert_eq!(alb.x, below.x, "{axis:?}: the copy sits right below the load balancer");
+            let pri = frame(&p, "pri-1c");
+            let fan = p.lanes.iter().find(|l| l.hi == pri.y).unwrap_or_else(|| panic!("{axis:?}: no band above the private tier"));
+            let at = |edge: usize| fan.tracks.iter().find(|t| t.0 == edge).map(|t| t.1);
+            let alb_tracks: Vec<i32> = fan_of_alb.iter().filter_map(|&k| at(k)).collect();
+            assert_eq!(alb_tracks.len(), 3, "{axis:?} {fan:?}");
+            let mine = at(into("1c")).unwrap_or_else(|| panic!("{axis:?}: the line into the copy below takes no track {fan:?}"));
+            assert!(alb_tracks.iter().all(|&y| y < mine), "{axis:?}: {mine} not below {alb_tracks:?}");
+            for zone in ["1a", "1d"] {
+                if let Some(y) = at(into(zone)) {
+                    assert!(!alb_tracks.contains(&y), "{axis:?} {zone}: {y} on a track of the load balancer");
+                }
+            }
+        }
+    }
+
+    /// The three-zone web example with the entry gateway's name widened past the NAT gateway of
+    /// the middle zone, whose line rises to it: the gateway and that NAT gateway move together
+    /// whatever the widths, so no widening keeps the line clear of the name.
+    fn an_entry_name_over_a_nat_line() -> Model {
+        let (mut m, _) = grid(WEB_CASES[2].1);
+        let igw = m.nodes.iter_mut().find(|n| n.area == Area::VpcEdge).unwrap();
+        igw.tag = Some("an-internet-gateway-with-a-very-long-name".into());
+        m
+    }
+
     // Fails if a line the widening cannot clear is left through a part and the layout returned anyway.
     #[test]
     fn a_line_widening_cannot_clear_fails_the_layout() {
         let r = Rules::builtin();
-        let m = lambda_under_the_balancer();
+        let m = an_entry_name_over_a_nat_line();
         let e = arrange(&m, &r, Axis::Down).unwrap_err();
-        assert!(e.iter().any(|p| p.code == "LAYOUT_FAILED" && p.message.contains("edge-apigateway-to-lambda.api@1c") && p.message.contains("alb")), "{e:?}");
+        assert!(e.iter().any(|p| p.code == "LAYOUT_FAILED" && p.message.contains("edge-nat-1c-to-igw") && p.message.contains(" and igw")), "{e:?}");
+    }
+
+    /// Draws a mixed definition along both axes and fails naming every drawing that stops, breaks
+    /// a line or loses one.
+    fn draws_cleanly(name: &str, src: &str) {
+        for axis in [Axis::Right, Axis::Down] {
+            match super::super::generated::draw_counted(src, axis) {
+                super::super::generated::Drawn::Drawn { notes, lines_broken, .. } => {
+                    let broken: Vec<&String> = notes.iter().filter(|n| n.contains("edge-")).collect();
+                    assert!(broken.is_empty() && lines_broken.is_empty(), "{name} {axis:?}: {broken:?} {lines_broken:?}");
+                }
+                other => panic!("{name} {axis:?}: {other:?}"),
+            }
+        }
+    }
+    fn representative(name: &str) -> String {
+        super::super::generated::mixed_representatives().into_iter().find(|(n, _)| *n == name).unwrap_or_else(|| panic!("no input {name}")).1
+    }
+
+    // Fails if three zones with a function behind API Gateway written before the web stack, whose
+    // copy then sits right below the load balancer, stop or break along either axis.
+    #[test]
+    fn a_function_written_before_the_web_stack_draws_cleanly() {
+        draws_cleanly("function-before-web-3az", &representative("function-before-web-3az"));
+    }
+
+    // Fails if the same definition with the web stack written first stops or breaks, so the
+    // order the lines are written in decides whether it draws.
+    #[test]
+    fn a_function_written_after_the_web_stack_draws_cleanly() {
+        let first = representative("function-before-web-3az");
+        let mut lines: Vec<&str> = first.lines().collect();
+        lines.swap(1, 2);
+        let src = lines.join("\n") + "\n";
+        assert!(src.starts_with("flows:\n  - user -> cloudfront"), "{src}");
+        draws_cleanly("function-after-web-3az", &src);
+    }
+
+    // Fails if a function and ECS in one zone both sending to the NAT gateway between them leave
+    // the function's line no room for its label beside the line coming down onto the function.
+    #[test]
+    fn two_parts_sending_to_one_nat_gateway_draw_cleanly() {
+        draws_cleanly("both-to-the-internet", &representative("both-to-the-internet"));
     }
 
     // Fails if two fixed ends are left on one spot of one side.
