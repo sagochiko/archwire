@@ -837,9 +837,32 @@ mod tests {
         assert!(r.derived_link("reader", "writer").is_none());
     }
 
+    // Fails if a subnet tier written on a connection, or the NAT rule of a service, is read but not kept.
+    #[test]
+    fn subnet_tiers_and_nat_rules_are_kept_when_loaded() {
+        let [services, rules, labels, links] = builtin_files();
+        let alb = "from = \"alb\"\nto = \"ecs\"\nrel = \"main\"\nlabel = \"http\"\n";
+        let tier = "from_subnet = \"private\"\nfrom_subnet_rule = \"private-subnet-per-az\"\nfrom_copies_rule = \"public-and-private-subnet-per-az\"\n";
+        let ecs = "label = \"Amazon ECS\"\nin_label = \"http\"\n";
+        assert!(links.contains(alb) && services.contains(ecs));
+        let links = links.replacen(alb, &format!("{alb}{tier}"), 1);
+        let services = services.replacen(ecs, &format!("{ecs}nat_rule = \"private-egress-through-nat\"\n"), 1);
+        let r = Rules::load(&services, rules, labels, &links).expect("the written fields load");
+        let l = r.link("alb", "ecs", Rel::Main).unwrap();
+        assert_eq!(
+            (l.from_subnet, l.from_subnet_rule.as_deref(), l.from_copies_rule.as_deref()),
+            (Some(Subnet::Private), Some("private-subnet-per-az"), Some("public-and-private-subnet-per-az"))
+        );
+        assert_eq!(r.service("ecs").unwrap().nat_rule.as_deref(), Some("private-egress-through-nat"));
+        let other = r.link("ecs", "aurora", Rel::Main).unwrap();
+        assert_eq!((other.from_subnet, other.from_subnet_rule.as_deref(), other.from_copies_rule.as_deref()), (None, None, None));
+        assert_eq!(r.service("alb").unwrap().nat_rule, None);
+    }
+
     // Fails if a misspelt role, a subnet tier on a connection outside the VPC, a half-written subnet
     // tier, a derived line with a bad role, relation or label or listed twice, VPC reasons on a service
-    // outside the VPC, or a rule missing from rules.toml is loaded without an error.
+    // outside the VPC, a label or rule missing from the other files, or an unknown field in VPC
+    // reasons or a derived line is loaded without an error.
     #[test]
     fn bad_link_fields_stop_loading() {
         let [services, rules, labels, links] = builtin_files();
@@ -855,6 +878,8 @@ mod tests {
         };
         let s3 = "label = \"Amazon S3\"\nin_label = \"read_write\"\n";
         let ecs = "label = \"Amazon ECS\"\nin_label = \"http\"\n";
+        // Only the subnet tier fields at these places (0 `from_subnet`, 1 `from_subnet_rule`, 2 `from_copies_rule`).
+        let half = |keep: &[usize]| tier.lines().enumerate().filter(|(i, _)| keep.contains(i)).map(|(_, l)| format!("{l}\n")).collect::<String>();
         let reasons = "vpc_reasons = { vpc = \"load-balancer-in-vpc\", az = [\"alb-spans-two-azs\"], default_azs = \"default-two-azs\" }\n";
         let cases = [
             (services.to_string(), edit(links, "to_role.writer =", "to_role.primary ="), "LINK_BAD_ROLE"),
@@ -872,8 +897,24 @@ mod tests {
             (edit(services, "vpc = \"load-balancer-in-vpc\"", "vpc = \"load-balancer\""), links.to_string(), "SERVICE_UNKNOWN_RULE"),
             (edit(services, ecs, &format!("{ecs}nat_rule = \"no-such-rule\"\n")), links.to_string(), "SERVICE_UNKNOWN_RULE"),
             (edit(services, s3, &format!("{s3}{reasons}")), links.to_string(), "SERVICE_VPC_REASONS_OUTSIDE_VPC"),
+            (
+                services.to_string(),
+                edit(links, alb, &format!("{alb}{}", tier.replacen("from_copies_rule = \"private-subnet-per-az\"", "from_copies_rule = \"no-such-rule\"", 1))),
+                "LINK_UNKNOWN_RULE",
+            ),
+            (services.to_string(), edit(links, "to_role.reader = \"read\"", "to_role.reader = \"reed\""), "LINK_UNKNOWN_LABEL"),
+            (edit(services, "az = [\"alb-spans-two-azs\"]", "az = [\"no-such-rule\"]"), links.to_string(), "SERVICE_UNKNOWN_RULE"),
+            (edit(services, "default_azs = \"default-two-azs\"", "default_azs = \"no-such-rule\""), links.to_string(), "SERVICE_UNKNOWN_RULE"),
+            (services.to_string(), edit(links, alb, &format!("{alb}{}", half(&[1]))), "LINK_BAD_LIMIT"),
+            (services.to_string(), edit(links, alb, &format!("{alb}{}", half(&[2]))), "LINK_BAD_LIMIT"),
+            (services.to_string(), edit(links, alb, &format!("{alb}{}", half(&[0, 1]))), "LINK_BAD_LIMIT"),
+            (services.to_string(), edit(links, alb, &format!("{alb}{}", half(&[0, 2]))), "LINK_BAD_LIMIT"),
+            (services.to_string(), edit(links, alb, &format!("{alb}{}", half(&[1, 2]))), "LINK_BAD_LIMIT"),
+            // Without links, so the services that fail to parse leave no connection naming them.
+            (edit(services, "default_azs = \"default-two-azs\"", "default_azs = \"default-two-azs\", zones = 2"), String::new(), "SERVICES_PARSE"),
+            (services.to_string(), format!("{}weight = 1\n", derived("private", "reader", "aux", "replication")), "LINKS_PARSE"),
         ];
-        assert_eq!(cases.len(), 11);
+        assert_eq!(cases.len(), 22);
         for (services, links, code) in &cases {
             let e = Rules::load(services, rules, labels, links).err().unwrap_or_else(|| panic!("{code} not reported"));
             let codes: Vec<_> = e.iter().map(|p| p.code.as_str()).collect();
