@@ -1324,8 +1324,8 @@ impl<'a> Grid<'a> {
 
     /// How far apart the tracks of the band above the private tier are, and how far they keep
     /// from its sides (the subnet frames and the private subnet's name): a label's height when a
-    /// line in it comes from outside along the outside axis, the line the layout keeps room for a
-    /// label for; else room and the line's own width, with no room kept for a label.
+    /// line from outside comes in along the band, whichever way the lines run, the line the layout
+    /// keeps room for a label for; else room and the line's own width, with no room kept for a label.
     fn fan_pitch(&self, runs: &[Run]) -> i32 {
         let labelled = runs.iter().any(|r| r.band == Some(Band::Fan) && r.track.is_some() && r.kind == Kind::InTrack);
         if labelled { TRACK_STEP } else { TRACK_EDGE }
@@ -1716,6 +1716,29 @@ pub(in crate::arrange) mod tests {
         let src = lines.join("\n") + "\n";
         assert!(src.starts_with("flows:\n  - user -> cloudfront"), "{src}");
         draws_cleanly("function-after-web-3az", &src);
+    }
+
+    // Fails if a line from outside onto a copy below the entry gateway is sent round along the
+    // band although widening the zones moves the copy clear: three zones, no load balancer, the
+    // entry gateway above the middle of the zones.
+    #[test]
+    fn a_line_widening_clears_comes_straight_down() {
+        let src = "flows:\n  - user -> apigateway(http) -> lambda -> aurora\n  - lambda -> s3\nset:\n  azs: 3\n  nat: per-az\n  lang: en\nchoose:\n  route.lambda.s3: nat\n";
+        let r = Rules::builtin();
+        let (m, d) = crate::inference::infer(&crate::def::parse(src).unwrap(), &r);
+        let m = m.unwrap_or_else(|| panic!("{:?}", d.errors));
+        assert_eq!(m.azs.len(), 3);
+        assert!(m.nodes.iter().any(|n| n.area == Area::VpcEdge) && !m.nodes.iter().any(|n| matches!(n.area, Area::Subnet(_)) && n.az.is_none()));
+        let p = lays_out_cleanly("three zones without a load balancer", &m, &d, Axis::Down);
+        let into: Vec<usize> = (0..m.edges.len()).filter(|&k| m.edges[k].from == "apigateway" && m.nodes.iter().any(|n| n.id == m.edges[k].to && n.az.is_some())).collect();
+        assert_eq!(into.len(), 3);
+        for k in into {
+            let pl = p.lines.iter().find(|l| l.edge == k).unwrap_or_else(|| panic!("no draft for {}", m.edges[k].to));
+            let Keep::Inner(t) = &pl.keep else { panic!("{pl:?}") };
+            let top = port_of(icon(&p, &pl.to), pl.entry, pl.entry_pos.unwrap());
+            assert_eq!(t.gate.0, top.0, "{}: {t:?}", pl.to);
+            assert!(t.inner.iter().all(|q| q.0 == top.0), "{}: {t:?}", pl.to);
+        }
     }
 
     // Fails if a function and ECS in one zone both sending to the NAT gateway between them leave
