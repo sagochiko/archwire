@@ -1,0 +1,94 @@
+{
+  "versions": {
+    "archwire": "0.1.0",
+    "rules": "2026.11.3"
+  },
+  "derived": [
+    {
+      "target": "aws-cloud",
+      "added": true,
+      "kind": "default",
+      "rule": "resources-inside-aws-cloud-frame",
+      "reason": "AWS のリソースは AWS Cloud の枠の中に描く。",
+      "source": null
+    },
+    {
+      "target": "region",
+      "added": true,
+      "kind": "default",
+      "rule": "resources-inside-region-frame",
+      "reason": "リージョンに属する AWS のリソースは、そのリージョンの枠の中に描く。",
+      "source": null
+    },
+    {
+      "target": "region",
+      "added": true,
+      "kind": "default",
+      "rule": "default-region",
+      "reason": "リージョンの指定が無いので、ap-northeast-1（東京）にする。",
+      "source": null
+    },
+    {
+      "target": "apigateway",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "VPC のサブネットに置かないリージョンのサービスは、リージョンの枠の中、VPC の枠の外に描く。",
+      "source": null
+    },
+    {
+      "target": "lambda.orders",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "VPC のサブネットに置かないリージョンのサービスは、リージョンの枠の中、VPC の枠の外に描く。",
+      "source": null
+    },
+    {
+      "target": "dynamodb.orders",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "VPC のサブネットに置かないリージョンのサービスは、リージョンの枠の中、VPC の枠の外に描く。",
+      "source": null
+    },
+    {
+      "target": "lambda.users",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "VPC のサブネットに置かないリージョンのサービスは、リージョンの枠の中、VPC の枠の外に描く。",
+      "source": null
+    },
+    {
+      "target": "dynamodb.users",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "VPC のサブネットに置かないリージョンのサービスは、リージョンの枠の中、VPC の枠の外に描く。",
+      "source": null
+    },
+    {
+      "target": "lambda.search",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "VPC のサブネットに置かないリージョンのサービスは、リージョンの枠の中、VPC の枠の外に描く。",
+      "source": null
+    },
+    {
+      "target": "cloudwatch",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "VPC のサブネットに置かないリージョンのサービスは、リージョンの枠の中、VPC の枠の外に描く。",
+      "source": null
+    }
+  ],
+  "holes": [],
+  "errors": [],
+  "warnings": [],
+  "notes": [
+    "lambda.search から cloudwatch への線は、lambda.orders、lambda.users、lambda.search からの線をまとめて表す。"
+  ]
+}

@@ -1,0 +1,150 @@
+{
+  "versions": {
+    "archwire": "0.1.0",
+    "rules": "2026.11.3"
+  },
+  "derived": [
+    {
+      "target": "aws-cloud",
+      "added": true,
+      "kind": "default",
+      "rule": "resources-inside-aws-cloud-frame",
+      "reason": "AWS のリソースは AWS Cloud の枠の中に描く。",
+      "source": null
+    },
+    {
+      "target": "region",
+      "added": true,
+      "kind": "default",
+      "rule": "resources-inside-region-frame",
+      "reason": "リージョンに属する AWS のリソースは、そのリージョンの枠の中に描く。",
+      "source": null
+    },
+    {
+      "target": "region",
+      "added": true,
+      "kind": "default",
+      "rule": "default-region",
+      "reason": "リージョンの指定が無いので、ap-northeast-1（東京）にする。",
+      "source": null
+    },
+    {
+      "target": "vpc",
+      "added": true,
+      "kind": "constraint",
+      "rule": "load-balancer-in-vpc",
+      "reason": "Application Load Balancer は VPC のサブネットに作るので、VPC を描く。",
+      "source": "https://docs.aws.amazon.com/elasticloadbalancing/latest/application/create-application-load-balancer.html"
+    },
+    {
+      "target": "az",
+      "added": true,
+      "kind": "constraint",
+      "rule": "alb-spans-two-azs",
+      "reason": "Application Load Balancer には、2つ以上のアベイラビリティゾーンのサブネットが要る。",
+      "source": "https://docs.aws.amazon.com/elasticloadbalancing/latest/application/application-load-balancers.html"
+    },
+    {
+      "target": "az",
+      "added": true,
+      "kind": "default",
+      "rule": "default-two-azs",
+      "reason": "AZ の数の指定が無いので、Application Load Balancer が受け付ける最小の2つにする。",
+      "source": null
+    },
+    {
+      "target": "subnet",
+      "added": true,
+      "kind": "default",
+      "rule": "public-and-private-subnet-per-az",
+      "reason": "archwire は、各アベイラビリティゾーンにパブリックサブネットとプライベートサブネットを1つずつ置く。",
+      "source": null
+    },
+    {
+      "target": "cloudfront",
+      "added": false,
+      "kind": "default",
+      "rule": "global-service-outside-region",
+      "reason": "AWS は Amazon CloudFront と AWS WAF for CloudFront を、リソースがリージョンに属さないグローバルサービスに挙げている。archwire はグローバルサービスを AWS Cloud の枠の中、リージョンの枠の外に描く。",
+      "source": "https://docs.aws.amazon.com/whitepapers/latest/aws-fault-isolation-boundaries/global-services.html"
+    },
+    {
+      "target": "ecs",
+      "added": false,
+      "kind": "default",
+      "rule": "compute-in-private",
+      "reason": "サブネットの指定が無いので、ECS はプライベートサブネットに置く。外からの通信はロードバランサーが受ける。",
+      "source": null
+    },
+    {
+      "target": "aurora",
+      "added": false,
+      "kind": "default",
+      "rule": "database-in-private",
+      "reason": "サブネットの指定が無いので、Aurora はインターネットから届かないプライベートサブネットに置く。",
+      "source": null
+    },
+    {
+      "target": "aurora",
+      "added": false,
+      "kind": "default",
+      "rule": "aurora-writer-reader",
+      "reason": "Writer を1つ目の AZ に、Reader を残りの AZ に置く。",
+      "source": null
+    },
+    {
+      "target": "s3",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "VPC のサブネットに置かないリージョンのサービスは、リージョンの枠の中、VPC の枠の外に描く。",
+      "source": null
+    },
+    {
+      "target": "cloudwatch",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "VPC のサブネットに置かないリージョンのサービスは、リージョンの枠の中、VPC の枠の外に描く。",
+      "source": null
+    },
+    {
+      "target": "igw",
+      "added": true,
+      "kind": "constraint",
+      "rule": "internet-facing-alb-in-vpc-with-igw",
+      "reason": "インターネット向けの Application Load Balancer では、Internet Gateway のある VPC しか選べないので、VPC に Internet Gateway を置く。",
+      "source": "https://docs.aws.amazon.com/elasticloadbalancing/latest/application/create-application-load-balancer.html"
+    },
+    {
+      "target": "nat-1a",
+      "added": true,
+      "kind": "constraint",
+      "rule": "private-egress-through-nat",
+      "reason": "プライベートサブネットのリソースは、パブリックサブネットに作った NAT Gateway を通してインターネットへ接続する。",
+      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat-gateway.html"
+    },
+    {
+      "target": "nat-1c",
+      "added": true,
+      "kind": "constraint",
+      "rule": "private-egress-through-nat",
+      "reason": "プライベートサブネットのリソースは、パブリックサブネットに作った NAT Gateway を通してインターネットへ接続する。",
+      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat-gateway.html"
+    },
+    {
+      "target": "nat",
+      "added": true,
+      "kind": "default",
+      "rule": "nat-per-az",
+      "reason": "NAT Gateway をアベイラビリティゾーンごとに置くと、ほかのゾーンが止まっても外向きの通信が続く。",
+      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/nat-gateway-scenarios.html"
+    }
+  ],
+  "holes": [],
+  "errors": [],
+  "warnings": [],
+  "notes": [
+    "補助の流れ（~>）は経路を扱わず、線だけを描く。"
+  ]
+}

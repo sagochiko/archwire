@@ -116,9 +116,10 @@ fn case_list_is_what_the_plan_says() {
     assert_eq!(
         names,
         [
-            "api-http-ja", "api-merged-ja", "api-min-en", "api-names-ja", "api-rest-en", "aux-to-side", "edge-waf-en",
-            "endpoint-3az-en", "endpoint-3az-ja", "endpoint-ja", "err-mixed-vpc", "err-unknown-service", "err-unsupported",
-            "hole-apigateway", "hole-s3", "web-2az-en", "web-2az-ja", "web-3az-en", "web-3az-ja", "web-attach-en",
+            "api-http-ja", "api-http-ja-down", "api-merged-ja", "api-merged-ja-down", "api-min-en", "api-names-ja", "api-rest-en",
+            "aux-to-side", "edge-waf-en", "endpoint-3az-en", "endpoint-3az-ja", "endpoint-ja", "endpoint-ja-right", "err-mixed-vpc",
+            "err-unknown-service", "err-unsupported", "hole-apigateway", "hole-s3", "web-2az-en", "web-2az-ja", "web-2az-ja-right",
+            "web-3az-en", "web-3az-en-right", "web-3az-ja", "web-attach-en",
         ]
     );
 }
