@@ -230,7 +230,7 @@ mod tests {
 
     // Fails if a diagram of the new layout handed to the checker cannot be laid out or breaks a line.
     /// With `ARCHWIRE_GEN_OUT=<dir>`, removes the `v<number>-<axis>` files a run left there, then
-    /// writes each input drawn with the new layout along both axes as `<dir>/v<number>-<axis>.drawio`
+    /// writes each input drawn along both axes (a definition by `compile`, a model built by hand by the same layout) as `<dir>/v<number>-<axis>.drawio`
     /// and `<dir>/v<number>-<axis>.yaml`: the definition with its direction written, or one comment
     /// line naming a model built by hand. Without it, only draws them.
     #[test]
@@ -259,16 +259,22 @@ mod tests {
         for (k, (src, model)) in picked.iter().enumerate() {
             for (axis, way) in [(Axis::Right, "right"), (Axis::Down, "down")] {
                 let name = format!("v{:02}-{way}", k + 1);
-                let (m, d, yaml) = match src {
+                // A definition goes through compile, with its direction written; a model built
+                // by hand is laid out, routed and written the way compile does.
+                let (drawn, yaml) = match src {
                     Ok(s) => {
                         let s = with_direction(s, way);
-                        let (m, d) = grid(&s);
-                        assert_eq!(m.direction, Some(axis), "{name}");
-                        (m, d, s)
+                        assert_eq!(grid(&s).0.direction, Some(axis), "{name}");
+                        let out = crate::compile(&s);
+                        let drawn = match out.drawio {
+                            Some(x) if out.diagnostics.errors.is_empty() => Ok((x, out.diagnostics.notes)),
+                            _ => Err(out.diagnostics.errors),
+                        };
+                        (drawn, s)
                     }
-                    Err(hand) => (model.clone(), Diagnostics::default(), format!("# hand-built model: {hand}\n")),
+                    Err(hand) => (crate::arranged_drawio(model, &Diagnostics::default(), &r, axis), format!("# hand-built model: {hand}\n")),
                 };
-                match crate::arranged_drawio(&m, &d, &r, axis) {
+                match drawn {
                     Ok((x, notes)) => {
                         let broken: Vec<&String> = notes.iter().filter(|n| n.contains("edge-")).collect();
                         if !broken.is_empty() {

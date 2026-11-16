@@ -1693,7 +1693,7 @@ set:
     }
 
     /// With `ARCHWIRE_GEN_OUT=<dir>`, removes the numbered files a run left there, then writes
-    /// each picked definition as `<dir>/<number>.yaml` and what `compile` makes of it as
+    /// each picked definition, with `direction: right` written, as `<dir>/<number>.yaml` and what `compile` makes of it as
     /// `<dir>/<number>.drawio` and `<dir>/<number>.json`, for `tools/check_generated.sh`.
     /// Without it, only compiles them. Every one must give a diagram.
     #[test]
@@ -1723,6 +1723,11 @@ set:
         }
         let mut failed: Vec<String> = Vec::new();
         for (i, src) in &picked {
+            // Written to run right, as these diagrams have always been drawn; down is checked by the other tests.
+            let src = &match src.find("set:\n") {
+                Some(at) => format!("{}  direction: right\n{}", &src[..at + 5], &src[at + 5..]),
+                None => format!("{src}set:\n  direction: right\n"),
+            };
             let out = crate::compile(src);
             let d = &out.diagnostics;
             if out.drawio.is_none() || d.exit_code() != 0 || d.notes.iter().any(|n| n.contains("edge-")) {

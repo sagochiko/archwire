@@ -35,7 +35,7 @@ pub fn versions() -> Versions {
     Versions { archwire: env!("CARGO_PKG_VERSION").to_string(), rules: Rules::builtin().version }
 }
 
-/// parse, infer, layout, route, write. Errors give no diagram; holes still do.
+/// parse, infer, arrange, route, write. Errors give no diagram; holes still do.
 pub fn compile(def_text: &str) -> Output {
     let rules = Rules::builtin();
     let stop = |errors| {
@@ -46,37 +46,25 @@ pub fn compile(def_text: &str) -> Output {
         Ok(d) => d,
         Err(errors) => return stop(errors),
     };
-    // Which layout the definition goes through is decided here, once: the VPC layout (Grid) or
-    // the layout without a VPC (Flow). Nothing after this point decides it again; the writer is
-    // told through its arguments. A definition mixing VPC parts with services kept apart from
-    // them stops here.
-    match engine::pick(&def, &rules) {
-        Err(errors) => stop(errors),
-        Ok(Engine::Grid) => {
-            let (model, mut diagnostics) = infer::infer(&def, &rules);
-            let Some(model) = model else {
-                return Output { drawio: None, diagnostics };
-            };
-            let layout = layout::layout(&model, &rules);
-            let (wires, notes) = route::route(&model, &layout, &rules);
-            diagnostics.notes.extend(notes);
-            let drawio = drawio::write(&model, &layout, &wires, &diagnostics, &rules, true);
-            Output { drawio: Some(drawio), diagnostics }
-        }
-        Ok(Engine::Flow) => {
-            let (model, diagnostics) = flow_infer::infer(&def, &rules);
-            let Some(model) = model else {
-                return Output { drawio: None, diagnostics };
-            };
-            let placed = place::place(&model, &rules);
-            flow_output(&model, placed, diagnostics, &rules)
-        }
-    }
+    // Which inference the definition goes through is decided here, once: the one for a VPC
+    // (Grid) or the one without (Flow). Both models are then laid out, routed and written the
+    // same way. A definition mixing VPC parts with services kept apart from them stops here.
+    let (model, diagnostics) = match engine::pick(&def, &rules) {
+        Err(errors) => return stop(errors),
+        Ok(Engine::Grid) => infer::infer(&def, &rules),
+        Ok(Engine::Flow) => flow_infer::infer(&def, &rules),
+    };
+    let Some(model) = model else {
+        return Output { drawio: None, diagnostics };
+    };
+    let axis = model.direction.unwrap_or_else(|| arrange::default_axis(&model));
+    let placed = arrange::arrange(&model, &rules, axis);
+    flow_output(&model, placed, diagnostics, &rules)
 }
 
-/// The rest of the layout without a VPC once the parts are placed: a layout that failed its
-/// checks gives its errors and no diagram; otherwise the lines are routed from the placement's
-/// plans and associations are written without arrowheads.
+/// The rest of the layout once the parts are placed: a layout that failed its checks gives its
+/// errors and no diagram; otherwise the lines are routed from the placement's drafts and
+/// associations are written without arrowheads.
 fn flow_output(model: &Model, placed: Result<Placement, Vec<Problem>>, mut diagnostics: Diagnostics, rules: &Rules) -> Output {
     let p = match placed {
         Ok(p) => p,
@@ -158,10 +146,12 @@ mod tests {
         assert!(line(&x, "edge-lambda-to-cloudwatch").contains("endArrow=block"));
     }
 
+    // Fails if an association in a definition with a VPC gets an arrowhead.
     #[test]
-    fn the_web_layout_keeps_its_association_arrows() {
+    fn web_associations_are_drawn_without_arrows() {
         let x = compile("flows:\n  - user -> cloudfront -> alb -> ecs\n  - waf -- cloudfront\n").drawio.unwrap();
-        assert!(line(&x, "edge-waf-to-cloudfront").contains("endArrow=block"));
+        let waf = line(&x, "edge-waf-to-cloudfront");
+        assert!(waf.contains("endArrow=none") && !waf.contains("endArrow=block"), "{waf}");
     }
 
     #[test]
@@ -362,6 +352,199 @@ mod tests {
         for src in [rest, wide.as_str(), API] {
             assert_eq!(main_lines_across_side_lines(src), Vec::<String>::new(), "{src}");
         }
+    }
+
+    /// The fixed web examples: definitions with a VPC that give a diagram.
+    const WEB_EXAMPLES: [&str; 10] = [
+        include_str!("../../../tests/cases/aux-to-side/def.yaml"),
+        include_str!("../../../tests/cases/endpoint-3az-en/def.yaml"),
+        include_str!("../../../tests/cases/endpoint-3az-ja/def.yaml"),
+        include_str!("../../../tests/cases/endpoint-ja/def.yaml"),
+        include_str!("../../../tests/cases/hole-s3/def.yaml"),
+        include_str!("../../../tests/cases/web-2az-en/def.yaml"),
+        include_str!("../../../tests/cases/web-2az-ja/def.yaml"),
+        include_str!("../../../tests/cases/web-3az-en/def.yaml"),
+        include_str!("../../../tests/cases/web-3az-ja/def.yaml"),
+        include_str!("../../../tests/cases/web-attach-en/def.yaml"),
+    ];
+
+    /// Definitions with a VPC used by the tests of inference, the old grid layout and its routing.
+    const VPC_TEST_DEFINITIONS: [&str; 42] = [
+        "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n",
+        "flows:\n  - user -> alb -> ecs -> aurora\nset:\n  azs: 3\n",
+        "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\n",
+        "flows:\n  - user -> alb -> ecs\n  - cloudfront -> s3\n  - user -> cloudfront\n  - ecs -> s3\n",
+        "flows:\n  - user -> alb -> ecs\n  - ecs -> internet\n",
+        "flows:\n  - user -> alb -> ecs\n  - ecs -> internet\nset:\n  nat: single\n",
+        "flows:\n  - user -> alb -> ecs\n  - ecs ~> cloudwatch\n",
+        "flows:\n  - user -> alb -> aurora\n",
+        "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - cloudfront -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\n  - acm -- cloudfront\n",
+        "flows:\n  - user -> cloudfront -> alb -> ecs\n  - alb ~> s3\n  - cloudfront ~> s3\n",
+        "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\nchoose:\n  route.ecs.s3: endpoint\n",
+        "flows:\n  - user -> alb -> ecs -> aurora\n",
+        "flows:\n  - user -> alb -> ecs -> aurora\n  - aurora -> ecs\n",
+        "flows:\n  - user -> cloudfront -> alb -> ecs\n",
+        "flows:\n  - user -> cloudfront -> alb -> ecs\n  - waf -- cloudfront\n  - acm -- cloudfront\n",
+        "flows:\n  - user -> cloudfront -> alb -> ecs\n  - user ~> alb\n",
+        "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - user -> alb\n  - cloudfront -> s3\n  - cloudfront ~> cloudwatch\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n  - ecs -> internet\n  - waf -- cloudfront\n  - acm -- cloudfront\nchoose:\n  route.ecs.s3: endpoint\n",
+        "flows:\n  - user -> cloudfront -> alb -> ecs\n  - cloudfront -> s3.web\n",
+        "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\nset:\n  lang: ja\n",
+        "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\n  - ecs ~> cloudwatch\nset:\n  lang: ja\n",
+        "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\nchoose:\n  route.ecs.s3: endpoint\nset:\n  lang: ja\n",
+        "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\n",
+        "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\nset:\n  azs: 3\n",
+        "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n",
+        "flows:\n  - user -> alb -> ecs\n  - alb ~> cloudwatch\n",
+        "flows:\n  - user -> alb -> ecs -> aurora\n  - ecs ~> cloudwatch\n",
+        "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\n",
+        "flows:\n  - user -> alb -> ecs -> s3\nset:\n  lang: ja\nchoose:\n  route.ecs.s3: endpoint\n",
+        "flows:\n  - user -> alb -> ecs -> s3\nset:\n  lang: ja\n  azs: 3\nchoose:\n  route.ecs.s3: endpoint\n",
+        "flows:\n  - user -> alb -> ecs -> s3\n  - ecs ~> cloudwatch\nset:\n  lang: ja\nchoose:\n  route.ecs.s3: endpoint\n",
+        "flows:\n  - user -> alb -> ecs -> s3\n  - ecs ~> cloudwatch\nset:\n  lang: ja\n  azs: 3\nchoose:\n  route.ecs.s3: endpoint\n",
+        "flows:\n  - user -> alb -> ecs -> aurora\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n  - aurora ~> cloudwatch\n  - ecs -> internet\nset:\n  azs: 3\n  lang: en\n  nat: per-az\nchoose:\n  route.ecs.s3: endpoint\n",
+        "flows:\n  - user -> alb -> ecs -> aurora\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n  - aurora ~> cloudwatch\n  - ecs -> internet\nset:\n  azs: 3\n  lang: ja\n  nat: per-az\nchoose:\n  route.ecs.s3: endpoint\n",
+        "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora -> s3\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n  - alb ~> s3\nchoose:\n  route.aurora.s3: endpoint\n",
+        "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\nset:\n  azs: 3\n  lang: ja\nchoose:\n  route.ecs.s3: nat\n",
+        "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\nset:\n  azs: 3\n  lang: ja\nchoose:\n  route.ecs.s3: endpoint\n",
+        "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\n  - acm -- cloudfront\n  - ecs -> internet\n",
+        "flows:\n  - user -> alb -> ecs -> aurora\n  - ecs -> s3\nchoose:\n  route.ecs.s3: nat\n",
+        "flows:\n  - user -> alb -> ecs -> aurora\n  - alb -> aurora\n  - aurora ~> cloudwatch\n  - alb ~> s3\nset:\n  azs: 3\n",
+        "flows:\n  - user -> cloudfront -> alb -> ecs\n  - acm -- cloudfront\n  - waf -- cloudfront\n  - cloudfront -> s3\n  - cloudfront ~> cloudwatch\n",
+        "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\nset:\n  azs: 3\n  lang: ja\n  readers: 1\n",
+        "flows:\n  - user -> alb -> ecs -> aurora\n  - aurora -> ecs\n  - aurora -> s3\nset:\n  azs: 3\n  readers: 1\nchoose:\n  route.aurora.s3: endpoint\n",
+    ];
+
+    /// Two zones in Japanese with lines from ECS and Aurora to S3 and the side column: crowded, as in the routing tests.
+    const CROWDED_S3_JA: &str = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - cloudfront ~> cloudwatch\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - aurora ~> cloudwatch\n  - waf -- cloudfront\n  - acm -- cloudfront\n  - aurora -> s3\n  - alb ~> s3\nset:\n  azs: 2\n  lang: ja\n  nat: per-az\nchoose:\n  route.ecs.s3: endpoint\n  route.aurora.s3: nat\n";
+
+    /// Two zones in English with lines from every part to S3 and CloudWatch: crowded, as in the routing tests.
+    const CROWDED_SIDE_EN: &str = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - cloudfront -> s3\n  - cloudfront ~> cloudwatch\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n  - aurora ~> cloudwatch\n  - ecs -> internet\n  - waf -- cloudfront\n  - acm -- cloudfront\n  - user -> alb\n  - aurora -> s3\n  - alb ~> s3\n  - ecs ~> s3\nset:\n  azs: 2\n  lang: en\n  nat: per-az\nchoose:\n  route.aurora.s3: nat\n";
+
+    /// The heavy definition of the routing tests with each of its settings.
+    fn heavy_variants() -> Vec<String> {
+        let heavy = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - user -> alb\n  - cloudfront -> s3\n  - cloudfront ~> cloudwatch\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n  - ecs -> internet\n  - waf -- cloudfront\n  - acm -- cloudfront\nchoose:\n  route.ecs.s3: endpoint\n";
+        let single = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\n  - acm -- cloudfront\n  - ecs -> internet\n";
+        let mut out = Vec::new();
+        for extra in ["", "set:\n  azs: 3\n", "set:\n  nat: single\n", "set:\n  azs: 3\n  nat: single\n", "set:\n  lang: ja\n"] {
+            out.push(format!("{heavy}{extra}"));
+            out.push(format!("{single}{extra}"));
+        }
+        out
+    }
+
+    /// The definitions whose diagnostics must not change with the layout: every definition with a
+    /// VPC above that gives a model, but none that writes a direction or has three zones with fewer Readers.
+    fn kept_definitions() -> Vec<(String, Model, Diagnostics)> {
+        let rules = Rules::builtin();
+        let mut out = Vec::new();
+        let all = WEB_EXAMPLES.iter().chain(VPC_TEST_DEFINITIONS.iter()).map(|s| s.to_string()).chain(heavy_variants());
+        for src in all {
+            let def = def::parse(&src).unwrap();
+            if !matches!(engine::pick(&def, &rules), Ok(Engine::Grid)) || def.set.contains_key("direction") {
+                continue;
+            }
+            if def.set.get("azs").map(String::as_str) == Some("3") && def.set.contains_key("readers") {
+                continue;
+            }
+            let (model, d) = infer::infer(&def, &rules);
+            if let Some(m) = model {
+                if !out.iter().any(|(s, _, _): &(String, Model, Diagnostics)| *s == src) {
+                    out.push((src, m, d));
+                }
+            }
+        }
+        out
+    }
+
+    // Fails if the new layout drops the note on lines merged across zones, or breaks a line the old layout drew whole.
+    // CROWDED_S3_JA and CROWDED_SIDE_EN are left out: the old layout cannot draw them without faults either.
+    #[test]
+    fn old_and_new_layouts_give_the_same_diagnostics() {
+        let rules = Rules::builtin();
+        let kept = kept_definitions();
+        assert!(kept.len() >= 40, "{}", kept.len());
+        assert!(kept.iter().all(|(s, _, _)| s != CROWDED_S3_JA && s != CROWDED_SIDE_EN));
+        let mut differ = Vec::new();
+        for (src, model, d) in &kept {
+            let mut old = d.clone();
+            let layout = layout::layout(model, &rules);
+            old.notes.extend(route::route(model, &layout, &rules).1);
+            for axis in [model::Axis::Down, model::Axis::Right] {
+                let mut new = d.clone();
+                match arranged_drawio(model, d, &rules, axis) {
+                    Ok((_, notes)) => new.notes.extend(notes),
+                    Err(e) => new.errors.extend(e),
+                }
+                if old.to_json() != new.to_json() {
+                    differ.push(format!("{axis:?}\n{src}old notes: {:?}\nnew notes: {:?}\nnew errors: {:?}", old.notes, new.notes, new.errors));
+                }
+            }
+        }
+        assert!(differ.is_empty(), "{} differ:\n{}", differ.len(), differ.join("\n----\n"));
+    }
+
+    /// The lines the new layout cannot draw clear in the crowded definitions, by axis. Down:
+    /// CROWDED_S3_JA's side line from the load balancer to S3. Right: CROWDED_SIDE_EN's line from
+    /// ECS in the second zone to S3. No more than these may break, and each is named in a note.
+    const CROWDED_BROKEN: [(&str, model::Axis, &[&str]); 4] = [
+        ("s3-ja", model::Axis::Down, &["edge-alb-to-s3"]),
+        ("side-en", model::Axis::Down, &[]),
+        ("s3-ja", model::Axis::Right, &[]),
+        ("side-en", model::Axis::Right, &["edge-ecs-1c-to-s3"]),
+    ];
+
+    // Fails if a crowded definition cannot be laid out, or a line it cannot draw is not named in a note, or more lines break.
+    #[test]
+    fn crowded_definitions_name_every_line_they_cannot_draw() {
+        let rules = Rules::builtin();
+        for (name, axis, want) in CROWDED_BROKEN {
+            let src = if name == "s3-ja" { CROWDED_S3_JA } else { CROWDED_SIDE_EN };
+            let (model, d) = infer::infer(&def::parse(src).unwrap(), &rules);
+            let model = model.unwrap();
+            let (_, notes) = arranged_drawio(&model, &d, &rules, axis).unwrap_or_else(|e| panic!("{name} {axis:?}: {e:?}"));
+            let mut named: Vec<String> = notes
+                .iter()
+                .filter_map(|n| n.split_whitespace().find(|w| w.starts_with("edge-")).map(String::from))
+                .collect();
+            named.sort();
+            named.dedup();
+            assert_eq!(named, want.iter().map(|s| s.to_string()).collect::<Vec<_>>(), "{name} {axis:?}: {notes:?}");
+        }
+    }
+
+    // Fails if a line from a zone without a Reader stops naming the zones it comes from, or the fallback note is missing or doubled.
+    #[test]
+    fn fewer_readers_name_their_zones() {
+        let src = "flows:\n  - user -> alb -> ecs -> aurora\n  - aurora -> ecs\n  - aurora -> s3\nset:\n  azs: 3\n  readers: 1\nchoose:\n  route.aurora.s3: endpoint\n";
+        let out = compile(src);
+        assert_eq!(out.diagnostics.exit_code(), 0, "{:?}", out.diagnostics.errors);
+        let x = out.drawio.unwrap();
+        let to_s3: Vec<&str> = x.lines().filter(|l| l.contains("<mxCell") && l.contains("edge=\"1\"") && l.contains("target=\"s3\"")).collect();
+        assert_eq!(to_s3.len(), 1, "{to_s3:?}");
+        assert!(to_s3[0].contains("(from 1a, 1c)") && !to_s3[0].contains("(all AZs)"), "{}", to_s3[0]);
+        let fallback = |n: &str| {
+            let mut rest = n.strip_prefix("In ").unwrap_or("");
+            for piece in [", ", " has no ", " in its own zone, so the line from ", " in another zone is drawn."] {
+                match rest.find(piece) {
+                    Some(at) => rest = &rest[at + piece.len()..],
+                    None => return false,
+                }
+            }
+            rest.is_empty()
+        };
+        let notes = &out.diagnostics.notes;
+        assert_eq!(notes.iter().filter(|n| fallback(n)).count(), 1, "{notes:?}");
+    }
+
+    // Fails if writing a direction changes anything but the picture, or does not change the picture.
+    #[test]
+    fn direction_changes_the_picture_only() {
+        let web = WEB_EXAMPLES[6];
+        assert!(web.contains("set:\n  lang: ja\n"));
+        let [right, down] = ["right", "down"].map(|way| compile(&web.replace("set:\n", &format!("set:\n  direction: {way}\n"))));
+        assert_eq!(right.diagnostics.to_json(), down.diagnostics.to_json());
+        assert!(right.drawio.is_some() && down.drawio.is_some());
+        assert_ne!(right.drawio, down.drawio);
     }
 
     #[test]

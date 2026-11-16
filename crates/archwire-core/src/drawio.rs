@@ -196,6 +196,17 @@ pub(crate) fn escape(s: &str) -> String {
 mod tests {
     const WEB2: &str = "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\n";
 
+    /// The diagram the grid layout and its router give for a definition with a VPC: fixed
+    /// coordinates and label spots the writer's output is checked against.
+    fn grid_drawio(src: &str) -> String {
+        let rules = crate::rules::Rules::builtin();
+        let (model, d) = crate::infer::infer(&crate::def::parse(src).unwrap(), &rules);
+        let model = model.unwrap();
+        let layout = crate::layout::layout(&model, &rules);
+        let (wires, _) = crate::route::route(&model, &layout, &rules);
+        super::write(&model, &layout, &wires, &d, &rules, true)
+    }
+
     #[test]
     fn output_is_byte_identical_across_runs() {
         let (a, b) = (crate::compile(WEB2), crate::compile(WEB2));
@@ -253,7 +264,7 @@ mod tests {
 
     #[test]
     fn coordinates_are_relative_to_the_parent_frame() {
-        let x = crate::compile(WEB2).drawio.unwrap();
+        let x = grid_drawio(WEB2);
         let ecs = x.split("<object ").find(|s| s.starts_with("id=\"ecs-1a\"")).unwrap();
         assert!(ecs.contains("parent=\"pri-1a\"") && ecs.contains("x=\"145\" y=\"50\" width=\"60\" height=\"60\""));
     }
@@ -281,7 +292,7 @@ mod tests {
     #[test]
     fn a_moved_label_is_written_with_its_position_and_side() {
         assert_eq!([0, 250, 500, 661, 1000].map(super::relative), ["-1", "-0.5", "0", "0.322", "1"]);
-        let x = crate::compile(&format!("{WEB2}set:\n  lang: ja\n")).drawio.unwrap();
+        let x = grid_drawio(&format!("{WEB2}set:\n  lang: ja\n"));
         let line = |id: &str| x.lines().find(|l| l.contains(&format!("id=\"{id}\""))).unwrap().to_string();
         // Moved onto the stretch inside the private subnet, above it and centred.
         let nat = line("edge-ecs-1c-to-nat-1c");
