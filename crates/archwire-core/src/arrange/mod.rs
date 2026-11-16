@@ -153,7 +153,7 @@ mod tests {
 
     /// The diagrams written for viewing: (file name stem, input name). Each is written with lines
     /// running right and with lines running down.
-    const SAMPLES: [(&str, &str); 17] = [
+    const SAMPLES: [(&str, &str); 25] = [
         ("web-2az-ja", "web-2az-ja"),
         ("web-3az-ja", "web-3az-ja"),
         ("mix", "mix-min"),
@@ -171,7 +171,48 @@ mod tests {
         ("samerow", "mix-same-row"),
         ("shared", "mix-shared"),
         ("longnames", "mix-long"),
+        ("mix-vpc-ja", "mix-vpc-ja"),
+        ("mix-nat-ja", "mix-nat-ja"),
+        ("mix-web-ja", "mix-web-ja"),
+        ("mix-logs-ja", "mix-logs-ja"),
+        ("web-named-ja", "web-named-ja"),
+        ("mix-3az-ja", "mix-3az-ja"),
+        ("fn-before-web-3az-ja", "fn-before-web-3az-ja"),
+        ("mix-beside-ja", "mix-beside-ja"),
     ];
+
+    /// A definition with one more line in its settings.
+    fn with_setting(src: &str, line: &str) -> String {
+        match src.find("set:\n") {
+            Some(at) => format!("{}  {line}\n{}", &src[..at + 5], &src[at + 5..]),
+            None => format!("{src}set:\n  {line}\n"),
+        }
+    }
+
+    /// The sample definitions mixing serverless parts with VPC parts, and naming VPC parts, each
+    /// written in Japanese: (input name, definition). They go through the inference `compile`
+    /// uses, so each carries its real reasons and holes.
+    fn vpc_samples() -> Vec<(&'static str, String)> {
+        use crate::test_inputs::{MIX_LOGS, MIX_NAT, MIX_SMALLEST, MIX_WEB, TWIN_APPS};
+        let named = super::generated::mixed_representatives();
+        let before = &named.iter().find(|(n, _)| *n == "function-before-web-3az").expect("a named input").1;
+        // One generated shape with a function outside the VPC beside it and a part right of it.
+        let beside = super::generated::generated_mixed()[14].replace("  lang: en\n", "  lang: ja\n");
+        let samples = vec![
+            ("mix-vpc-ja", MIX_SMALLEST.to_string()),
+            ("mix-nat-ja", MIX_NAT.to_string()),
+            ("mix-web-ja", MIX_WEB.to_string()),
+            ("mix-logs-ja", with_setting(MIX_LOGS, "lang: ja")),
+            ("web-named-ja", with_setting(TWIN_APPS, "lang: ja")),
+            ("mix-3az-ja", with_setting(MIX_SMALLEST, "azs: 3")),
+            ("fn-before-web-3az-ja", with_setting(before, "lang: ja")),
+            ("mix-beside-ja", beside),
+        ];
+        for (name, src) in &samples {
+            assert_eq!(src.matches("lang: ja").count(), 1, "{name}\n{src}");
+        }
+        samples
+    }
 
     // Fails if a model that writes no direction is drawn along any axis but down, with a VPC or without.
     #[test]
@@ -344,8 +385,9 @@ mod tests {
 
     // With the folder given, fails if a sample cannot be laid out or a line breaks or leaves its draft.
     /// With `ARCHWIRE_SAMPLE_OUT=<dir>`, writes each sample as `<dir>/<name>-right.drawio` and
-    /// `<dir>/<name>-down.drawio`, for the diagram checker, and `<dir>/notes.tsv` with the router's
-    /// notes of each diagram. Without it, does nothing.
+    /// `<dir>/<name>-down.drawio`, for the diagram checker, `<dir>/<name>.yaml` with the definition
+    /// of each sample taken from a definition, and `<dir>/notes.tsv` with the router's notes of
+    /// each diagram. Without it, does nothing.
     #[test]
     fn sample_diagrams() {
         let Some(dir) = std::env::var_os("ARCHWIRE_SAMPLE_OUT") else { return };
@@ -357,6 +399,12 @@ mod tests {
         for (name, src) in API_CASES {
             let (m, d) = crate::flow_infer::infer(&crate::def::parse(src).unwrap(), &r);
             models.push((name.to_string(), m.unwrap_or_else(|| panic!("{name}: {:?}", d.errors)), d));
+        }
+        for (name, src) in vpc_samples() {
+            let (m, d) = crate::inference::infer(&crate::def::parse(&src).unwrap(), &r);
+            assert!(d.errors.is_empty(), "{name}: {:?}\n{src}", d.errors);
+            models.push((name.to_string(), m.unwrap_or_else(|| panic!("{name}\n{src}")), d));
+            std::fs::write(dir.join(format!("{name}.yaml")), &src).unwrap();
         }
         let mut report = String::from("diagram\tnotes\tbroken\tall notes\n");
         let mut broken_files = Vec::new();
