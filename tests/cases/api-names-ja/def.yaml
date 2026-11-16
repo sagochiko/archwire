@@ -3,4 +3,5 @@ flows:
   - user -> apigateway(http) -> lambda -> dynamodb
   - lambda -> s3.uploads
 set:
+  direction: right
   lang: ja

@@ -6,4 +6,5 @@ flows:
   - waf -- cloudfront
   - acm -- cloudfront
 set:
+  direction: right
   lang: en

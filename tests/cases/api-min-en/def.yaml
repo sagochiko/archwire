@@ -1,2 +1,4 @@
 flows:
   - user -> apigateway(http) -> lambda
+set:
+  direction: right

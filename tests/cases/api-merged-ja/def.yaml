@@ -6,4 +6,5 @@ flows:
   - lambda.users ~> cloudwatch
   - lambda.search ~> cloudwatch
 set:
+  direction: right
   lang: ja

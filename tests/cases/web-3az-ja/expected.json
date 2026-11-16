@@ -1,7 +1,7 @@
 {
   "versions": {
     "archwire": "0.1.0",
-    "rules": "2026.11.2"
+    "rules": "2026.11.3"
   },
   "derived": [
     {
@@ -10,6 +10,14 @@
       "kind": "default",
       "rule": "resources-inside-aws-cloud-frame",
       "reason": "AWS のリソースは AWS Cloud の枠の中に描く。",
+      "source": null
+    },
+    {
+      "target": "region",
+      "added": true,
+      "kind": "default",
+      "rule": "resources-inside-region-frame",
+      "reason": "リージョンに属する AWS のリソースは、そのリージョンの枠の中に描く。",
       "source": null
     },
     {
@@ -47,7 +55,7 @@
     {
       "target": "cloudfront",
       "added": false,
-      "kind": "constraint",
+      "kind": "default",
       "rule": "global-service-outside-region",
       "reason": "AWS は Amazon CloudFront と AWS WAF for CloudFront を、リソースがリージョンに属さないグローバルサービスに挙げている。archwire はグローバルサービスを AWS Cloud の枠の中、リージョンの枠の外に描く。",
       "source": "https://docs.aws.amazon.com/whitepapers/latest/aws-fault-isolation-boundaries/global-services.html"

@@ -1,3 +1,5 @@
 flows:
   - user -> cloudfront
   - waf -- cloudfront
+set:
+  direction: right

@@ -1,7 +1,7 @@
 {
   "versions": {
     "archwire": "0.1.0",
-    "rules": "2026.11.2"
+    "rules": "2026.11.3"
   },
   "derived": [
     {
@@ -15,7 +15,7 @@
     {
       "target": "cloudfront",
       "added": false,
-      "kind": "constraint",
+      "kind": "default",
       "rule": "global-service-outside-region",
       "reason": "AWS lists Amazon CloudFront and AWS WAF for CloudFront among the global services, whose resources are not Region-specific. archwire draws global services inside the AWS Cloud frame and outside the Region frame.",
       "source": "https://docs.aws.amazon.com/whitepapers/latest/aws-fault-isolation-boundaries/global-services.html"
@@ -23,7 +23,7 @@
     {
       "target": "waf",
       "added": false,
-      "kind": "constraint",
+      "kind": "default",
       "rule": "global-service-outside-region",
       "reason": "AWS lists Amazon CloudFront and AWS WAF for CloudFront among the global services, whose resources are not Region-specific. archwire draws global services inside the AWS Cloud frame and outside the Region frame.",
       "source": "https://docs.aws.amazon.com/whitepapers/latest/aws-fault-isolation-boundaries/global-services.html"
