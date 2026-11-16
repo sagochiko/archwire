@@ -368,8 +368,9 @@ mod tests {
         include_str!("../../../tests/cases/web-attach-en/def.yaml"),
     ];
 
-    /// Definitions with a VPC used by the tests of inference, the old grid layout and its routing.
-    const VPC_TEST_DEFINITIONS: [&str; 42] = [
+    /// Definitions with a VPC from the tests of inference, the old grid layout and its routing that
+    /// are accepted, each once and none of them among the web examples or the heavy variants.
+    const VPC_TEST_DEFINITIONS: [&str; 27] = [
         "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n",
         "flows:\n  - user -> alb -> ecs -> aurora\nset:\n  azs: 3\n",
         "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\n",
@@ -377,41 +378,26 @@ mod tests {
         "flows:\n  - user -> alb -> ecs\n  - ecs -> internet\n",
         "flows:\n  - user -> alb -> ecs\n  - ecs -> internet\nset:\n  nat: single\n",
         "flows:\n  - user -> alb -> ecs\n  - ecs ~> cloudwatch\n",
-        "flows:\n  - user -> alb -> aurora\n",
         "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - cloudfront -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\n  - acm -- cloudfront\n",
         "flows:\n  - user -> cloudfront -> alb -> ecs\n  - alb ~> s3\n  - cloudfront ~> s3\n",
         "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\nchoose:\n  route.ecs.s3: endpoint\n",
         "flows:\n  - user -> alb -> ecs -> aurora\n",
         "flows:\n  - user -> alb -> ecs -> aurora\n  - aurora -> ecs\n",
         "flows:\n  - user -> cloudfront -> alb -> ecs\n",
-        "flows:\n  - user -> cloudfront -> alb -> ecs\n  - waf -- cloudfront\n  - acm -- cloudfront\n",
-        "flows:\n  - user -> cloudfront -> alb -> ecs\n  - user ~> alb\n",
-        "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - user -> alb\n  - cloudfront -> s3\n  - cloudfront ~> cloudwatch\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n  - ecs -> internet\n  - waf -- cloudfront\n  - acm -- cloudfront\nchoose:\n  route.ecs.s3: endpoint\n",
-        "flows:\n  - user -> cloudfront -> alb -> ecs\n  - cloudfront -> s3.web\n",
-        "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\nset:\n  lang: ja\n",
         "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\n  - ecs ~> cloudwatch\nset:\n  lang: ja\n",
         "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\nchoose:\n  route.ecs.s3: endpoint\nset:\n  lang: ja\n",
-        "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\n",
-        "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\nset:\n  azs: 3\n",
         "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n",
         "flows:\n  - user -> alb -> ecs\n  - alb ~> cloudwatch\n",
         "flows:\n  - user -> alb -> ecs -> aurora\n  - ecs ~> cloudwatch\n",
         "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\n",
-        "flows:\n  - user -> alb -> ecs -> s3\nset:\n  lang: ja\nchoose:\n  route.ecs.s3: endpoint\n",
         "flows:\n  - user -> alb -> ecs -> s3\nset:\n  lang: ja\n  azs: 3\nchoose:\n  route.ecs.s3: endpoint\n",
         "flows:\n  - user -> alb -> ecs -> s3\n  - ecs ~> cloudwatch\nset:\n  lang: ja\nchoose:\n  route.ecs.s3: endpoint\n",
         "flows:\n  - user -> alb -> ecs -> s3\n  - ecs ~> cloudwatch\nset:\n  lang: ja\n  azs: 3\nchoose:\n  route.ecs.s3: endpoint\n",
-        "flows:\n  - user -> alb -> ecs -> aurora\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n  - aurora ~> cloudwatch\n  - ecs -> internet\nset:\n  azs: 3\n  lang: en\n  nat: per-az\nchoose:\n  route.ecs.s3: endpoint\n",
-        "flows:\n  - user -> alb -> ecs -> aurora\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n  - aurora ~> cloudwatch\n  - ecs -> internet\nset:\n  azs: 3\n  lang: ja\n  nat: per-az\nchoose:\n  route.ecs.s3: endpoint\n",
-        "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora -> s3\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n  - alb ~> s3\nchoose:\n  route.aurora.s3: endpoint\n",
         "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\nset:\n  azs: 3\n  lang: ja\nchoose:\n  route.ecs.s3: nat\n",
         "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\nset:\n  azs: 3\n  lang: ja\nchoose:\n  route.ecs.s3: endpoint\n",
-        "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\n  - acm -- cloudfront\n  - ecs -> internet\n",
         "flows:\n  - user -> alb -> ecs -> aurora\n  - ecs -> s3\nchoose:\n  route.ecs.s3: nat\n",
         "flows:\n  - user -> alb -> ecs -> aurora\n  - alb -> aurora\n  - aurora ~> cloudwatch\n  - alb ~> s3\nset:\n  azs: 3\n",
         "flows:\n  - user -> cloudfront -> alb -> ecs\n  - acm -- cloudfront\n  - waf -- cloudfront\n  - cloudfront -> s3\n  - cloudfront ~> cloudwatch\n",
-        "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\nset:\n  azs: 3\n  lang: ja\n  readers: 1\n",
-        "flows:\n  - user -> alb -> ecs -> aurora\n  - aurora -> ecs\n  - aurora -> s3\nset:\n  azs: 3\n  readers: 1\nchoose:\n  route.aurora.s3: endpoint\n",
     ];
 
     /// Two zones in Japanese with lines from ECS and Aurora to S3 and the side column: crowded, as in the routing tests.
@@ -432,26 +418,27 @@ mod tests {
         out
     }
 
-    /// The definitions whose diagnostics must not change with the layout: every definition with a
-    /// VPC above that gives a model, but none that writes a direction or has three zones with fewer Readers.
+    /// How many definitions the old and the new layout are compared on: the web examples, the test
+    /// definitions and the heavy variants.
+    const KEPT: usize = 47;
+
+    /// The definitions whose diagnostics must not change with the layout, with their models: the
+    /// fixed lists above, none of which writes a direction or has three zones with fewer Readers.
+    /// Each must go to the grid layout and give a model; one that no longer does fails here by name.
     fn kept_definitions() -> Vec<(String, Model, Diagnostics)> {
         let rules = Rules::builtin();
-        let mut out = Vec::new();
-        let all = WEB_EXAMPLES.iter().chain(VPC_TEST_DEFINITIONS.iter()).map(|s| s.to_string()).chain(heavy_variants());
+        let all: Vec<String> = WEB_EXAMPLES.iter().chain(VPC_TEST_DEFINITIONS.iter()).map(|s| s.to_string()).chain(heavy_variants()).collect();
+        assert_eq!(all.len(), KEPT);
+        let mut out: Vec<(String, Model, Diagnostics)> = Vec::new();
         for src in all {
+            assert!(!out.iter().any(|(s, _, _)| *s == src), "listed twice:\n{src}");
             let def = def::parse(&src).unwrap();
-            if !matches!(engine::pick(&def, &rules), Ok(Engine::Grid)) || def.set.contains_key("direction") {
-                continue;
-            }
-            if def.set.get("azs").map(String::as_str) == Some("3") && def.set.contains_key("readers") {
-                continue;
-            }
+            assert!(matches!(engine::pick(&def, &rules), Ok(Engine::Grid)), "not taken to the grid layout:\n{src}");
+            assert!(!def.set.contains_key("direction"), "writes a direction:\n{src}");
+            assert!(!(def.set.get("azs").map(String::as_str) == Some("3") && def.set.contains_key("readers")), "fewer Readers:\n{src}");
             let (model, d) = infer::infer(&def, &rules);
-            if let Some(m) = model {
-                if !out.iter().any(|(s, _, _): &(String, Model, Diagnostics)| *s == src) {
-                    out.push((src, m, d));
-                }
-            }
+            let m = model.unwrap_or_else(|| panic!("no model: {:?}\n{src}", d.errors));
+            out.push((src, m, d));
         }
         out
     }
@@ -462,7 +449,6 @@ mod tests {
     fn old_and_new_layouts_give_the_same_diagnostics() {
         let rules = Rules::builtin();
         let kept = kept_definitions();
-        assert!(kept.len() >= 40, "{}", kept.len());
         assert!(kept.iter().all(|(s, _, _)| s != CROWDED_S3_JA && s != CROWDED_SIDE_EN));
         let mut differ = Vec::new();
         for (src, model, d) in &kept {
