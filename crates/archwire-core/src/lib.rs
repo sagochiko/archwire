@@ -51,12 +51,13 @@ pub fn compile(def_text: &str) -> Output {
         Err(errors) => return stop(errors),
     };
     // Two shapes are not drawn yet and stop before the inference: a definition mixing VPC parts
-    // with services kept apart from them, and one with a VPC part that names any part after the
-    // dot. Every other definition, with a VPC or without, goes through the one inference.
+    // with services kept apart from them, and one with a VPC that writes two or more parts
+    // spanning its zones. Every other definition, with a VPC or without, goes through the one
+    // inference.
     match engine::pick(&def, &rules) {
         Err(errors) => return stop(errors),
         Ok(Engine::Grid) => {
-            if let Err(errors) = engine::named_vpc_parts(&def, &rules) {
+            if let Err(errors) = engine::spanning_parts(&def, &rules) {
                 return stop(errors);
             }
         }
@@ -525,34 +526,27 @@ mod tests {
         assert_eq!(stops(ID_CLASH), [unsupported("flows[0][1]", Some("apigateway"))]);
     }
 
-    // Today VPC parts with a name after the dot stop, once for each place such a part is written.
-    // Fails if named VPC parts are let through without an error.
+    // Fails if a second part spanning the zones is let through, so a broken diagram or LAYOUT_FAILED comes out.
     #[test]
-    fn named_vpc_parts_stop() {
-        let want = [
-            ("flows[0][2]", "alb.web"),
-            ("flows[0][3]", "ecs.web"),
-            ("flows[0][4]", "aurora.web"),
-            ("flows[1][1]", "alb.admin"),
-            ("flows[1][2]", "ecs.admin"),
-            ("flows[1][3]", "aurora.admin"),
-        ]
-        .map(|(at, got)| unsupported(at, Some(got)));
-        assert_eq!(stops(TWO_WEBS), want);
+    fn two_spanning_parts_stop() {
+        assert_eq!(stops(TWO_WEBS), [unsupported("flows[1][1]", Some("alb.admin"))]);
+        let e = &compile(TWO_WEBS).diagnostics.errors[0];
+        assert_eq!(e.message, "`alb.admin` is a second part spanning the Availability Zones, after `alb.web`; this version draws one such part in a VPC");
     }
 
-    // Today named services behind one unnamed load balancer stop, once for each place a named part is written.
-    // Fails if named VPC parts are let through without an error.
+    // Fails if named VPC parts are still stopped, or a line is drawn to the reader of another named database.
     #[test]
-    fn named_parts_under_one_balancer_stop() {
-        let want = [
-            ("flows[0][3]", "ecs.web"),
-            ("flows[0][4]", "aurora.web"),
-            ("flows[1][1]", "ecs.admin"),
-            ("flows[1][2]", "aurora.admin"),
-        ]
-        .map(|(at, got)| unsupported(at, Some(got)));
-        assert_eq!(stops(TWIN_APPS), want);
+    fn named_parts_under_one_balancer_are_drawn() {
+        for set in ["", "set:\n  direction: right\n"] {
+            let src = format!("{TWIN_APPS}{set}");
+            let out = compile(&src);
+            assert_eq!(out.diagnostics.exit_code(), 0, "{src}: {:?}", out.diagnostics.errors);
+            assert!(out.diagnostics.notes.is_empty(), "{src}: {:?}", out.diagnostics.notes);
+            let x = out.drawio.unwrap_or_else(|| panic!("no diagram for {src}"));
+            object(&x, "aurora.web@1a");
+            object(&x, "aurora.admin@1c");
+            assert!(!x.contains("id=\"edge-aurora.web@1a-to-aurora.admin@1c\""), "{src}");
+        }
     }
 
     // Today a function reaching a database in a VPC stops in every line order, at the first separate service written.
@@ -603,9 +597,21 @@ mod tests {
         }
     }
 
-    // Fails if the check on named parts runs after the other checks, so their errors come with it.
+    // Fails if the check on named parts is left in, so a named part in a VPC definition is reported as well.
     #[test]
     fn named_parts_in_a_vpc_definition_report_only_their_own_errors() {
-        assert_eq!(stops("flows:\n  - user -> cloudfrnt -> alb -> ecs.web\n"), [unsupported("flows[0][3]", Some("ecs.web"))]);
+        let out = compile("flows:\n  - user -> cloudfrnt -> alb -> ecs.web\n");
+        assert!(out.drawio.is_none());
+        let got: Vec<_> = out.diagnostics.errors.iter().map(|e| (e.code.as_str(), e.at.as_deref())).collect();
+        assert_eq!(got, [("UNKNOWN_SERVICE", Some("flows[0][1]"))]);
+    }
+
+    // Fails if a named part outside the VPC is still stopped in a definition with a VPC part.
+    #[test]
+    fn a_named_part_outside_the_vpc_is_drawn() {
+        let src = "flows:\n  - user -> cloudfront -> alb -> ecs\n  - cloudfront -> s3.web\n";
+        let out = compile(src);
+        assert_eq!(out.diagnostics.exit_code(), 0, "{:?}", out.diagnostics.errors);
+        object(&out.drawio.unwrap(), "s3.web");
     }
 }

@@ -3,7 +3,7 @@
 
 use crate::def::{Definition, Ref};
 use crate::diag::Problem;
-use crate::rules::{Rules, Scope};
+use crate::rules::{Place, Rules, Scope};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Engine {
@@ -42,27 +42,29 @@ pub fn pick(def: &Definition, rules: &Rules) -> Result<Engine, Vec<Problem>> {
     }
 }
 
-/// Stops a definition with a VPC part that writes a name after the dot on any part: one error
-/// per position (`Ref.at`) of such a part, as the inference with a VPC used to.
-pub fn named_vpc_parts(def: &Definition, rules: &Rules) -> Result<(), Vec<Problem>> {
-    let refs = || def.links.iter().flat_map(|l| [&l.from, &l.to]);
-    if !refs().any(|r| rules.service(&r.service).is_some_and(|s| s.scope == Scope::Vpc)) {
-        return Ok(());
-    }
-    let mut seen_at: Vec<&str> = Vec::new();
+/// Stops a definition that writes two or more parts spanning the zones of a VPC (`scope = "vpc"`
+/// and `place = "span"` in services.toml): one error per part after the first, at its first position.
+pub fn spanning_parts(def: &Definition, rules: &Rules) -> Result<(), Vec<Problem>> {
+    let mut seen: Vec<&str> = Vec::new();
     let mut errors = Vec::new();
-    for r in refs().filter(|r| r.tag.is_some()) {
-        if seen_at.contains(&r.at.as_str()) {
+    for r in def.links.iter().flat_map(|l| [&l.from, &l.to]) {
+        let Some(s) = rules.service(&r.service) else { continue };
+        if s.scope != Scope::Vpc || s.place != Place::Span || seen.contains(&r.name.as_str()) {
             continue;
         }
-        seen_at.push(&r.at);
-        errors.push(Problem {
-            code: "UNSUPPORTED".into(),
-            at: Some(r.at.clone()),
-            got: Some(r.name.clone()),
-            message: "named parts such as `s3.web` are not supported together with VPC services yet".into(),
-            ..Default::default()
-        });
+        if let Some(first) = seen.first() {
+            errors.push(Problem {
+                code: "UNSUPPORTED".into(),
+                at: Some(r.at.clone()),
+                got: Some(r.name.clone()),
+                message: format!(
+                    "`{}` is a second part spanning the Availability Zones, after `{first}`; this version draws one such part in a VPC",
+                    r.name
+                ),
+                ..Default::default()
+            });
+        }
+        seen.push(&r.name);
     }
     if errors.is_empty() {
         Ok(())
@@ -74,15 +76,28 @@ pub fn named_vpc_parts(def: &Definition, rules: &Rules) -> Result<(), Vec<Proble
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_inputs::TWO_WEBS;
 
-    // Fails if a named part outside the VPC is let through, a position is reported twice, or a definition without a VPC part is stopped.
+    // Fails if the parts that span the zones are told apart by the service's name instead of the services data.
     #[test]
-    fn named_parts_stop_only_with_a_vpc_part() {
-        let e = named_vpc_parts(&crate::def::parse("flows:\n  - user -> alb -> ecs -> s3.web\n  - alb ~> s3.web\n").unwrap(), &Rules::builtin()).unwrap_err();
+    fn the_spanning_check_reads_the_data() {
+        let services = include_str!("../../../rules/aws/services.toml");
+        let rules = include_str!("../../../rules/aws/rules.toml");
+        let labels = include_str!("../../../rules/aws/labels.toml");
+        let links = include_str!("../../../rules/aws/links.toml");
+        assert!(services.contains("key = \"alb\"") && links.contains("= \"alb\""));
+        let renamed = Rules::load(
+            &services.replace("key = \"alb\"", "key = \"balancer\""),
+            rules,
+            labels,
+            &links.replace("from = \"alb\"", "from = \"balancer\"").replace("to = \"alb\"", "to = \"balancer\""),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let def = crate::def::parse(&TWO_WEBS.replace("alb.", "balancer.")).unwrap();
+        let e = spanning_parts(&def, &renamed).unwrap_err();
         let got: Vec<_> = e.iter().map(|p| (p.code.as_str(), p.at.as_deref(), p.got.as_deref())).collect();
-        assert_eq!(got, [("UNSUPPORTED", Some("flows[0][3]"), Some("s3.web")), ("UNSUPPORTED", Some("flows[1][1]"), Some("s3.web"))]);
-        assert_eq!(e[0].message, "named parts such as `s3.web` are not supported together with VPC services yet");
-        assert_eq!(named_vpc_parts(&crate::def::parse("flows:\n  - user -> apigateway(http) -> lambda.a\n").unwrap(), &Rules::builtin()), Ok(()));
+        assert_eq!(got, [("UNSUPPORTED", Some("flows[1][1]"), Some("balancer.admin"))]);
+        assert_eq!(e[0].message, "`balancer.admin` is a second part spanning the Availability Zones, after `balancer.web`; this version draws one such part in a VPC");
     }
 
     fn pick_src(src: &str) -> Result<Engine, Vec<Problem>> {
