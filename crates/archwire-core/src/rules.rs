@@ -80,6 +80,40 @@ pub struct Service {
     /// For a service inference adds: the part it plays at the VPC's edge.
     #[serde(default)]
     pub derived_role: Option<DerivedRole>,
+    /// A main flow to this service is traffic leaving the VPC to the internet; it is not drawn as a part.
+    #[serde(default)]
+    pub egress: bool,
+    /// The reasons the VPC and its zones get when this part is the first in the definition that has them.
+    #[serde(default)]
+    pub vpc_reasons: Option<VpcReasons>,
+    /// The reason a part of this service gets when its traffic leaves the VPC through a NAT gateway.
+    #[serde(default)]
+    pub nat_rule: Option<String>,
+}
+
+/// Rule ids: why a VPC is drawn, why it has its zones, and why it has the default number of them.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VpcReasons {
+    pub vpc: String,
+    pub az: Vec<String>,
+    pub default_azs: String,
+}
+
+/// The roles a line inference adds may join.
+const DERIVED_ROLES: [&str; 5] = ["private", "egress_nat", "entry_gateway", "writer", "reader"];
+
+/// The roles a connection may give a label for, per role of its `to` part.
+const TO_ROLES: [&str; 2] = ["writer", "reader"];
+
+/// A line between parts inference adds: `from` and `to` are roles ("private", "egress_nat", "entry_gateway", "writer", "reader").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DerivedLink {
+    pub from: String,
+    pub to: String,
+    pub rel: Rel,
+    /// A key of labels.toml.
+    pub label: String,
 }
 
 /// The label and the reason a connection gets when its target has a given kind.
@@ -106,6 +140,13 @@ pub struct LinkRule {
     /// The Region the `from` part lives in, and the rule that places it there.
     pub from_region: Option<String>,
     pub from_rule: Option<String>,
+    /// Per role of `to` ("writer", "reader"): the label key of the connection.
+    pub to_role: BTreeMap<String, String>,
+    /// With this connection the `from` part is placed in this subnet tier of the VPC, one copy per zone,
+    /// with `from_subnet_rule` giving why it is in the VPC and `from_copies_rule` why there is one per zone.
+    pub from_subnet: Option<Subnet>,
+    pub from_subnet_rule: Option<String>,
+    pub from_copies_rule: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,6 +201,23 @@ struct LinkRaw {
     from_region: Option<String>,
     #[serde(default)]
     from_rule: Option<String>,
+    #[serde(default)]
+    to_role: BTreeMap<String, String>,
+    #[serde(default)]
+    from_subnet: Option<Subnet>,
+    #[serde(default)]
+    from_subnet_rule: Option<String>,
+    #[serde(default)]
+    from_copies_rule: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DerivedLinkRaw {
+    from: String,
+    to: String,
+    rel: String,
+    label: String,
 }
 
 #[derive(Deserialize)]
@@ -167,6 +225,8 @@ struct LinkRaw {
 struct LinksFile {
     #[serde(default)]
     link: Vec<LinkRaw>,
+    #[serde(default)]
+    derived_link: Vec<DerivedLinkRaw>,
 }
 
 #[derive(Deserialize)]
@@ -182,6 +242,7 @@ pub struct Rules {
     rules: BTreeMap<String, Rule>,
     labels: BTreeMap<String, LabelRaw>,
     links: Vec<LinkRule>,
+    derived_links: Vec<DerivedLink>,
 }
 
 fn problem(code: &str, at: &str, message: String) -> Problem {
@@ -258,8 +319,16 @@ impl Rules {
         }
 
         for s in service_map.values() {
-            if let Some(id) = s.place_rule.as_ref().filter(|id| !rule_map.contains_key(*id)) {
-                problems.push(problem("SERVICE_UNKNOWN_RULE", &s.key, format!("place_rule `{id}` is not in rules.toml")));
+            let named = s
+                .place_rule
+                .iter()
+                .map(|id| ("place_rule", id))
+                .chain(s.nat_rule.iter().map(|id| ("nat_rule", id)))
+                .chain(s.vpc_reasons.iter().flat_map(|v| {
+                    std::iter::once(&v.vpc).chain(v.az.iter()).chain(std::iter::once(&v.default_azs)).map(|id| ("vpc_reasons", id))
+                }));
+            for (field, id) in named.filter(|(_, id)| !rule_map.contains_key(*id)) {
+                problems.push(problem("SERVICE_UNKNOWN_RULE", &s.key, format!("{field} `{id}` is not in rules.toml")));
             }
             // A part in the VPC is drawn in a subnet tier unless it is a gateway on the VPC's edge.
             let in_vpc = s.scope == Scope::Vpc;
@@ -269,21 +338,25 @@ impl Rules {
             if !in_vpc && s.subnet.is_some() {
                 problems.push(problem("SERVICE_SUBNET_OUTSIDE_VPC", &s.key, "only a VPC service may have `subnet`".into()));
             }
+            if !in_vpc && s.vpc_reasons.is_some() {
+                problems.push(problem("SERVICE_VPC_REASONS_OUTSIDE_VPC", &s.key, "only a VPC service may have `vpc_reasons`".into()));
+            }
         }
 
-        let raw_links = match toml::from_str::<LinksFile>(links) {
-            Ok(f) => f.link,
+        let (raw_links, raw_derived) = match toml::from_str::<LinksFile>(links) {
+            Ok(f) => (f.link, f.derived_link),
             Err(e) => {
                 problems.push(problem("LINKS_PARSE", "links.toml", e.to_string()));
-                Vec::new()
+                (Vec::new(), Vec::new())
             }
         };
         let link_list = check_links(raw_links, &service_map, &rule_map, &labels, &mut problems);
+        let derived_links = check_derived_links(raw_derived, &labels, &mut problems);
 
         if !problems.is_empty() {
             return Err(problems);
         }
-        Ok(Rules { version, services: service_map, rules: rule_map, labels, links: link_list })
+        Ok(Rules { version, services: service_map, rules: rule_map, labels, links: link_list, derived_links })
     }
 
     pub fn service(&self, key: &str) -> Option<&Service> {
@@ -314,6 +387,11 @@ impl Rules {
         self.links.iter().find(|l| l.from == from_service && l.to == to_service && l.rel == rel)
     }
 
+    /// The line inference adds from a part of one role to a part of another, if there is one.
+    pub fn derived_link(&self, from_role: &str, to_role: &str) -> Option<&DerivedLink> {
+        self.derived_links.iter().find(|l| l.from == from_role && l.to == to_role)
+    }
+
     /// Whether labels.toml has this key.
     pub fn has_text(&self, key: &str) -> bool {
         self.labels.contains_key(key)
@@ -332,6 +410,18 @@ impl Rules {
 }
 
 /// Every name a link uses must exist in the other files, and each pair and relation is listed once.
+fn parse_rel(rel: &str, at: &str, problems: &mut Vec<Problem>) -> Option<Rel> {
+    match rel {
+        "main" => Some(Rel::Main),
+        "aux" => Some(Rel::Aux),
+        "assoc" => Some(Rel::Assoc),
+        other => {
+            problems.push(problem("LINK_BAD_REL", at, format!("unknown relation `{other}`; use main, aux or assoc")));
+            None
+        }
+    }
+}
+
 fn check_links(
     raw: Vec<LinkRaw>,
     services: &BTreeMap<String, Service>,
@@ -348,16 +438,8 @@ fn check_links(
                 problems.push(problem("LINK_UNKNOWN_SERVICE", &at, format!("unknown service `{key}`")));
             }
         }
-        let rel = match l.rel.as_str() {
-            "main" => Some(Rel::Main),
-            "aux" => Some(Rel::Aux),
-            "assoc" => Some(Rel::Assoc),
-            other => {
-                problems.push(problem("LINK_BAD_REL", &at, format!("unknown relation `{other}`; use main, aux or assoc")));
-                None
-            }
-        };
-        for label in std::iter::once(&l.label).chain(l.to_kind.values().map(|k| &k.label)) {
+        let rel = parse_rel(&l.rel, &at, problems);
+        for label in std::iter::once(&l.label).chain(l.to_kind.values().map(|k| &k.label)).chain(l.to_role.values()) {
             if !labels.contains_key(label) {
                 problems.push(problem("LINK_UNKNOWN_LABEL", &at, format!("label `{label}` is not in labels.toml")));
             }
@@ -367,7 +449,17 @@ fn check_links(
                 problems.push(problem("LINK_UNKNOWN_KIND", &at, format!("`{}` has no kind `{kind}`", l.to)));
             }
         }
-        let named = l.to_kind.values().map(|k| &k.rule).chain(l.max_rule.iter()).chain(l.from_rule.iter());
+        for role in l.to_role.keys().filter(|r| !TO_ROLES.contains(&r.as_str())) {
+            problems.push(problem("LINK_BAD_ROLE", &at, format!("unknown role `{role}` in `to_role`; use writer or reader")));
+        }
+        let named = l
+            .to_kind
+            .values()
+            .map(|k| &k.rule)
+            .chain(l.max_rule.iter())
+            .chain(l.from_rule.iter())
+            .chain(l.from_subnet_rule.iter())
+            .chain(l.from_copies_rule.iter());
         for rule in named {
             if !rules.contains_key(rule) {
                 problems.push(problem("LINK_UNKNOWN_RULE", &at, format!("rule `{rule}` is not in rules.toml")));
@@ -385,6 +477,17 @@ fn check_links(
                 "`max_from` needs `max_rule` and `from_region` needs `from_rule`, and the other way round".into(),
             ));
         }
+        let tier = [l.from_subnet.is_some(), l.from_subnet_rule.is_some(), l.from_copies_rule.is_some()];
+        if tier.contains(&true) && tier.contains(&false) {
+            problems.push(problem(
+                "LINK_BAD_LIMIT",
+                &at,
+                "`from_subnet`, `from_subnet_rule` and `from_copies_rule` are written together or not at all".into(),
+            ));
+        }
+        if l.from_subnet.is_some() && services.get(&l.to).is_some_and(|to| to.scope != Scope::Vpc) {
+            problems.push(problem("LINK_SUBNET_WITHOUT_VPC", &at, format!("`from_subnet` needs `{}` to be a VPC service", l.to)));
+        }
         if let (Some(rel), true) = (rel, problems.len() == before) {
             links.push(LinkRule {
                 from: l.from,
@@ -396,7 +499,35 @@ fn check_links(
                 max_rule: l.max_rule,
                 from_region: l.from_region,
                 from_rule: l.from_rule,
+                to_role: l.to_role,
+                from_subnet: l.from_subnet,
+                from_subnet_rule: l.from_subnet_rule,
+                from_copies_rule: l.from_copies_rule,
             });
+        }
+    }
+    links
+}
+
+/// Every line inference adds joins two known roles, is listed once per pair and has a known label.
+fn check_derived_links(raw: Vec<DerivedLinkRaw>, labels: &BTreeMap<String, LabelRaw>, problems: &mut Vec<Problem>) -> Vec<DerivedLink> {
+    let mut links: Vec<DerivedLink> = Vec::new();
+    for l in raw {
+        let at = format!("derived_link {} {} {}", l.from, l.rel, l.to);
+        let before = problems.len();
+        for role in [&l.from, &l.to].into_iter().filter(|r| !DERIVED_ROLES.contains(&r.as_str())) {
+            let allowed = DERIVED_ROLES.join(", ");
+            problems.push(problem("DERIVED_LINK_BAD_ROLE", &at, format!("unknown role `{role}`; use one of {allowed}")));
+        }
+        let rel = parse_rel(&l.rel, &at, problems);
+        if !labels.contains_key(&l.label) {
+            problems.push(problem("LINK_UNKNOWN_LABEL", &at, format!("label `{}` is not in labels.toml", l.label)));
+        }
+        if links.iter().any(|k| k.from == l.from && k.to == l.to) {
+            problems.push(problem("DERIVED_LINK_DUPLICATE", &at, "the same pair of roles is listed twice".into()));
+        }
+        if let (Some(rel), true) = (rel, problems.len() == before) {
+            links.push(DerivedLink { from: l.from, to: l.to, rel, label: l.label });
         }
     }
     links
@@ -626,6 +757,146 @@ mod tests {
             let e = Rules::load(sv, r, lb, l).err().unwrap_or_else(|| panic!("{to} was accepted"));
             assert_eq!(e[0].code, code, "{to}");
         }
+    }
+
+    // Fails if a connection with a VPC part, or its label, is left out of links.toml.
+    #[test]
+    fn vpc_links_are_listed_once_with_their_labels() {
+        let r = Rules::builtin();
+        let (m, a) = (Rel::Main, Rel::Aux);
+        let want = [
+            ("user", "alb", m, "https"),
+            ("cloudfront", "alb", m, "https"),
+            ("alb", "ecs", m, "http"),
+            ("ecs", "aurora", m, "read_write"),
+            ("aurora", "ecs", m, "http"),
+            ("ecs", "s3", m, "read_write"),
+            ("ecs", "cloudwatch", m, "logs_metrics"),
+            ("aurora", "s3", m, "read_write"),
+            ("aurora", "cloudwatch", m, "logs_metrics"),
+            ("ecs", "internet", m, "outbound"),
+            ("aurora", "internet", m, "outbound"),
+            ("cloudfront", "s3", a, "logs_metrics"),
+            ("cloudfront", "cloudwatch", a, "logs_metrics"),
+            ("alb", "s3", a, "logs_metrics"),
+            ("alb", "cloudwatch", a, "logs_metrics"),
+            ("ecs", "s3", a, "logs_metrics"),
+            ("ecs", "cloudwatch", a, "logs_metrics"),
+            ("aurora", "s3", a, "logs_metrics"),
+            ("aurora", "cloudwatch", a, "logs_metrics"),
+        ];
+        assert_eq!(want.len(), 19);
+        for (from, to, rel, label) in want {
+            let listed = r.links.iter().filter(|l| l.from == from && l.to == to && l.rel == rel).count();
+            assert_eq!(listed, 1, "{from} {rel:?} {to}");
+            assert_eq!(r.link(from, to, rel).unwrap_or_else(|| panic!("{from} {rel:?} {to}")).label, label, "{from} {rel:?} {to}");
+        }
+        let roles = &r.link("ecs", "aurora", Rel::Main).unwrap().to_role;
+        let roles: Vec<_> = roles.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        assert_eq!(roles, [("reader", "read"), ("writer", "read_write")]);
+    }
+
+    // Fails if an auxiliary line from CloudFront is stopped, or drawn with a note, in a definition without a VPC.
+    #[test]
+    fn a_cloudfront_side_line_needs_no_vpc() {
+        let defs = [
+            "flows:\n  - user -> cloudfront -> s3\n  - cloudfront ~> cloudwatch\n",
+            "flows:\n  - user -> cloudfront -> s3\n  - cloudfront ~> s3.logs\n",
+        ];
+        for def in defs {
+            for direction in ["down", "right"] {
+                let src = format!("{def}set:\n  direction: {direction}\n");
+                let out = crate::compile(&src);
+                assert_eq!(out.diagnostics.exit_code(), 0, "{src}{:?}", out.diagnostics.errors);
+                assert!(out.drawio.is_some(), "{src}");
+                assert!(out.diagnostics.notes.is_empty(), "{src}{:?}", out.diagnostics.notes);
+            }
+        }
+    }
+
+    // Fails if a line inference adds between roles loses its relation or label.
+    #[test]
+    fn derived_links_join_roles() {
+        let r = Rules::builtin();
+        let pairs = [("private", "egress_nat"), ("egress_nat", "entry_gateway"), ("writer", "reader")];
+        let got: Vec<_> = pairs
+            .iter()
+            .map(|(from, to)| {
+                let d = r.derived_link(from, to).unwrap_or_else(|| panic!("{from} {to}"));
+                (d.from.as_str(), d.to.as_str(), d.rel, d.label.as_str())
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("private", "egress_nat", Rel::Main, "outbound"),
+                ("egress_nat", "entry_gateway", Rel::Main, "outbound"),
+                ("writer", "reader", Rel::Aux, "replication"),
+            ]
+        );
+        assert!(r.derived_link("reader", "writer").is_none());
+    }
+
+    // Fails if a misspelt role, a subnet tier on a connection outside the VPC, a half-written subnet
+    // tier, a derived line with a bad role, relation or label or listed twice, VPC reasons on a service
+    // outside the VPC, or a rule missing from rules.toml is loaded without an error.
+    #[test]
+    fn bad_link_fields_stop_loading() {
+        let [services, rules, labels, links] = builtin_files();
+        let edit = |text: &str, from: &str, to: &str| {
+            assert!(text.contains(from), "{from}");
+            text.replacen(from, to, 1)
+        };
+        let lambda = "from = \"lambda\"\nto = \"dynamodb\"\nrel = \"main\"\nlabel = \"read_write\"\n";
+        let alb = "from = \"alb\"\nto = \"ecs\"\nrel = \"main\"\nlabel = \"http\"\n";
+        let tier = "from_subnet = \"private\"\nfrom_subnet_rule = \"private-subnet-per-az\"\nfrom_copies_rule = \"private-subnet-per-az\"\n";
+        let derived = |from: &str, to: &str, rel: &str, label: &str| {
+            format!("{links}\n[[derived_link]]\nfrom = \"{from}\"\nto = \"{to}\"\nrel = \"{rel}\"\nlabel = \"{label}\"\n")
+        };
+        let s3 = "label = \"Amazon S3\"\nin_label = \"read_write\"\n";
+        let ecs = "label = \"Amazon ECS\"\nin_label = \"http\"\n";
+        let reasons = "vpc_reasons = { vpc = \"load-balancer-in-vpc\", az = [\"alb-spans-two-azs\"], default_azs = \"default-two-azs\" }\n";
+        let cases = [
+            (services.to_string(), edit(links, "to_role.writer =", "to_role.primary ="), "LINK_BAD_ROLE"),
+            (services.to_string(), edit(links, lambda, &format!("{lambda}{tier}")), "LINK_SUBNET_WITHOUT_VPC"),
+            (services.to_string(), edit(links, alb, &format!("{alb}from_subnet = \"public\"\n")), "LINK_BAD_LIMIT"),
+            (services.to_string(), derived("public", "reader", "aux", "replication"), "DERIVED_LINK_BAD_ROLE"),
+            (services.to_string(), derived("writer", "reader", "aux", "replication"), "DERIVED_LINK_DUPLICATE"),
+            (services.to_string(), derived("private", "reader", "near", "replication"), "LINK_BAD_REL"),
+            (services.to_string(), derived("private", "reader", "aux", "replicate"), "LINK_UNKNOWN_LABEL"),
+            (
+                services.to_string(),
+                edit(links, alb, &format!("{alb}{}", tier.replacen("from_subnet_rule = \"private-subnet-per-az\"", "from_subnet_rule = \"no-such-rule\"", 1))),
+                "LINK_UNKNOWN_RULE",
+            ),
+            (edit(services, "vpc = \"load-balancer-in-vpc\"", "vpc = \"load-balancer\""), links.to_string(), "SERVICE_UNKNOWN_RULE"),
+            (edit(services, ecs, &format!("{ecs}nat_rule = \"no-such-rule\"\n")), links.to_string(), "SERVICE_UNKNOWN_RULE"),
+            (edit(services, s3, &format!("{s3}{reasons}")), links.to_string(), "SERVICE_VPC_REASONS_OUTSIDE_VPC"),
+        ];
+        assert_eq!(cases.len(), 11);
+        for (services, links, code) in &cases {
+            let e = Rules::load(services, rules, labels, links).err().unwrap_or_else(|| panic!("{code} not reported"));
+            let codes: Vec<_> = e.iter().map(|p| p.code.as_str()).collect();
+            assert_eq!(codes, [*code], "{e:?}");
+        }
+    }
+
+    // Fails if the place traffic leaves the VPC for cannot be told from the data.
+    #[test]
+    fn the_internet_is_where_traffic_leaves() {
+        let r = Rules::builtin();
+        let egress: Vec<_> = r.service_keys().into_iter().filter(|k| r.service(k).unwrap().egress).collect();
+        assert_eq!(egress, ["internet"]);
+    }
+
+    // Fails if the reasons the VPC and its zones get cannot be read from the load balancer's data.
+    #[test]
+    fn the_load_balancer_gives_the_vpc_its_reasons() {
+        let r = Rules::builtin();
+        let want = VpcReasons { vpc: "load-balancer-in-vpc".into(), az: vec!["alb-spans-two-azs".into()], default_azs: "default-two-azs".into() };
+        assert_eq!(r.service("alb").unwrap().vpc_reasons.as_ref(), Some(&want));
+        let with: Vec<_> = r.service_keys().into_iter().filter(|k| r.service(k).unwrap().vpc_reasons.is_some()).collect();
+        assert_eq!(with, ["alb"]);
     }
 
     #[test]

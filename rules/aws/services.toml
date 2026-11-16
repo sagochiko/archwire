@@ -11,6 +11,10 @@
 # (--) with the services listed there, written attachment first.
 # `derived_role` names the part a service inference adds plays at the VPC's edge: `entry_gateway`
 # where traffic from outside comes in, `egress_nat` where private traffic goes out.
+# `egress = true` marks where traffic leaving the VPC goes: a main flow to it is not drawn as a part.
+# `vpc_reasons` names, for a VPC service, the rules that give the VPC, its zones and their default
+# number their reasons when this part is the first in the definition that has them.
+# `nat_rule` names the rule a part gets when its traffic leaves the VPC through a NAT gateway.
 
 [[service]]
 key = "user"
@@ -30,6 +34,7 @@ icon = "resource"
 shape = "internet"
 color = "#242F3E"
 label = "internet"
+egress = true
 
 [[service]]
 key = "cloudfront"
@@ -84,6 +89,7 @@ shape = "elastic_load_balancing"
 color = "#8C4FFF"
 label = "Application Load Balancer"
 in_label = "https"
+vpc_reasons = { vpc = "load-balancer-in-vpc", az = ["alb-spans-two-azs"], default_azs = "default-two-azs" }
 
 [[service]]
 key = "nat"

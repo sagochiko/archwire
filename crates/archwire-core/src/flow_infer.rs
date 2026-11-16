@@ -349,16 +349,27 @@ mod tests {
         let api = crate::def::parse(API).unwrap();
         let web = crate::def::parse("flows:\n  - user -> alb -> ecs -> aurora\n  - ecs -> internet\n").unwrap();
         let runs: [(&[&str], &Definition, Infer); 2] = [(&RULES, &api, infer), (&crate::infer::RULES, &web, crate::infer::infer)];
+        // The rules the data names too, so loading already stops: by where in the data they are named.
+        let named_by_links = ["cloudfront-certificate-in-us-east-1"];
+        let named_by_services = ["load-balancer-in-vpc", "alb-spans-two-azs", "default-two-azs"];
         for (ids, def, run) in runs {
             for id in ids {
-                match rules_without(id) {
-                    // The data names this rule too, so loading already stops.
-                    Err(e) => assert_eq!(e[0].code, "LINK_UNKNOWN_RULE", "{id}"),
-                    Ok(rules) => {
+                let stops_loading = if named_by_links.contains(id) {
+                    Some("LINK_UNKNOWN_RULE")
+                } else if named_by_services.contains(id) {
+                    Some("SERVICE_UNKNOWN_RULE")
+                } else {
+                    None
+                };
+                match (rules_without(id), stops_loading) {
+                    (Err(e), Some(code)) => assert_eq!(e[0].code, code, "{id}"),
+                    (Ok(rules), None) => {
                         let (m, d) = run(def, &rules);
                         assert!(m.is_none(), "{id}");
                         assert_eq!((d.errors[0].code.as_str(), d.errors[0].at.as_deref()), ("RULE_MISSING", Some(*id)));
                     }
+                    (Err(e), None) => panic!("loading stopped without {id}: {e:?}"),
+                    (Ok(_), Some(code)) => panic!("loading did not stop with {code} without {id}"),
                 }
             }
         }
@@ -393,12 +404,27 @@ mod tests {
 
     #[test]
     fn pairs_outside_the_list_stop() {
-        for line in ["user -> s3", "cloudfront -> lambda", "cloudfront ~> cloudwatch", "dynamodb -> lambda", "lambda -> internet", "apigateway -- cognito", "waf -- apigateway"] {
+        for line in ["user -> s3", "cloudfront -> lambda", "dynamodb -> lambda", "lambda -> internet", "apigateway -- cognito", "waf -- apigateway"] {
             let (m, d) = run(&format!("{B}  - {line}\n"));
             assert!(m.is_none(), "{line}");
             assert_eq!(first(&d), ("UNSUPPORTED", Some("flows[1]"), Some(line)), "{line}");
             assert_eq!(d.errors[0].message, format!("`{line}` is not a supported connection"));
         }
+    }
+
+    // Fails if an auxiliary line from CloudFront is accepted while CloudFront is not on a main flow,
+    // or stopped while it is.
+    #[test]
+    fn a_cloudfront_side_line_needs_cloudfront_on_a_main_flow() {
+        let (m, d) = run(&format!("{B}  - cloudfront ~> cloudwatch\n"));
+        assert!(m.is_none());
+        assert_eq!(d.errors.len(), 1, "{:?}", d.errors);
+        assert_eq!(first(&d), ("UNSUPPORTED", Some("flows[1]"), Some("cloudfront ~> cloudwatch")));
+        assert_eq!(d.errors[0].message, "`cloudfront ~> cloudwatch` needs `cloudfront` on a main flow (->) from `user`");
+        let (m, d) = run("flows:\n  - user -> cloudfront -> s3\n  - cloudfront ~> cloudwatch\n");
+        assert!(d.errors.is_empty(), "{:?}", d.errors);
+        assert!(m.is_some());
+        assert_eq!(d.exit_code(), 0);
     }
 
     #[test]

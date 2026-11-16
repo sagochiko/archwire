@@ -77,6 +77,18 @@ reason_en = "archwire gives each Availability Zone one public subnet and one pri
 reason_ja = "archwire は、各アベイラビリティゾーンにパブリックサブネットとプライベートサブネットを1つずつ置く。"
 
 [[rule]]
+id = "public-subnet-per-az"
+kind = "default"
+reason_en = "archwire gives each Availability Zone one public subnet; no part here is placed in a private subnet."
+reason_ja = "archwire は、各アベイラビリティゾーンにパブリックサブネットを1つ置く。プライベートサブネットに置く部品は無い。"
+
+[[rule]]
+id = "private-subnet-per-az"
+kind = "default"
+reason_en = "archwire gives each Availability Zone one private subnet; no part here is placed in a public subnet."
+reason_ja = "archwire は、各アベイラビリティゾーンにプライベートサブネットを1つ置く。パブリックサブネットに置く部品は無い。"
+
+[[rule]]
 id = "compute-in-private"
 kind = "default"
 reason_en = "No subnet was given, so ECS is placed in private subnets; traffic reaches it through the load balancer."

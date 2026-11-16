@@ -1,11 +1,17 @@
-# The connections the layout without a VPC accepts, one entry per service pair and relation.
-# Any connection not listed here stops with UNSUPPORTED.
+# The accepted connections, one entry per service pair and relation.
+# In a definition without a VPC part, any connection not listed here stops with UNSUPPORTED.
 #
 # `label` is a key of labels.toml. `to_kind` gives, per kind of `to`, the label of the
 # connection and the rule whose reason is given to `to`; while the kind is not decided the
-# connection keeps `label`. `max_from` limits how many `from` parts one `to` part may have,
+# connection keeps `label`. `to_role` gives, per role of the `to` part (`writer`, `reader`),
+# the label of the connection. `max_from` limits how many `from` parts one `to` part may have,
 # with `max_rule` saying why. `from_region` places the `from` part in that Region, with
-# `from_rule` saying why.
+# `from_rule` saying why. `from_subnet` places the `from` part in that subnet tier of the VPC,
+# one copy per Availability Zone, with `from_subnet_rule` saying why it is in the VPC and
+# `from_copies_rule` why there is one copy per zone; the three are written together.
+#
+# `[[derived_link]]` gives the lines inference adds between parts by their roles (`private`,
+# `egress_nat`, `entry_gateway`, `writer`, `reader`), one entry per pair of roles.
 
 [[link]]
 from = "user"
@@ -84,3 +90,137 @@ rel = "assoc"
 label = "certificate"
 from_region = "us-east-1"
 from_rule = "cloudfront-certificate-in-us-east-1"
+
+[[link]]
+from = "user"
+to = "alb"
+rel = "main"
+label = "https"
+
+[[link]]
+from = "cloudfront"
+to = "alb"
+rel = "main"
+label = "https"
+
+[[link]]
+from = "alb"
+to = "ecs"
+rel = "main"
+label = "http"
+
+[[link]]
+from = "ecs"
+to = "aurora"
+rel = "main"
+label = "read_write"
+to_role.writer = "read_write"
+to_role.reader = "read"
+
+[[link]]
+from = "aurora"
+to = "ecs"
+rel = "main"
+label = "http"
+
+[[link]]
+from = "ecs"
+to = "s3"
+rel = "main"
+label = "read_write"
+
+[[link]]
+from = "ecs"
+to = "cloudwatch"
+rel = "main"
+label = "logs_metrics"
+
+[[link]]
+from = "aurora"
+to = "s3"
+rel = "main"
+label = "read_write"
+
+[[link]]
+from = "aurora"
+to = "cloudwatch"
+rel = "main"
+label = "logs_metrics"
+
+[[link]]
+from = "ecs"
+to = "internet"
+rel = "main"
+label = "outbound"
+
+[[link]]
+from = "aurora"
+to = "internet"
+rel = "main"
+label = "outbound"
+
+[[link]]
+from = "cloudfront"
+to = "s3"
+rel = "aux"
+label = "logs_metrics"
+
+[[link]]
+from = "cloudfront"
+to = "cloudwatch"
+rel = "aux"
+label = "logs_metrics"
+
+[[link]]
+from = "alb"
+to = "s3"
+rel = "aux"
+label = "logs_metrics"
+
+[[link]]
+from = "alb"
+to = "cloudwatch"
+rel = "aux"
+label = "logs_metrics"
+
+[[link]]
+from = "ecs"
+to = "s3"
+rel = "aux"
+label = "logs_metrics"
+
+[[link]]
+from = "ecs"
+to = "cloudwatch"
+rel = "aux"
+label = "logs_metrics"
+
+[[link]]
+from = "aurora"
+to = "s3"
+rel = "aux"
+label = "logs_metrics"
+
+[[link]]
+from = "aurora"
+to = "cloudwatch"
+rel = "aux"
+label = "logs_metrics"
+
+[[derived_link]]
+from = "private"
+to = "egress_nat"
+rel = "main"
+label = "outbound"
+
+[[derived_link]]
+from = "egress_nat"
+to = "entry_gateway"
+rel = "main"
+label = "outbound"
+
+[[derived_link]]
+from = "writer"
+to = "reader"
+rel = "aux"
+label = "replication"
