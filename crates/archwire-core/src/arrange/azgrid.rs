@@ -49,7 +49,7 @@ const EMPTY_SUB: i32 = 60;
 /// Names stay this far inside their subnet's sides.
 pub(super) const PAD: i32 = 20;
 /// A line keeps this far from icons, names and frame names, and from the lines beside it.
-const ROOM: i32 = 8;
+pub(super) const ROOM: i32 = 8;
 /// The distance between two tracks in a band: a line's label and some room.
 pub(super) const TRACK_STEP: i32 = 25;
 /// The distance between two tracks, and from a track to the band's sides, in a band no label sits

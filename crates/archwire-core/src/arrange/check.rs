@@ -1,12 +1,14 @@
 //! The must-hold conditions on a finished placement.
 
+use super::azgrid::{ROOM, VPC_FRAME};
 use super::layered::{CLOUD_FRAME, REGION_FRAME, ROW_STEP};
 use super::{Lane, Placement};
-use crate::route::{edge_id, Bend, Keep, Side, Track};
+use crate::def::Rel;
+use crate::route::{edge_id, port_point, Bend, Keep, Port, Side, Track, LABEL_FIRST, LABEL_LINE};
 use crate::diag::Problem;
-use crate::layout::Rect;
+use crate::layout::{FrameKind, Icon, Layout, Rect};
 use crate::measure::{frame_name_box, name_area};
-use crate::model::{Area, Model};
+use crate::model::{Area, Axis, Model, Tier};
 
 /// The must-hold conditions on a finished placement; empty when all hold.
 pub(crate) fn check(model: &Model, placement: &Placement) -> Vec<Problem> {
@@ -46,17 +48,18 @@ pub(crate) fn check(model: &Model, placement: &Placement) -> Vec<Problem> {
             out.push(failed(&f.id, f.id.clone(), "leaving its frame"));
         }
     }
-    // The frame a part sits in is the one the model gives it.
+    // The frame a part sits in is the one the model gives it: inside the VPC, the subnet of its
+    // tier in its zone, and the VPC itself for the entry gateway and for parts spanning the zones.
     for n in &model.nodes {
-        let want = match n.area {
-            Area::Outside => None,
-            Area::Cloud => Some(CLOUD_FRAME),
-            Area::Region => Some(REGION_FRAME),
-            // Parts inside a VPC never reach this layout.
-            Area::VpcEdge | Area::Subnet(_) => continue,
+        let want = match (n.area, n.az) {
+            (Area::Outside, _) => None,
+            (Area::Cloud, _) => Some(CLOUD_FRAME.to_string()),
+            (Area::Region, _) => Some(REGION_FRAME.to_string()),
+            (Area::VpcEdge, _) | (Area::Subnet(_), None) => Some(VPC_FRAME.to_string()),
+            (Area::Subnet(tier), Some(k)) => Some(subnet_id(model, tier, k)),
         };
         if let Some(i) = icons.iter().find(|i| i.id == n.id) {
-            if i.parent.as_deref() != want {
+            if i.parent != want {
                 out.push(failed(&i.id, i.id.clone(), "leaving its frame"));
             }
         }
@@ -70,13 +73,167 @@ pub(crate) fn check(model: &Model, placement: &Placement) -> Vec<Problem> {
             }
         }
     }
-    // No part or name lies over a frame's name.
+    // No part or name lies over a frame's name, a zone's and a subnet's too.
     for f in &layout.frames {
         let name = frame_name_box(f);
         for (i, label) in icons.iter().zip(&labels) {
             if overlaps(i.rect, name) || overlaps(*label, name) {
                 out.push(failed(&i.id, format!("{} and {}", i.id, f.id), "overlapping"));
             }
+        }
+    }
+    out.extend(zones_kept(model, layout));
+    out.extend(lanes_kept(model, placement));
+    out.extend(gates_kept(model, placement));
+    out.extend(along_the_axis(model, placement));
+    out
+}
+
+/// The id of the subnet frame of a tier in zone `k`: `pub-1a`, `pri-1c`.
+fn subnet_id(model: &Model, tier: Tier, k: usize) -> String {
+    let zone = &model.azs[k];
+    let prefix = match tier {
+        Tier::Public => "pub",
+        Tier::Private => "pri",
+    };
+    format!("{prefix}-{}", &zone[zone.len() - 2..])
+}
+
+fn zone_id(model: &Model, k: usize) -> String {
+    let zone = &model.azs[k];
+    format!("az-{}", &zone[zone.len() - 2..])
+}
+
+/// Inside a VPC: a part's copies at one height and one place in their zones, the zones of one
+/// size, and a subnet tier drawn in every zone when it has parts, in none when it has none.
+fn zones_kept(model: &Model, layout: &Layout) -> Vec<Problem> {
+    let mut out = Vec::new();
+    let frame = |id: &str| layout.frames.iter().find(|f| f.id == id).map(|f| f.rect);
+    let icon = |id: &str| layout.icons.iter().find(|i| i.id == id);
+    let mut parts: Vec<&str> = Vec::new();
+    for n in model.nodes.iter().filter(|n| n.az.is_some()) {
+        if !parts.contains(&n.part.as_str()) {
+            parts.push(&n.part);
+        }
+    }
+    for part in parts {
+        let mut first: Option<(&str, (i32, i32))> = None;
+        for n in model.nodes.iter().filter(|n| n.part == part) {
+            let (Some(k), Some(i)) = (n.az, icon(&n.id)) else { continue };
+            let Some(z) = frame(&zone_id(model, k)) else { continue };
+            let at = (i.rect.y, i.rect.x - z.x);
+            match first {
+                None => first = Some((&n.id, at)),
+                Some((one, there)) if there != at => out.push(failed(&n.id, format!("{one} and {}", n.id), "keeping its copies level")),
+                Some(_) => {}
+            }
+        }
+    }
+    let zones: Vec<&crate::layout::Frame> = layout.frames.iter().filter(|f| f.kind == FrameKind::Az).collect();
+    if let Some(one) = zones.first() {
+        for z in zones.iter().filter(|z| (z.rect.w, z.rect.h) != (one.rect.w, one.rect.h)) {
+            out.push(failed(&z.id, format!("{} and {}", one.id, z.id), "zones of one size"));
+        }
+    }
+    if !zones.is_empty() {
+        for (tier, kind) in [(Tier::Public, FrameKind::PublicSubnet), (Tier::Private, FrameKind::PrivateSubnet)] {
+            let has_parts = model.nodes.iter().any(|n| n.area == Area::Subnet(tier));
+            for k in 0..model.azs.len() {
+                let id = subnet_id(model, tier, k);
+                if has_parts && frame(&id).is_none() {
+                    out.push(failed(&id, id.clone(), "a frame for the parts in its tier"));
+                }
+            }
+            if !has_parts {
+                for f in layout.frames.iter().filter(|f| f.kind == kind) {
+                    out.push(failed(&f.id, f.id.clone(), "parts in its tier"));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Each drawn line's track in a band lies in the band and keeps room from the others.
+fn lanes_kept(model: &Model, placement: &Placement) -> Vec<Problem> {
+    let mut out = Vec::new();
+    let line = |e: usize| edge_id(&model.edges[e].from, &model.edges[e].to);
+    for lane in &placement.lanes {
+        for (k, &(e, at)) in lane.tracks.iter().enumerate() {
+            if at < lane.lo || lane.hi < at {
+                out.push(failed(&line(e), line(e), "its track inside its band"));
+            }
+            for &(o, other) in &lane.tracks[k + 1..] {
+                if (at - other).abs() < ROOM {
+                    out.push(failed(&line(e), format!("{} and {}", line(e), line(o)), "room in its band"));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Where a line meets the side of its icon, below the name on the bottom side, as the router puts it.
+fn port_of(i: &Icon, side: Side, pos: u8) -> (i32, i32) {
+    let offset = if side == Side::Bottom { LABEL_FIRST + LABEL_LINE * (i.lines as i32 - 1) } else { 0 };
+    port_point(i.rect, Port { side, pos, offset })
+}
+
+/// A crossing line's gate lies on a side of its frame, and the line crosses the side there at a
+/// right angle: the stretch of its inner part next to the gate runs straight away from the side.
+fn gates_kept(model: &Model, placement: &Placement) -> Vec<Problem> {
+    let layout = &placement.layout;
+    let mut out = Vec::new();
+    for c in &placement.crossings {
+        let e = &model.edges[c.edge];
+        let line = edge_id(&e.from, &e.to);
+        let Some(f) = layout.frames.iter().find(|f| f.id == c.frame).map(|f| f.rect) else {
+            out.push(failed(&line, line.clone(), "its gate on the side of a frame"));
+            continue;
+        };
+        let (gx, gy) = c.through.gate;
+        let on_x = (gx == f.x || gx == f.x + f.w) && f.y < gy && gy < f.y + f.h;
+        let on_y = (gy == f.y || gy == f.y + f.h) && f.x < gx && gx < f.x + f.w;
+        if on_x == on_y {
+            out.push(failed(&line, line.clone(), &format!("its gate on the side of {}", c.frame)));
+            continue;
+        }
+        let t = &c.through;
+        let end = if t.inner_is_start { &e.from } else { &e.to };
+        let next = if t.inner_is_start { t.inner.last() } else { t.inner.first() };
+        let next = match (next, layout.icons.iter().find(|i| i.id == *end)) {
+            (Some(&p), _) => p,
+            (None, Some(i)) => port_of(i, c.inner_side, c.inner_pos),
+            (None, None) => continue,
+        };
+        let square = if on_x { next.1 == gy && next.0 != gx } else { next.0 == gx && next.1 != gy };
+        if !square {
+            out.push(failed(&line, line.clone(), &format!("crossing the side at its gate on {}", c.frame)));
+        }
+    }
+    out
+}
+
+/// A main line between two parts outside every VPC runs along its axis: from left to right when
+/// lines run right, from top to bottom when they run down. Lines with an end inside a VPC are
+/// laid out by the VPC's own arrangement.
+fn along_the_axis(model: &Model, placement: &Placement) -> Vec<Problem> {
+    let layout = &placement.layout;
+    let inside = |id: &str| model.nodes.iter().find(|n| n.id == id).is_none_or(|n| matches!(n.area, Area::VpcEdge | Area::Subnet(_)));
+    let mut out = Vec::new();
+    for pl in &placement.lines {
+        let e = &model.edges[pl.edge];
+        if e.rel != Rel::Main || inside(&e.from) || inside(&e.to) {
+            continue;
+        }
+        let (Some(a), Some(b)) = (layout.icons.iter().find(|i| i.id == e.from), layout.icons.iter().find(|i| i.id == e.to)) else { continue };
+        let ahead = match pl.axis {
+            Axis::Right => a.rect.x < b.rect.x,
+            Axis::Down => a.rect.y < b.rect.y,
+        };
+        if !ahead {
+            let line = edge_id(&e.from, &e.to);
+            out.push(failed(&line, line.clone(), "running along the axis"));
         }
     }
     out
@@ -155,6 +312,7 @@ mod tests {
     use super::*;
     use super::super::layered::tests::{placed, TARGET};
     use crate::layout::{Icon, Layout};
+    use crate::model::Axis;
 
     /// The target layout, with `change` applied to it by hand.
     fn broken(change: impl Fn(&mut Layout)) -> Vec<Problem> {
@@ -172,12 +330,144 @@ mod tests {
 
     /// A layout with a VPC: the web example running down, and its representative lines.
     fn with_a_vpc() -> (Model, Placement, Vec<usize>) {
+        let (m, p) = web_along(Axis::Down);
+        let reps = crate::lines::gather(&m, &p.layout, &crate::rules::Rules::builtin()).0.iter().map(|l| l.rep).collect();
+        (m, p, reps)
+    }
+    /// The web example with two zones, laid out along `axis`.
+    fn web_along(axis: Axis) -> (Model, Placement) {
         let r = crate::rules::Rules::builtin();
         let src = include_str!("../../../../tests/cases/web-2az-ja/def.yaml");
         let m = crate::infer::infer(&crate::def::parse(src).unwrap(), &r).0.unwrap();
-        let p = super::super::arrange(&m, &r, crate::model::Axis::Down).unwrap();
-        let reps = crate::lines::gather(&m, &p.layout, &r).0.iter().map(|l| l.rep).collect();
-        (m, p, reps)
+        let p = super::super::arrange(&m, &r, axis).unwrap();
+        (m, p)
+    }
+    /// The smallest model mixing Lambda in the VPC with parts outside it: no public tier.
+    fn mix() -> (Model, Placement) {
+        let m = super::super::azgrid::tests::smallest_mix("lambda");
+        let p = super::super::arrange(&m, &crate::rules::Rules::builtin(), Axis::Down).unwrap();
+        (m, p)
+    }
+    fn frame_rect(p: &Placement, id: &str) -> Rect {
+        p.layout.frames.iter().find(|f| f.id == id).unwrap_or_else(|| panic!("no frame {id}")).rect
+    }
+    /// The web example running down, with `change` applied to its placement by hand.
+    fn web_broken(change: impl Fn(&mut Placement)) -> Vec<Problem> {
+        let (m, mut p) = web_along(Axis::Down);
+        assert_eq!(check(&m, &p), Vec::new());
+        change(&mut p);
+        check(&m, &p)
+    }
+    fn says(got: &[Problem], at: &str, what: &str) -> bool {
+        got.iter().any(|e| e.code == "LAYOUT_FAILED" && e.at.as_deref() == Some(at) && e.message.contains(what))
+    }
+
+    // Fails if the check does not see one copy of a part at another height than the others.
+    #[test]
+    fn check_finds_a_copy_out_of_its_zone_row() {
+        let got = web_broken(|p| icon_mut(&mut p.layout, "ecs-1c").rect.y += 10);
+        assert!(got.iter().any(|e| e.code == "LAYOUT_FAILED" && e.got.as_deref().is_some_and(|g| g.contains("ecs-1a") && g.contains("ecs-1c"))), "{got:?}");
+        assert!(got.iter().any(|e| e.message.contains("its copies level")), "{got:?}");
+    }
+
+    // Fails if the check does not see zones of different sizes.
+    #[test]
+    fn check_finds_zones_of_different_sizes() {
+        let got = web_broken(|p| p.layout.frames.iter_mut().find(|f| f.id == "az-1c").unwrap().rect.w -= 10);
+        assert!(says(&got, "az-1c", "zones of one size"), "{got:?}");
+    }
+
+    // Fails if the check does not see a subnet frame with nothing in its tier.
+    #[test]
+    fn check_finds_an_empty_subnet_frame() {
+        let (m, mut p) = mix();
+        assert_eq!(check(&m, &p), Vec::new());
+        let (az, pri) = (frame_rect(&p, "az-1a"), frame_rect(&p, "pri-1a"));
+        // Below the private subnet, inside the zone: clear of every icon and name.
+        let rect = Rect { x: pri.x, y: pri.y + pri.h + 2, w: pri.w, h: az.y + az.h - (pri.y + pri.h) - 4 };
+        p.layout.frames.push(crate::layout::Frame { id: "pub-1a".into(), kind: crate::layout::FrameKind::PublicSubnet, label: "Public".into(), rect, parent: Some("az-1a".into()) });
+        let got = check(&m, &p);
+        assert!(says(&got, "pub-1a", "parts in its tier"), "{got:?}");
+    }
+
+    // Fails if the check does not compare the subnet a part sits in with its tier and zone inside the VPC.
+    #[test]
+    fn check_finds_a_part_in_the_wrong_subnet() {
+        let got = web_broken(|p| {
+            let sub = frame_rect(p, "pub-1a");
+            let i = icon_mut(&mut p.layout, "ecs-1a");
+            i.parent = Some("pub-1a".into());
+            i.rect.x = sub.x + 80;
+            i.rect.y = sub.y + 40;
+            assert!(inside(sub, i.rect) && inside(sub, name_area(i)), "{sub:?} {i:?}");
+        });
+        assert!(says(&got, "ecs-1a", "leaving its frame"), "{got:?}");
+    }
+
+    // Fails if the check does not see a part over the name of a zone's frame.
+    #[test]
+    fn check_finds_a_name_over_a_zone_name() {
+        let got = web_broken(|p| {
+            let az = frame_rect(p, "az-1a");
+            let i = icon_mut(&mut p.layout, "ecs-1a");
+            i.rect.x = az.x + 2;
+            i.rect.y = az.y + 2;
+        });
+        assert!(got.iter().any(|e| e.code == "LAYOUT_FAILED" && e.got.as_deref().is_some_and(|g| g.contains("az-1a"))), "{got:?}");
+    }
+
+    // Fails if the check does not see two lines on one height in a band.
+    #[test]
+    fn check_finds_two_tracks_too_close() {
+        let got = web_broken(|p| {
+            let lane = p.lanes.iter_mut().find(|l| l.tracks.len() >= 2).expect("a band with two tracks");
+            lane.tracks[1].1 = lane.tracks[0].1;
+        });
+        assert!(got.iter().any(|e| e.code == "LAYOUT_FAILED" && e.message.contains("room in its band")), "{got:?}");
+    }
+
+    // Fails if the check does not see a gate off the side of its frame.
+    #[test]
+    fn check_finds_a_gate_off_its_side() {
+        let got = web_broken(|p| {
+            let v = frame_rect(p, "vpc");
+            let gate = &mut p.crossings[0].through.gate;
+            if gate.0 == v.x || gate.0 == v.x + v.w {
+                gate.0 += if gate.0 == v.x { 10 } else { -10 };
+            } else {
+                gate.1 += if gate.1 == v.y { 10 } else { -10 };
+            }
+        });
+        assert!(got.iter().any(|e| e.code == "LAYOUT_FAILED" && e.message.contains("its gate on the side")), "{got:?}");
+    }
+
+    // Fails if the check does not see a line running along the side of its frame at its gate.
+    #[test]
+    fn check_finds_a_line_running_along_the_side_at_its_gate() {
+        let got = web_broken(|p| {
+            let v = frame_rect(p, "vpc");
+            let t = &mut p.crossings[0].through;
+            let (gx, gy) = t.gate;
+            let along = if gx == v.x || gx == v.x + v.w { (gx, gy + 20) } else { (gx + 20, gy) };
+            if t.inner_is_start {
+                t.inner.push(along);
+            } else {
+                t.inner.insert(0, along);
+            }
+        });
+        assert!(got.iter().any(|e| e.code == "LAYOUT_FAILED" && e.message.contains("crossing the side at its gate")), "{got:?}");
+    }
+
+    // Fails if the check does not see a main line outside the VPC running against the axis.
+    #[test]
+    fn check_finds_a_main_line_against_the_axis() {
+        let (m, mut p) = web_along(Axis::Right);
+        assert_eq!(check(&m, &p), Vec::new());
+        let (u, c) = (p.layout.rect("user").x, p.layout.rect("cloudfront").x);
+        icon_mut(&mut p.layout, "user").rect.x = c;
+        icon_mut(&mut p.layout, "cloudfront").rect.x = u;
+        let got = check(&m, &p);
+        assert!(says(&got, "edge-user-to-cloudfront", "running along the axis"), "{got:?}");
     }
 
     // Fails if a drawn line that runs along a band is not found when its draft or its band has lost its track.
