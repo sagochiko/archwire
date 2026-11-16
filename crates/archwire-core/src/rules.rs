@@ -28,6 +28,16 @@ pub enum Lang { En, Ja }
 #[serde(rename_all = "snake_case")]
 pub enum DerivedRole { EntryGateway, EgressNat }
 
+impl DerivedRole {
+    /// The name the rules data writes the role with.
+    pub fn name(self) -> &'static str {
+        match self {
+            DerivedRole::EntryGateway => "entry_gateway",
+            DerivedRole::EgressNat => "egress_nat",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IconKind { Service, Resource }
@@ -342,6 +352,19 @@ impl Rules {
                 problems.push(problem("SERVICE_VPC_REASONS_OUTSIDE_VPC", &s.key, "only a VPC service may have `vpc_reasons`".into()));
             }
         }
+        // Inference finds the part it adds by its role, so a role names one service.
+        let mut roles: Vec<(DerivedRole, &str)> = Vec::new();
+        for s in service_map.values() {
+            let Some(role) = s.derived_role else { continue };
+            match roles.iter().find(|(r, _)| *r == role) {
+                Some((_, first)) => problems.push(problem(
+                    "SERVICE_DUPLICATE_ROLE",
+                    &s.key,
+                    format!("`derived_role = \"{}\"` is already on `{first}`", role.name()),
+                )),
+                None => roles.push((role, &s.key)),
+            }
+        }
 
         let (raw_links, raw_derived) = match toml::from_str::<LinksFile>(links) {
             Ok(f) => (f.link, f.derived_link),
@@ -484,6 +507,10 @@ fn check_links(
                 &at,
                 "`from_subnet`, `from_subnet_rule` and `from_copies_rule` are written together or not at all".into(),
             ));
+        }
+        // The label of a line is chosen by the kind of `to` or by its role, never both.
+        if !l.to_kind.is_empty() && !l.to_role.is_empty() {
+            problems.push(problem("LINK_KIND_AND_ROLE", &at, "`to_kind` and `to_role` are not written together".into()));
         }
         if l.from_subnet.is_some() && services.get(&l.to).is_some_and(|to| to.scope != Scope::Vpc) {
             problems.push(problem("LINK_SUBNET_WITHOUT_VPC", &at, format!("`from_subnet` needs `{}` to be a VPC service", l.to)));
@@ -862,7 +889,8 @@ mod tests {
     // Fails if a misspelt role, a subnet tier on a connection outside the VPC, a half-written subnet
     // tier, a derived line with a bad role, relation or label or listed twice, VPC reasons on a service
     // outside the VPC, a label or rule missing from the other files, or an unknown field in VPC
-    // reasons or a derived line is loaded without an error.
+    // reasons or a derived line, two services with one derived role, or a connection with both
+    // `to_kind` and `to_role` is loaded without an error.
     #[test]
     fn bad_link_fields_stop_loading() {
         let [services, rules, labels, links] = builtin_files();
@@ -881,6 +909,12 @@ mod tests {
         // Only the subnet tier fields at these places (0 `from_subnet`, 1 `from_subnet_rule`, 2 `from_copies_rule`).
         let half = |keep: &[usize]| tier.lines().enumerate().filter(|(i, _)| keep.contains(i)).map(|(_, l)| format!("{l}\n")).collect::<String>();
         let reasons = "vpc_reasons = { vpc = \"load-balancer-in-vpc\", az = [\"alb-spans-two-azs\"], default_azs = \"default-two-azs\" }\n";
+        // A second service with the Internet Gateway's role.
+        let igw_start = services.find("[[service]]\nkey = \"igw\"").unwrap();
+        let igw_end = igw_start + 1 + services[igw_start + 1..].find("[[service]]").unwrap();
+        let door = services[igw_start..igw_end].replacen("key = \"igw\"", "key = \"door\"", 1);
+        assert!(door.contains("derived_role = \"entry_gateway\""));
+        let cognito = "to_kind.rest = { label = \"cognito_authorizer\", rule = \"rest-api-cognito-authorizer\" }\n";
         let cases = [
             (services.to_string(), edit(links, "to_role.writer =", "to_role.primary ="), "LINK_BAD_ROLE"),
             (services.to_string(), edit(links, lambda, &format!("{lambda}{tier}")), "LINK_SUBNET_WITHOUT_VPC"),
@@ -913,8 +947,10 @@ mod tests {
             // Without links, so the services that fail to parse leave no connection naming them.
             (edit(services, "default_azs = \"default-two-azs\"", "default_azs = \"default-two-azs\", zones = 2"), String::new(), "SERVICES_PARSE"),
             (services.to_string(), format!("{}weight = 1\n", derived("private", "reader", "aux", "replication")), "LINKS_PARSE"),
+            (format!("{services}\n{}", door), links.to_string(), "SERVICE_DUPLICATE_ROLE"),
+            (services.to_string(), edit(links, cognito, &format!("{cognito}to_role.writer = \"read\"\n")), "LINK_KIND_AND_ROLE"),
         ];
-        assert_eq!(cases.len(), 22);
+        assert_eq!(cases.len(), 24);
         for (services, links, code) in &cases {
             let e = Rules::load(services, rules, labels, links).err().unwrap_or_else(|| panic!("{code} not reported"));
             let codes: Vec<_> = e.iter().map(|p| p.code.as_str()).collect();

@@ -4,6 +4,7 @@
 
 use super::{area_of, links, Settings};
 use crate::def::{Definition, Link, Ref, Rel};
+use crate::diag::Problem;
 use crate::ids::{copy_id, kind_hole, route_hole};
 use crate::model::{Area, Edge, Model, Node, Tier};
 use crate::rules::{DerivedLink, DerivedRole, LinkRule, Place, Rules, Scope, Service, Subnet};
@@ -50,16 +51,15 @@ pub(super) fn build(
             undecided: open.iter().any(|(id, o)| o.name == r.name && !def.choose.contains_key(id)),
         });
     }
-    let kind_of = |name: &str| nodes.iter().find(|n| n.id == name).and_then(|n| n.option.clone());
+    let find = |name: &str| nodes.iter().find(|n| n.id == name).expect("every written part is a node");
 
     let mut edges: Vec<Edge> = Vec::new();
     for (l, rule) in accepted {
-        let note = kind_of(&l.to.name).and_then(|k| rule.to_kind.get(&k).cloned());
         edges.push(Edge {
             from: l.from.name.clone(),
             to: l.to.name.clone(),
             rel: l.rel,
-            label: note.map_or_else(|| rule.label.clone(), |n| n.label),
+            label: line_label(rule, find(&l.to.name)),
             hole: None,
             endpoint: false,
         });
@@ -69,6 +69,15 @@ pub(super) fn build(
     Model { region, azs: Vec::new(), lang, nodes, edges, direction }
 }
 
+/// The label of a written line into `to`: the label for the kind of `to` (`to_kind`) if it has
+/// one, else the label for its role (`to_role`), else the connection's `label`. Loading stops a
+/// connection that writes both `to_kind` and `to_role`, so at most one of the first two applies.
+fn line_label(rule: &LinkRule, to: &Node) -> String {
+    let by_kind = to.option.as_ref().and_then(|k| rule.to_kind.get(k)).map(|note| &note.label);
+    let by_role = to.role.as_ref().and_then(|r| rule.to_role.get(r));
+    by_kind.or(by_role).unwrap_or(&rule.label).clone()
+}
+
 fn tier(subnet: Subnet) -> Tier {
     match subnet {
         Subnet::Public => Tier::Public,
@@ -76,19 +85,27 @@ fn tier(subnet: Subnet) -> Tier {
     }
 }
 
-/// The service that plays this role at the VPC's edge.
-fn by_role(rules: &Rules, role: DerivedRole) -> &Service {
-    rules
-        .service_keys()
-        .iter()
-        .filter_map(|k| rules.service(k))
-        .find(|s| s.derived_role == Some(role))
-        .expect("the rules data has a service for every role inference adds")
+/// The service that plays this role at the VPC's edge. Loading allows at most one; a missing one
+/// adds DERIVED_ROLE_MISSING.
+fn by_role<'r>(rules: &'r Rules, role: DerivedRole, missing: &mut Vec<Problem>) -> Option<&'r Service> {
+    let found = rules.service_keys().iter().filter_map(|k| rules.service(k)).find(|s| s.derived_role == Some(role));
+    if found.is_none() {
+        let message = format!("no service in services.toml has `derived_role = \"{}\"`", role.name());
+        missing.push(Problem { code: "DERIVED_ROLE_MISSING".into(), at: Some(role.name().into()), message, ..Default::default() });
+    }
+    found
 }
 
-/// The line inference adds from a part of one role to a part of another.
-fn derived_line<'r>(rules: &'r Rules, from: &str, to: &str) -> &'r DerivedLink {
-    rules.derived_link(from, to).expect("the rules data has every line inference adds")
+/// The line inference adds from a part of one role to a part of another; a missing one adds
+/// DERIVED_LINK_MISSING.
+fn derived_line<'r>(rules: &'r Rules, from: &str, to: &str, missing: &mut Vec<Problem>) -> Option<&'r DerivedLink> {
+    let found = rules.derived_link(from, to);
+    if found.is_none() {
+        let message = format!("links.toml has no `[[derived_link]]` from `{from}` to `{to}`");
+        let at = format!("derived_link {from} {to}");
+        missing.push(Problem { code: "DERIVED_LINK_MISSING".into(), at: Some(at), message, ..Default::default() });
+    }
+    found
 }
 
 /// A node inference adds: one per service, or one per zone.
@@ -109,8 +126,10 @@ fn added(id: String, s: &Service, az: Option<usize>) -> Node {
 }
 
 /// The semantic model of a definition with a VPC part that passed the checks: parts, copies, added parts and lines.
+/// A part or line the definition needs and the rules data lacks (DERIVED_ROLE_MISSING, DERIVED_LINK_MISSING)
+/// is an error; one it does not need may be missing.
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn vpc_model(def: &Definition, rules: &Rules, settings: &Settings) -> Model {
+pub(crate) fn vpc_model(def: &Definition, rules: &Rules, settings: &Settings) -> Result<Model, Vec<Problem>> {
     let svc = |name: &str| rules.service(name).expect("names were checked");
     let parts = links::parts(def);
     let accepted: Vec<(&Link, &LinkRule)> = def
@@ -154,9 +173,18 @@ pub(crate) fn vpc_model(def: &Definition, rules: &Rules, settings: &Settings) ->
             && area(&l.to) == Area::Subnet(Tier::Public)
     };
     let entry = accepted.iter().any(|(l, _)| entry_line(l));
-    let gateway = (entry || !nat_azs.is_empty()).then(|| by_role(rules, DerivedRole::EntryGateway));
-    let nat = (!nat_azs.is_empty()).then(|| by_role(rules, DerivedRole::EgressNat));
-    let nat_id = |i: usize| copy_id(&nat.expect("a NAT gateway is added").key, &suffix(i));
+    // The rules data is looked up only for what this definition needs.
+    let mut missing: Vec<Problem> = Vec::new();
+    let gateway = if entry || !nat_azs.is_empty() { by_role(rules, DerivedRole::EntryGateway, &mut missing) } else { None };
+    let nat = if nat_azs.is_empty() { None } else { by_role(rules, DerivedRole::EgressNat, &mut missing) };
+    let egress_lines = if nat_azs.is_empty() {
+        None
+    } else {
+        let out = derived_line(rules, "private", "egress_nat", &mut missing);
+        let up = derived_line(rules, "egress_nat", "entry_gateway", &mut missing);
+        out.zip(up)
+    };
+    let nat_id = |nat: &Service, i: usize| copy_id(&nat.key, &suffix(i));
 
     let written = |r: &Ref, id: String, az: Option<usize>, role: Option<&str>| Node {
         id,
@@ -201,14 +229,22 @@ pub(crate) fn vpc_model(def: &Definition, rules: &Rules, settings: &Settings) ->
     for r in drawn.iter().filter(|r| area(r) == Area::Subnet(Tier::Public)) {
         in_subnet(r, &mut nodes);
     }
-    for &i in &nat_azs {
-        nodes.push(added(nat_id(i), nat.expect("a NAT gateway is added"), Some(i)));
+    if let Some(n) = nat {
+        for &i in &nat_azs {
+            nodes.push(added(nat_id(n, i), n, Some(i)));
+        }
     }
     for r in drawn.iter().filter(|r| private(r)) {
         in_subnet(r, &mut nodes);
     }
     for r in drawn.iter().filter(|r| area(r) == Area::Region) {
         nodes.push(written(r, r.name.clone(), None, None));
+    }
+
+    let writers = nodes.iter().any(|n| n.role.as_deref() == Some("writer"));
+    let replication = if writers { derived_line(rules, "writer", "reader", &mut missing) } else { None };
+    if !missing.is_empty() {
+        return Err(missing);
     }
 
     // Edges, one per pair of ends and relation.
@@ -222,6 +258,7 @@ pub(crate) fn vpc_model(def: &Definition, rules: &Rules, settings: &Settings) ->
     };
     for (l, rule) in accepted.iter().filter(|(l, _)| !egress(&l.to)) {
         if entry_line(l) {
+            // An entry line asks for the gateway above, and a missing one has returned.
             let g = find(&gateway.expect("an entry adds the gateway").key);
             for from in copies(&l.from.name) {
                 add(&mut edges, from, g, Rel::Main, &rule.label, None, false);
@@ -235,30 +272,28 @@ pub(crate) fn vpc_model(def: &Definition, rules: &Rules, settings: &Settings) ->
         let endpoint = answer(l) == Some("endpoint");
         for from in copies(&l.from.name) {
             for to in copies(&l.to.name) {
-                let label = to.role.as_ref().and_then(|role| rule.to_role.get(role)).unwrap_or(&rule.label);
-                add(&mut edges, from, to, l.rel, label, hole.clone(), endpoint);
+                add(&mut edges, from, to, l.rel, &line_label(rule, to), hole.clone(), endpoint);
             }
         }
     }
-    let replication = derived_line(rules, "writer", "reader");
-    for w in nodes.iter().filter(|n| n.role.as_deref() == Some("writer")) {
-        for r in nodes.iter().filter(|n| n.part == w.part && n.role.as_deref() == Some("reader")) {
-            add(&mut edges, w, r, replication.rel, &replication.label, None, false);
+    if let Some(rep) = replication {
+        for w in nodes.iter().filter(|n| n.role.as_deref() == Some("writer")) {
+            for r in nodes.iter().filter(|n| n.part == w.part && n.role.as_deref() == Some("reader")) {
+                add(&mut edges, w, r, rep.rel, &rep.label, None, false);
+            }
         }
     }
-    if let Some(g) = gateway.filter(|_| nat.is_some()) {
-        let out = derived_line(rules, "private", "egress_nat");
+    if let (Some(g), Some(n), Some((out, up))) = (gateway, nat, egress_lines) {
         for name in &outbound {
             for from in copies(name) {
                 let i = if settings.nat_single { 0 } else { from.az.unwrap_or(0) };
-                add(&mut edges, from, find(&nat_id(i)), out.rel, &out.label, None, false);
+                add(&mut edges, from, find(&nat_id(n, i)), out.rel, &out.label, None, false);
             }
         }
-        let up = derived_line(rules, "egress_nat", "entry_gateway");
         for &i in &nat_azs {
-            add(&mut edges, find(&nat_id(i)), find(&g.key), up.rel, &up.label, None, false);
+            add(&mut edges, find(&nat_id(n, i)), find(&g.key), up.rel, &up.label, None, false);
         }
     }
 
-    Model { region: settings.region.clone(), azs, lang: settings.lang, nodes, edges, direction: settings.direction }
+    Ok(Model { region: settings.region.clone(), azs, lang: settings.lang, nodes, edges, direction: settings.direction })
 }

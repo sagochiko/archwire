@@ -207,6 +207,7 @@ pub(crate) fn area_of(service: &Service) -> Area {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::def::Rel::{self, Aux, Main};
 
     fn run(src: &str) -> (Option<Model>, Diagnostics) { infer(&crate::def::parse(src).unwrap(), &Rules::builtin()) }
     fn label(m: &Model, a: &str, b: &str) -> String { m.edges.iter().find(|e| e.from == a && e.to == b).unwrap().label.clone() }
@@ -631,19 +632,24 @@ mod tests {
         let mut diag = Diagnostics::default();
         let checked = check(&def, rules, &mut diag).unwrap_or_else(|| panic!("{:?}", diag.errors));
         assert!(checked.vpc);
-        build::vpc_model(&def, rules, &checked.settings)
+        build::vpc_model(&def, rules, &checked.settings).unwrap_or_else(|e| panic!("{e:?}"))
     }
     fn vpc(src: &str) -> Model { vpc_with(src, &Rules::builtin()) }
     fn node_ids(m: &Model) -> Vec<&str> { m.nodes.iter().map(|n| n.id.as_str()).collect() }
-    fn lines(m: &Model) -> Vec<(&str, &str, &str)> {
-        m.edges.iter().map(|e| (e.from.as_str(), e.to.as_str(), e.label.as_str())).collect()
+    fn lines(m: &Model) -> Vec<(&str, &str, Rel, &str)> {
+        m.edges.iter().map(|e| (e.from.as_str(), e.to.as_str(), e.rel, e.label.as_str())).collect()
+    }
+    /// Each node's id, the name after the dot, zone and area.
+    fn places(m: &Model) -> Vec<(&str, Option<&str>, Option<usize>, Area)> {
+        m.nodes.iter().map(|n| (n.id.as_str(), n.tag.as_deref(), n.az, n.area)).collect()
     }
     fn role<'m>(m: &'m Model, id: &str) -> Option<&'m str> {
         m.nodes.iter().find(|n| n.id == id).unwrap_or_else(|| panic!("{id}")).role.as_deref()
     }
 
     // Fails if copies are gathered by service rather than by part, replication joins the Writer of
-    // one part to the Reader of another, or the entry is looked up by the written name.
+    // one part to the Reader of another, the entry is looked up by the written name, or a line's
+    // relation, a copy's zone or area, or the name after the dot changes.
     #[test]
     fn named_vpc_parts_build_by_part() {
         use crate::test_inputs::TWIN_APPS;
@@ -652,6 +658,21 @@ mod tests {
             "user", "cloudfront", "igw", "alb", "ecs.web@1a", "ecs.web@1c", "aurora.web@1a", "aurora.web@1c",
             "ecs.admin@1a", "ecs.admin@1c", "aurora.admin@1a", "aurora.admin@1c",
         ]);
+        let (pv, pb) = (Area::Subnet(Tier::Private), Area::Subnet(Tier::Public));
+        assert_eq!(places(&m), [
+            ("user", None, None, Area::Outside),
+            ("cloudfront", None, None, Area::Cloud),
+            ("igw", None, None, Area::VpcEdge),
+            ("alb", None, None, pb),
+            ("ecs.web@1a", Some("web"), Some(0), pv),
+            ("ecs.web@1c", Some("web"), Some(1), pv),
+            ("aurora.web@1a", Some("web"), Some(0), pv),
+            ("aurora.web@1c", Some("web"), Some(1), pv),
+            ("ecs.admin@1a", Some("admin"), Some(0), pv),
+            ("ecs.admin@1c", Some("admin"), Some(1), pv),
+            ("aurora.admin@1a", Some("admin"), Some(0), pv),
+            ("aurora.admin@1c", Some("admin"), Some(1), pv),
+        ]);
         for id in ["aurora.web@1a", "aurora.admin@1a"] {
             assert_eq!(role(&m, id), Some("writer"), "{id}");
         }
@@ -659,37 +680,53 @@ mod tests {
             assert_eq!(role(&m, id), Some("reader"), "{id}");
         }
         assert_eq!(lines(&m), [
-            ("user", "cloudfront", "https"),
-            ("cloudfront", "igw", "https"),
-            ("igw", "alb", "https"),
-            ("alb", "ecs.web@1a", "http"),
-            ("alb", "ecs.web@1c", "http"),
-            ("ecs.web@1a", "aurora.web@1a", "read_write"),
-            ("ecs.web@1a", "aurora.web@1c", "read"),
-            ("ecs.web@1c", "aurora.web@1a", "read_write"),
-            ("ecs.web@1c", "aurora.web@1c", "read"),
-            ("alb", "ecs.admin@1a", "http"),
-            ("alb", "ecs.admin@1c", "http"),
-            ("ecs.admin@1a", "aurora.admin@1a", "read_write"),
-            ("ecs.admin@1a", "aurora.admin@1c", "read"),
-            ("ecs.admin@1c", "aurora.admin@1a", "read_write"),
-            ("ecs.admin@1c", "aurora.admin@1c", "read"),
-            ("aurora.web@1a", "aurora.web@1c", "replication"),
-            ("aurora.admin@1a", "aurora.admin@1c", "replication"),
+            ("user", "cloudfront", Main, "https"),
+            ("cloudfront", "igw", Main, "https"),
+            ("igw", "alb", Main, "https"),
+            ("alb", "ecs.web@1a", Main, "http"),
+            ("alb", "ecs.web@1c", Main, "http"),
+            ("ecs.web@1a", "aurora.web@1a", Main, "read_write"),
+            ("ecs.web@1a", "aurora.web@1c", Main, "read"),
+            ("ecs.web@1c", "aurora.web@1a", Main, "read_write"),
+            ("ecs.web@1c", "aurora.web@1c", Main, "read"),
+            ("alb", "ecs.admin@1a", Main, "http"),
+            ("alb", "ecs.admin@1c", Main, "http"),
+            ("ecs.admin@1a", "aurora.admin@1a", Main, "read_write"),
+            ("ecs.admin@1a", "aurora.admin@1c", Main, "read"),
+            ("ecs.admin@1c", "aurora.admin@1a", Main, "read_write"),
+            ("ecs.admin@1c", "aurora.admin@1c", Main, "read"),
+            ("aurora.web@1a", "aurora.web@1c", Aux, "replication"),
+            ("aurora.admin@1a", "aurora.admin@1c", Aux, "replication"),
         ]);
         assert!(!m.edges.iter().any(|e| e.from == "aurora.web@1a" && e.to == "aurora.admin@1c"));
     }
 
     // Fails if the two load balancers become one, the entry gateway is made twice, one of the web
-    // stacks is dropped, copies are gathered by service, or lines cross from one part to another.
+    // stacks is dropped, copies are gathered by service, lines cross from one part to another, or a
+    // line's relation, a part's zone or area, or the name after the dot changes.
     #[test]
     fn two_load_balancers_build_by_part() {
-        use crate::model::Tier;
         use crate::test_inputs::TWO_WEBS;
         let m = vpc(TWO_WEBS);
         assert_eq!(node_ids(&m), [
             "user", "cloudfront", "igw", "alb.web", "alb.admin", "ecs.web@1a", "ecs.web@1c", "aurora.web@1a",
             "aurora.web@1c", "ecs.admin@1a", "ecs.admin@1c", "aurora.admin@1a", "aurora.admin@1c",
+        ]);
+        let (pv, pb) = (Area::Subnet(Tier::Private), Area::Subnet(Tier::Public));
+        assert_eq!(places(&m), [
+            ("user", None, None, Area::Outside),
+            ("cloudfront", None, None, Area::Cloud),
+            ("igw", None, None, Area::VpcEdge),
+            ("alb.web", Some("web"), None, pb),
+            ("alb.admin", Some("admin"), None, pb),
+            ("ecs.web@1a", Some("web"), Some(0), pv),
+            ("ecs.web@1c", Some("web"), Some(1), pv),
+            ("aurora.web@1a", Some("web"), Some(0), pv),
+            ("aurora.web@1c", Some("web"), Some(1), pv),
+            ("ecs.admin@1a", Some("admin"), Some(0), pv),
+            ("ecs.admin@1c", Some("admin"), Some(1), pv),
+            ("aurora.admin@1a", Some("admin"), Some(0), pv),
+            ("aurora.admin@1c", Some("admin"), Some(1), pv),
         ]);
         for id in ["alb.web", "alb.admin"] {
             let n = m.nodes.iter().find(|n| n.id == id).unwrap();
@@ -697,25 +734,25 @@ mod tests {
         }
         assert_eq!(m.nodes.iter().filter(|n| n.area == Area::VpcEdge).count(), 1);
         assert_eq!(lines(&m), [
-            ("user", "cloudfront", "https"),
-            ("cloudfront", "igw", "https"),
-            ("igw", "alb.web", "https"),
-            ("alb.web", "ecs.web@1a", "http"),
-            ("alb.web", "ecs.web@1c", "http"),
-            ("ecs.web@1a", "aurora.web@1a", "read_write"),
-            ("ecs.web@1a", "aurora.web@1c", "read"),
-            ("ecs.web@1c", "aurora.web@1a", "read_write"),
-            ("ecs.web@1c", "aurora.web@1c", "read"),
-            ("user", "igw", "https"),
-            ("igw", "alb.admin", "https"),
-            ("alb.admin", "ecs.admin@1a", "http"),
-            ("alb.admin", "ecs.admin@1c", "http"),
-            ("ecs.admin@1a", "aurora.admin@1a", "read_write"),
-            ("ecs.admin@1a", "aurora.admin@1c", "read"),
-            ("ecs.admin@1c", "aurora.admin@1a", "read_write"),
-            ("ecs.admin@1c", "aurora.admin@1c", "read"),
-            ("aurora.web@1a", "aurora.web@1c", "replication"),
-            ("aurora.admin@1a", "aurora.admin@1c", "replication"),
+            ("user", "cloudfront", Main, "https"),
+            ("cloudfront", "igw", Main, "https"),
+            ("igw", "alb.web", Main, "https"),
+            ("alb.web", "ecs.web@1a", Main, "http"),
+            ("alb.web", "ecs.web@1c", Main, "http"),
+            ("ecs.web@1a", "aurora.web@1a", Main, "read_write"),
+            ("ecs.web@1a", "aurora.web@1c", Main, "read"),
+            ("ecs.web@1c", "aurora.web@1a", Main, "read_write"),
+            ("ecs.web@1c", "aurora.web@1c", Main, "read"),
+            ("user", "igw", Main, "https"),
+            ("igw", "alb.admin", Main, "https"),
+            ("alb.admin", "ecs.admin@1a", Main, "http"),
+            ("alb.admin", "ecs.admin@1c", Main, "http"),
+            ("ecs.admin@1a", "aurora.admin@1a", Main, "read_write"),
+            ("ecs.admin@1a", "aurora.admin@1c", Main, "read"),
+            ("ecs.admin@1c", "aurora.admin@1a", Main, "read_write"),
+            ("ecs.admin@1c", "aurora.admin@1c", Main, "read"),
+            ("aurora.web@1a", "aurora.web@1c", Aux, "replication"),
+            ("aurora.admin@1a", "aurora.admin@1c", Aux, "replication"),
         ]);
         let part = |id: &str| m.nodes.iter().find(|n| n.id == id).unwrap().part.clone();
         assert!(!m.edges.iter().any(|e| part(&e.from).starts_with("aurora.") && part(&e.to).starts_with("aurora.") && part(&e.from) != part(&e.to)));
@@ -749,7 +786,7 @@ mod tests {
     fn a_public_tier_alone_builds_its_gateway() {
         let m = vpc(crate::test_inputs::LOAD_BALANCER_ALONE);
         assert_eq!(node_ids(&m), ["user", "igw", "alb"]);
-        assert_eq!(lines(&m), [("user", "igw", "https"), ("igw", "alb", "https")]);
+        assert_eq!(lines(&m), [("user", "igw", Main, "https"), ("igw", "alb", Main, "https")]);
     }
 
     /// How the inference with a VPC and this one may differ for an input.
@@ -869,7 +906,7 @@ mod tests {
             assert_eq!(&got, want, "{id}:\n{src}\nold errors {:?}\nnew errors {:?}", old_diag.errors, diag.errors);
             if let Some(c) = &checked {
                 assert!(c.vpc, "{id}");
-                let model = build::vpc_model(&def, &rules, &c.settings);
+                let model = build::vpc_model(&def, &rules, &c.settings).unwrap_or_else(|e| panic!("{id}: {e:?}"));
                 if let Some(old) = &old {
                     assert_eq!(old, &model, "{id}:\n{src}");
                 }
@@ -880,5 +917,119 @@ mod tests {
         assert_eq!(inputs.len(), VPC_INPUT_COUNT);
         assert_eq!(VPC_SAME_COUNT + VPC_NEWLY_BUILT_COUNT + VPC_NEWLY_STOPPED_COUNT + VPC_BOTH_STOP_COUNT, VPC_INPUT_COUNT);
         assert_eq!(NOT_SAME.len(), VPC_INPUT_COUNT - VPC_SAME_COUNT);
+    }
+
+    /// The built-in rules data with one piece of text taken out of services.toml or links.toml.
+    fn rules_cut(services_cut: &str, links_cut: &str) -> Rules {
+        let services = include_str!("../../../../rules/aws/services.toml");
+        let links = include_str!("../../../../rules/aws/links.toml");
+        for (text, cut) in [(services, services_cut), (links, links_cut)] {
+            assert!(cut.is_empty() || text.matches(cut).count() == 1, "{cut}");
+        }
+        Rules::load(
+            &services.replacen(services_cut, "", 1),
+            include_str!("../../../../rules/aws/rules.toml"),
+            include_str!("../../../../rules/aws/labels.toml"),
+            &links.replacen(links_cut, "", 1),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"))
+    }
+
+    // Fails if a line or a role the inference needs and the rules data lacks makes it panic instead
+    // of returning an error, or the lack changes the answer for a definition that does not need it.
+    #[test]
+    fn a_line_or_role_the_data_lacks_is_an_error_not_a_panic() {
+        let line = |from: &str, to: &str, rel: &str, label: &str| {
+            format!("[[derived_link]]\nfrom = \"{from}\"\nto = \"{to}\"\nrel = \"{rel}\"\nlabel = \"{label}\"\n")
+        };
+        const WEB: &str = "flows:\n  - user -> alb -> ecs\n";
+        const OUT: &str = "flows:\n  - user -> alb -> ecs\n  - ecs -> internet\n";
+        const DB: &str = "flows:\n  - user -> alb -> ecs -> aurora\n";
+        const API: &str = "flows:\n  - user -> apigateway(http) -> lambda -> dynamodb\n  - cognito -- apigateway\n";
+        // What is cut, the code and `at` of the error, a definition that needs it, and ones that do not.
+        let cases: [(Rules, &str, &str, &str, &[&str]); 5] = [
+            (rules_cut("", &line("private", "egress_nat", "main", "outbound")), "DERIVED_LINK_MISSING", "derived_link private egress_nat", OUT, &[WEB, DB]),
+            (rules_cut("", &line("egress_nat", "entry_gateway", "main", "outbound")), "DERIVED_LINK_MISSING", "derived_link egress_nat entry_gateway", OUT, &[WEB, DB]),
+            (rules_cut("", &line("writer", "reader", "aux", "replication")), "DERIVED_LINK_MISSING", "derived_link writer reader", DB, &[WEB, OUT]),
+            (rules_cut("derived_role = \"entry_gateway\"\n", ""), "DERIVED_ROLE_MISSING", "entry_gateway", WEB, &[]),
+            (rules_cut("derived_role = \"egress_nat\"\n", ""), "DERIVED_ROLE_MISSING", "egress_nat", OUT, &[WEB, DB]),
+        ];
+        let built = |src: &str, rules: &Rules| {
+            let def = crate::def::parse(src).unwrap();
+            let mut diag = Diagnostics::default();
+            let checked = check(&def, rules, &mut diag).unwrap_or_else(|| panic!("{:?}", diag.errors));
+            build::vpc_model(&def, rules, &checked.settings)
+        };
+        for (rules, code, at, needs, others) in &cases {
+            let e = built(needs, rules).expect_err(code);
+            let got: Vec<_> = e.iter().map(|p| (p.code.as_str(), p.at.as_deref())).collect();
+            assert_eq!(got, [(*code, Some(*at))], "{at}");
+            for src in *others {
+                assert_eq!(built(src, rules).unwrap(), vpc(src), "{at}: {src}");
+            }
+            // Without a VPC no gateway or added line is needed.
+            let (m, d) = infer(&crate::def::parse(API).unwrap(), rules);
+            let (want_m, want_d) = run(API);
+            assert_eq!((m, d.to_json()), (want_m, want_d.to_json()), "{at}");
+        }
+    }
+
+    // Fails if the label a connection gives per kind of its target is dropped in a definition with a VPC.
+    #[test]
+    fn a_kind_gives_its_label_with_a_vpc_too() {
+        let base = "flows:\n  - user -> alb -> ecs\n  - user -> apigateway(http) -> lambda\n  - cognito -- apigateway\n";
+        for (src, want) in [(base.to_string(), "jwt_authorizer"), (base.replace("(http)", "(rest)"), "cognito_authorizer")] {
+            let m = vpc(&src);
+            let e = m.edges.iter().find(|e| e.from == "cognito" && e.to == "apigateway").unwrap();
+            assert_eq!((e.rel, e.label.as_str()), (Rel::Assoc, want), "{src}");
+        }
+    }
+
+    // Fails if a route hole is named by service instead of by part, or an answer for one part's
+    // route reaches the lines of another part.
+    #[test]
+    fn named_parts_have_their_own_routes() {
+        const SRC: &str = "flows:\n  - user -> alb -> ecs.web\n  - alb -> ecs.admin\n  - ecs.web -> s3.web\n  - ecs.admin -> s3.admin\n";
+        const WEB: &str = "route.[ecs.web].[s3.web]";
+        const ADMIN: &str = "route.[ecs.admin].[s3.admin]";
+        let front = [
+            ("user", "igw", Main, "https"),
+            ("igw", "alb", Main, "https"),
+            ("alb", "ecs.web@1a", Main, "http"),
+            ("alb", "ecs.web@1c", Main, "http"),
+            ("alb", "ecs.admin@1a", Main, "http"),
+            ("alb", "ecs.admin@1c", Main, "http"),
+        ];
+        let to_s3 = [
+            ("ecs.web@1a", "s3.web", Main, "read_write"),
+            ("ecs.web@1c", "s3.web", Main, "read_write"),
+            ("ecs.admin@1a", "s3.admin", Main, "read_write"),
+            ("ecs.admin@1c", "s3.admin", Main, "read_write"),
+        ];
+        let parts = ["user", "igw", "alb", "ecs.web@1a", "ecs.web@1c", "ecs.admin@1a", "ecs.admin@1c", "s3.web", "s3.admin"];
+        // The hole and the endpoint mark of the lines to S3, in the order above.
+        let marks = |m: &Model| m.edges.iter().filter(|e| e.to.starts_with("s3.")).map(|e| (e.hole.clone(), e.endpoint)).collect::<Vec<_>>();
+        let (web, admin) = (Some(WEB.to_string()), Some(ADMIN.to_string()));
+
+        let m = vpc(SRC);
+        assert_eq!(node_ids(&m), parts);
+        assert_eq!(lines(&m), [&front[..], &to_s3[..]].concat());
+        assert_eq!(marks(&m), [(web.clone(), false), (web.clone(), false), (admin.clone(), false), (admin.clone(), false)]);
+
+        let m = vpc(&format!("{SRC}choose:\n  {WEB}: endpoint\n"));
+        assert_eq!(node_ids(&m), parts);
+        assert_eq!(lines(&m), [&front[..], &to_s3[..]].concat());
+        assert_eq!(marks(&m), [(None, true), (None, true), (admin.clone(), false), (admin.clone(), false)]);
+
+        let m = vpc(&format!("{SRC}choose:\n  {ADMIN}: nat\n"));
+        assert_eq!(node_ids(&m), ["user", "igw", "alb", "nat-1a", "nat-1c", "ecs.web@1a", "ecs.web@1c", "ecs.admin@1a", "ecs.admin@1c", "s3.web", "s3.admin"]);
+        let out = [
+            ("ecs.admin@1a", "nat-1a", Main, "outbound"),
+            ("ecs.admin@1c", "nat-1c", Main, "outbound"),
+            ("nat-1a", "igw", Main, "outbound"),
+            ("nat-1c", "igw", Main, "outbound"),
+        ];
+        assert_eq!(lines(&m), [&front[..], &to_s3[..], &out[..]].concat());
+        assert_eq!(marks(&m), [(web.clone(), false), (web.clone(), false), (None, false), (None, false)]);
     }
 }
