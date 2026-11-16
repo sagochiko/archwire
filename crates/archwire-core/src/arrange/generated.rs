@@ -5,9 +5,10 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use crate::diag::{Diagnostics, Problem};
+use crate::layout::Layout;
 use crate::lines::Line;
-use crate::model::{Axis, Model};
-use crate::route::{LinePlan, Wire};
+use crate::model::{Area, Axis, Model};
+use crate::route::{port_point, LinePlan, Wire};
 use crate::rules::Rules;
 use crate::test_inputs::{ID_CLASH, MIX_LOGS, MIX_NAT, MIX_SMALLEST, MIX_WEB, ONE_FUNCTION_THREE_WAYS, TWIN_APPS};
 
@@ -15,7 +16,10 @@ use crate::test_inputs::{ID_CLASH, MIX_LOGS, MIX_NAT, MIX_SMALLEST, MIX_WEB, ONE
 pub(in crate::arrange) const MIXED_DEFINITIONS: usize = 840;
 
 /// How many named inputs `mixed_representatives` gives.
-const REPRESENTATIVES: usize = 20;
+const REPRESENTATIVES: usize = 25;
+
+/// How many of the named inputs, from the first, are drawn for the diagram checker.
+const REPRESENTATIVES_FOR_THE_CHECKER: usize = 20;
 
 /// Every definition mixing serverless parts with VPC parts the generator makes, in order: two or
 /// three zones; one NAT gateway per zone or one in all, only where a NAT gateway is drawn; no web
@@ -97,6 +101,11 @@ const AUX_ORDER: &str = "flows:\n  - user -> apigateway(http) -> lambda.api -> a
 const FEWER_READERS_MIX: &str = "flows:\n  - user -> alb -> ecs -> aurora\n  - aurora -> ecs\n  - aurora -> s3\n  - user -> apigateway(http) -> lambda -> aurora\nset:\n  azs: 3\n  readers: 1\nchoose:\n  route.aurora.s3: endpoint\n";
 const TWO_ATTACHED_TO_ONE_LOG: &str = "flows:\n  - user -> apigateway(http) -> lambda.a -> aurora\n  - apigateway -> lambda.b -> aurora\n  - lambda.a ~> cloudwatch\n  - lambda.b ~> cloudwatch\n";
 const FUNCTION_BEFORE_WEB_3AZ: &str = "flows:\n  - user -> apigateway(http) -> lambda.api -> aurora\n  - user -> cloudfront -> alb -> ecs -> aurora\nset:\n  azs: 3\n";
+const BOTH_TO_THE_INTERNET: &str = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - user -> apigateway(http) -> lambda -> aurora\n  - ecs -> internet\n  - lambda -> internet\n";
+const SPLIT_ROUTES: &str = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - user -> apigateway(http) -> lambda -> aurora\n  - ecs -> s3\n  - lambda -> s3\nchoose:\n  route.ecs.s3: endpoint\n  route.lambda.s3: nat\n";
+const MIX_COGNITO: &str = "flows:\n  - user -> apigateway(http) -> lambda -> aurora\n  - cognito -- apigateway\n  - lambda ~> cloudwatch\n";
+const ONE_FRONT_TWO_WAYS: &str = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - cloudfront -> apigateway(http) -> lambda -> aurora\n";
+const SHARED_BUCKET: &str = "flows:\n  - user -> cloudfront -> s3\n  - user -> apigateway(http) -> lambda -> aurora\n  - lambda -> s3\nchoose:\n  route.lambda.s3: endpoint\n";
 
 /// Named definitions picked by hand for shapes the generator does not make.
 pub(in crate::arrange) fn mixed_representatives() -> Vec<(&'static str, String)> {
@@ -121,6 +130,11 @@ pub(in crate::arrange) fn mixed_representatives() -> Vec<(&'static str, String)>
         ("one-function-3", ONE_FUNCTION_THREE_WAYS[2]),
         ("mix-smallest", MIX_SMALLEST),
         ("mix-nat", MIX_NAT),
+        ("both-to-the-internet", BOTH_TO_THE_INTERNET),
+        ("split-routes", SPLIT_ROUTES),
+        ("mix-cognito", MIX_COGNITO),
+        ("one-front-two-ways", ONE_FRONT_TWO_WAYS),
+        ("shared-bucket", SHARED_BUCKET),
     ];
     list.into_iter().map(|(n, s)| (n, s.to_string())).collect()
 }
@@ -147,41 +161,75 @@ fn guarded<T>(stage: &str, f: impl FnOnce() -> T) -> Result<T, String> {
 }
 
 /// Parses, infers with the one inference, lays out along `axis`, gathers the lines, routes them
-/// from the placement's drafts and writes the diagram, keeping what each stage gave.
+/// from the placement's drafts and writes the diagram, keeping what each stage gave. The checks on
+/// the gathered and drawn lines run only when a diagram was drawn.
 pub(in crate::arrange) fn draw_counted(src: &str, axis: Axis) -> Drawn {
+    draw_stages(src, axis).0
+}
+
+/// Like `draw_counted`, with what `through_the_vpc` found on the drawn lines; empty when no
+/// diagram was drawn.
+fn draw_stages(src: &str, axis: Axis) -> (Drawn, Vec<String>) {
+    let stop = |d: Drawn| (d, Vec::new());
     let r = Rules::builtin();
     let def = match crate::def::parse(src) {
         Ok(d) => d,
-        Err(e) => return Drawn::Errors(e),
+        Err(e) => return stop(Drawn::Errors(e)),
     };
     let (model, mut diag) = match guarded("infer", || crate::inference::infer(&def, &r)) {
         Ok(x) => x,
-        Err(p) => return Drawn::Panicked(p),
+        Err(p) => return stop(Drawn::Panicked(p)),
     };
-    let Some(model) = model else { return Drawn::Errors(diag.errors) };
+    let Some(model) = model else { return stop(Drawn::Errors(diag.errors)) };
     if !diag.errors.is_empty() {
-        return Drawn::Errors(diag.errors);
+        return stop(Drawn::Errors(diag.errors));
     }
     let placement = match guarded("arrange", || super::arrange(&model, &r, axis)) {
         Ok(Ok(p)) => p,
-        Ok(Err(e)) => return Drawn::LayoutFailed(e),
-        Err(p) => return Drawn::Panicked(p),
+        Ok(Err(e)) => return stop(Drawn::LayoutFailed(e)),
+        Err(p) => return stop(Drawn::Panicked(p)),
     };
     let lines = match guarded("gather", || crate::lines::gather(&model, &placement.layout, &r).0) {
         Ok(l) => l,
-        Err(p) => return Drawn::Panicked(p),
+        Err(p) => return stop(Drawn::Panicked(p)),
     };
     let (wires, notes) = match guarded("route", || crate::route::route_planned(&model, &placement.layout, &r, &placement.lines)) {
         Ok(x) => x,
-        Err(p) => return Drawn::Panicked(p),
+        Err(p) => return stop(Drawn::Panicked(p)),
     };
     diag.notes.extend(notes.iter().cloned());
     let xml = match guarded("write", || crate::drawio::write(&model, &placement.layout, &wires, &diag, &r, false)) {
         Ok(x) => x,
-        Err(p) => return Drawn::Panicked(p),
+        Err(p) => return stop(Drawn::Panicked(p)),
     };
-    let lines_broken = line_checks(&model, &lines, &placement.lines, &wires);
-    Drawn::Drawn { xml, notes, lines_broken }
+    let lines_broken = match guarded("line_checks", || line_checks(&model, &lines, &placement.lines, &wires)) {
+        Ok(l) => l,
+        Err(p) => return stop(Drawn::Panicked(p)),
+    };
+    let through = match guarded("through_the_vpc", || through_the_vpc(&model, &placement.layout, &wires)) {
+        Ok(t) => t,
+        Err(p) => return stop(Drawn::Panicked(p)),
+    };
+    (Drawn::Drawn { xml, notes, lines_broken }, through)
+}
+
+/// Check 8, apart from the checks on gathered lines: a drawn line whose two ends are both outside
+/// the VPC frame (not in a subnet, not on the VPC's edge) never passes through the inside of the
+/// VPC's rectangle, its path taken from the exit port through every waypoint to the entry port.
+/// Empty when the diagram has no VPC.
+fn through_the_vpc(m: &Model, layout: &Layout, wires: &[Wire]) -> Vec<String> {
+    let Some(vpc) = layout.frames.iter().find(|f| f.id == super::azgrid::VPC_FRAME).map(|f| f.rect) else { return Vec::new() };
+    let outside = |id: &str| m.nodes.iter().find(|n| n.id == id).is_some_and(|n| !matches!(n.area, Area::Subnet(_) | Area::VpcEdge));
+    let mut found = Vec::new();
+    for w in wires.iter().filter(|w| outside(&w.from) && outside(&w.to)) {
+        let mut path = vec![port_point(layout.rect(&w.from), w.exit)];
+        path.extend(w.points.iter().copied());
+        path.push(port_point(layout.rect(&w.to), w.entry));
+        if path.windows(2).any(|s| crate::path::hits(s[0], s[1], vpc)) {
+            found.push(format!("8: {} runs through the VPC {vpc:?} along {path:?}", w.id));
+        }
+    }
+    found
 }
 
 /// The checks on gathered and drawn lines no diagram shows, each finding prefixed with its
@@ -203,14 +251,18 @@ fn line_checks(m: &Model, lines: &[Line], plans: &[LinePlan], wires: &[Wire]) ->
         if !l.edges.contains(&l.rep) {
             found.push(format!("2: {name} has representative {} outside {:?}", l.rep, l.edges));
         }
-        for &k in &l.edges {
+        // A number past the model's edges is found here, before any check reads the edge.
+        for &k in l.edges.iter().filter(|&&k| k >= m.edges.len()) {
+            found.push(format!("1: {name} holds edge {k}, past the model's {} edges", m.edges.len()));
+        }
+        for &k in l.edges.iter().filter(|&&k| k < m.edges.len()) {
             let e = &m.edges[k];
             if e.label != l.label_key || e.hole != l.hole || e.endpoint != l.endpoint {
                 found.push(format!("3: {name} holds edge {k} {}->{} with label {:?}, hole {:?}, endpoint {}", e.from, e.to, e.label, e.hole, e.endpoint));
             }
         }
         let mut want: Vec<(String, Vec<usize>)> = Vec::new();
-        for &k in &l.edges {
+        for &k in l.edges.iter().filter(|&&k| k < m.edges.len()) {
             let Some(f) = node(&m.edges[k].from) else {
                 found.push(format!("4: {name} holds edge {k} from an unknown part"));
                 continue;
@@ -273,8 +325,12 @@ fn all_inputs() -> Vec<(String, String)> {
 
 const AXES: [(Axis, &str); 2] = [(Axis::Right, "right"), (Axis::Down, "down")];
 
-/// The kinds a drawing is counted as, in the order they are reported.
-const KINDS: [&str; 6] = ["errors", "layout_failed", "panicked", "lines_broken", "broken", "pass"];
+/// The kinds a drawing is counted as, in the order they are reported. A drawing counts as the
+/// first stage it stops at. A drawn diagram is `lines_broken` when a check on its gathered and
+/// drawn lines (1 to 7) finds anything, else `broken` when the router names a line it could not
+/// draw clear, else `through_vpc` when a line between two parts outside the VPC passes through
+/// it (check 8), else `pass`.
+const KINDS: [&str; 7] = ["errors", "layout_failed", "panicked", "lines_broken", "broken", "through_vpc", "pass"];
 
 /// One cell of a report: no tab or line break.
 fn cell(s: &str) -> String {
@@ -285,56 +341,102 @@ fn problems(p: &[Problem]) -> String {
     p.iter().map(|p| format!("{} {}: {}", p.code, p.at.as_deref().unwrap_or("-"), p.message)).collect::<Vec<_>>().join(" | ")
 }
 
-/// Draws every input along both axes and returns one row per drawing (name, axis, kind, what
-/// was found, the definition) and the count of each kind and of each line check.
-fn count(inputs: &[(String, String)]) -> (Vec<[String; 5]>, Vec<usize>, [usize; 7]) {
-    let mut rows = Vec::new();
-    let mut kinds = vec![0; KINDS.len()];
-    let mut checks = [0; 7];
+/// The file stem a drawing is written under: the input's name with `#` made `-`, then the axis,
+/// so each row of the report names one file.
+fn stem(name: &str, way: &str) -> String {
+    format!("{}-{way}", name.replace('#', "-"))
+}
+
+/// What drawing a list of inputs gave.
+struct Counted {
+    /// One per drawing: name, axis, kind, what was found, the definition.
+    rows: Vec<[String; 5]>,
+    /// The drawings of each of `KINDS`.
+    kinds: Vec<usize>,
+    /// The findings of each check, 1 to 8, over every drawn diagram.
+    checks: [usize; 8],
+    /// One per drawn diagram check 8 found anything in, whatever its kind: name, axis, kind, findings.
+    through: Vec<String>,
+}
+
+/// Draws every input along both axes. With `out`, writes each drawn diagram there as
+/// `<stem>.drawio` beside its definition with its direction written, `<stem>.yaml`, after
+/// removing the files of these stems a run left.
+fn count(inputs: &[(String, String)], out: Option<&std::path::Path>) -> Counted {
+    if let Some(dir) = out {
+        std::fs::create_dir_all(dir).unwrap();
+        for (name, _) in inputs {
+            for (_, way) in AXES {
+                for ext in ["drawio", "yaml"] {
+                    let f = dir.join(format!("{}.{ext}", stem(name, way)));
+                    if f.exists() {
+                        std::fs::remove_file(f).unwrap();
+                    }
+                }
+            }
+        }
+    }
+    let mut c = Counted { rows: Vec::new(), kinds: vec![0; KINDS.len()], checks: [0; 8], through: Vec::new() };
     for (name, src) in inputs {
         for (axis, way) in AXES {
-            let (kind, found) = match draw_counted(src, axis) {
+            let (drawn, through) = draw_stages(src, axis);
+            let (kind, found) = match drawn {
                 Drawn::Errors(e) => ("errors", problems(&e)),
                 Drawn::LayoutFailed(e) => ("layout_failed", problems(&e)),
                 Drawn::Panicked(p) => ("panicked", p),
-                Drawn::Drawn { notes, lines_broken, .. } => {
+                Drawn::Drawn { xml, notes, lines_broken } => {
+                    if let Some(dir) = out {
+                        std::fs::write(dir.join(format!("{}.drawio", stem(name, way))), &xml).unwrap();
+                        std::fs::write(dir.join(format!("{}.yaml", stem(name, way))), with_direction(src, way)).unwrap();
+                    }
                     let broken: Vec<&String> = notes.iter().filter(|n| n.contains("edge-")).collect();
-                    for f in &lines_broken {
-                        if let Some(k) = f.split(':').next().and_then(|k| k.parse::<usize>().ok()).filter(|k| (1..=7).contains(k)) {
-                            checks[k - 1] += 1;
+                    for f in lines_broken.iter().chain(&through) {
+                        if let Some(k) = f.split(':').next().and_then(|k| k.parse::<usize>().ok()).filter(|k| (1..=8).contains(k)) {
+                            c.checks[k - 1] += 1;
                         }
                     }
                     let mut all: Vec<String> = lines_broken.clone();
                     all.extend(broken.iter().map(|n| n.to_string()));
-                    match (lines_broken.is_empty(), broken.is_empty()) {
-                        (false, _) => ("lines_broken", all.join(" | ")),
-                        (true, false) => ("broken", all.join(" | ")),
-                        (true, true) => ("pass", notes.join(" | ")),
+                    match (lines_broken.is_empty(), broken.is_empty(), through.is_empty()) {
+                        (false, _, _) => ("lines_broken", all.join(" | ")),
+                        (true, false, _) => ("broken", all.join(" | ")),
+                        (true, true, false) => ("through_vpc", through.join(" | ")),
+                        (true, true, true) => ("pass", notes.join(" | ")),
                     }
                 }
             };
-            kinds[KINDS.iter().position(|k| *k == kind).expect("a listed kind")] += 1;
-            rows.push([name.clone(), way.to_string(), kind.to_string(), cell(&found), cell(src)]);
+            c.kinds[KINDS.iter().position(|k| *k == kind).expect("a listed kind")] += 1;
+            if !through.is_empty() {
+                c.through.push(format!("{name}\t{way}\t{kind}\t{}", cell(&through.join(" | "))));
+            }
+            c.rows.push([name.clone(), way.to_string(), kind.to_string(), cell(&found), cell(src)]);
         }
     }
-    (rows, kinds, checks)
+    c
 }
 
 /// Fails with the count of each kind when any drawing is not a pass.
-fn assert_all_pass(rows: &[[String; 5]], kinds: &[usize], checks: &[usize; 7]) {
-    let failed: Vec<String> = rows.iter().filter(|r| r[2] != "pass").map(|r| format!("{} {} {}: {}", r[0], r[1], r[2], r[3])).collect();
-    let counts: Vec<String> = KINDS.iter().zip(kinds).map(|(k, n)| format!("{k} {n}")).collect();
+fn assert_all_pass(c: &Counted) {
+    let failed: Vec<String> = c.rows.iter().filter(|r| r[2] != "pass").map(|r| format!("{} {} {}: {}", r[0], r[1], r[2], r[3])).collect();
+    let counts: Vec<String> = KINDS.iter().zip(&c.kinds).map(|(k, n)| format!("{k} {n}")).collect();
     assert!(
         failed.is_empty(),
-        "{} of {} drawings failed; {}; line checks {checks:?}\n{}",
+        "{} of {} drawings failed; {}; line checks {:?}\n{}",
         failed.len(),
-        rows.len(),
+        c.rows.len(),
         counts.join(", "),
+        c.checks,
         failed.join("\n")
     );
 }
 
-// Fails if the generator makes a different number of definitions or makes one twice.
+/// A folder named by an environment variable, taken from the workspace root when relative.
+fn folder_from(var: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os(var).map(|d| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(d))
+}
+
+// Fails if the generator makes a different number of definitions or makes one twice, or a named
+// input is listed twice, is also generated, or stops before it is drawn.
 #[test]
 fn the_mixed_generator_keeps_its_count() {
     let defs = generated_mixed();
@@ -344,73 +446,101 @@ fn the_mixed_generator_keeps_its_count() {
     }
     let reps = mixed_representatives();
     assert_eq!(reps.len(), REPRESENTATIVES);
+    let r = Rules::builtin();
     for (i, (n, s)) in reps.iter().enumerate() {
         assert!(!reps[..i].iter().any(|(m, t)| m == n || t == s), "{n} twice");
         assert!(!defs.contains(s), "{n} is also generated");
+        let (m, d) = crate::inference::infer(&crate::def::parse(s).unwrap(), &r);
+        assert!(m.is_some() && d.errors.is_empty(), "{n}: {:?}", d.errors);
     }
 }
 
 // Fails if any generated or named definition mixing serverless parts with VPC parts gives no
-// model, fails to lay out, panics, loses or repeats a line while gathering or drawing, or breaks
-// a line, along either axis. With ARCHWIRE_MIXED_REPORT=<file> (relative to the workspace root),
-// writes one tab-separated row per drawing there. It takes minutes, so it runs only when named:
+// model, fails to lay out, panics, loses or repeats a line while gathering or drawing, breaks a
+// line, or draws a line between two parts outside the VPC through it, along either axis.
+// A pass is judged by the layout's own checks, the checks on gathered and drawn lines (which run
+// only on the inputs a diagram was drawn for) and the router's notes. The diagram checker is run
+// apart: it starts draw.io for each diagram, so it is run only on the eighty diagrams
+// `mixed_diagrams_for_the_checker` writes, not on every diagram. With ARCHWIRE_MIXED_OUT=<dir>,
+// writes every drawn diagram there as `<stem>.drawio` beside `<stem>.yaml`, `<stem>` being the
+// input's name with `#` made `-`, then `-right` or `-down`, to look at one or check a few with
+// `python3 tools/geocheck.py <dir>/<stem>.drawio`, one at a time. With ARCHWIRE_MIXED_REPORT=<file>, writes one
+// tab-separated row per drawing there, and the drawings check 8 found anything in, whatever their
+// kind, to `through-vpc.tsv` beside it. Both are taken from the workspace root when relative.
+// It takes minutes, so it runs only when named:
 //     cargo test -p archwire-core generated_mixed_definitions_all_draw_cleanly -- --ignored
 #[test]
 #[ignore]
 fn generated_mixed_definitions_all_draw_cleanly() {
     let inputs = all_inputs();
     assert_eq!(inputs.len(), MIXED_DEFINITIONS + REPRESENTATIVES);
-    let (rows, kinds, checks) = count(&inputs);
-    assert_eq!(rows.len(), 2 * inputs.len());
-    if let Some(file) = std::env::var_os("ARCHWIRE_MIXED_REPORT") {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(file);
+    let out = folder_from("ARCHWIRE_MIXED_OUT");
+    let c = count(&inputs, out.as_deref());
+    assert_eq!(c.rows.len(), 2 * inputs.len());
+    if let Some(path) = folder_from("ARCHWIRE_MIXED_REPORT") {
         let mut text = String::from("input\taxis\tkind\tfound\tdefinition\n");
-        for r in &rows {
+        for r in &c.rows {
             text.push_str(&r.join("\t"));
             text.push('\n');
         }
-        std::fs::write(path, text).unwrap();
+        std::fs::write(&path, text).unwrap();
+        let mut text = String::from("input\taxis\tkind\tfound\n");
+        for t in &c.through {
+            text.push_str(t);
+            text.push('\n');
+        }
+        std::fs::write(path.with_file_name("through-vpc.tsv"), text).unwrap();
     }
-    assert_all_pass(&rows, &kinds, &checks);
+    assert_all_pass(&c);
 }
 
 // Fails if any generated or named mixed definition with two zones gives no model, fails to lay
-// out, panics, loses or repeats a line, or breaks a line, along either axis. Some still break,
-// so it runs only when named:
+// out, panics, loses or repeats a line, breaks a line or draws a line outside the VPC through it,
+// along either axis. A pass is judged as in `generated_mixed_definitions_all_draw_cleanly`,
+// without the diagram checker. Some still break, so it runs only when named:
 //     cargo test -p archwire-core generated_mixed_two_zone_definitions_draw_cleanly -- --ignored
 #[test]
 #[ignore]
 fn generated_mixed_two_zone_definitions_draw_cleanly() {
     let inputs: Vec<(String, String)> = all_inputs().into_iter().filter(|(_, s)| !s.contains("  azs: 3\n")).collect();
-    let (rows, kinds, checks) = count(&inputs);
-    assert_all_pass(&rows, &kinds, &checks);
+    assert_all_pass(&count(&inputs, None));
 }
 
-/// How many inputs `mixed_diagrams_for_the_checker` draws: every named one and twenty taken
-/// evenly from the generated ones, each along both axes.
+/// How many inputs `mixed_diagrams_for_the_checker` draws: the first twenty named ones and the
+/// twenty generated ones of `GENERATED_FOR_THE_CHECKER`, each along both axes.
 const MIXED_FOR_THE_CHECKER: usize = 40;
 
-// Fails if an input handed to the checker gives no model, or if fewer definitions are written than picked.
+/// The generated definitions drawn for the diagram checker, by number: 14, 6 and 227 by name (an
+/// S3 bucket, a CloudWatch beside a function outside the VPC, and a long Japanese label), then
+/// seventeen spread over the list, taking the Japanese one of a pair at every other place.
+/// Ten are in English and ten in Japanese.
+const GENERATED_FOR_THE_CHECKER: [usize; 20] = [14, 6, 227, 1, 48, 99, 148, 197, 246, 297, 344, 395, 444, 495, 542, 593, 642, 691, 740, 791];
+
+// Fails if an input handed to the checker gives no model, the generated ones picked change or
+// lose their mix of languages, or fewer definitions are written than picked.
 /// With `ARCHWIRE_GEN_OUT=<dir>`, removes the `m<number>-<axis>` files a run left there, then
-/// writes each named input and twenty generated ones drawn along both axes as
-/// `<dir>/m<number>-<axis>.yaml` (the definition with its direction written) and, when a diagram
-/// was drawn, `<dir>/m<number>-<axis>.drawio`. Without it, only infers them.
+/// writes each picked input drawn along both axes as `<dir>/m<number>-<axis>.yaml` (the
+/// definition with its direction written) and, when a diagram was drawn,
+/// `<dir>/m<number>-<axis>.drawio`. Without it, only infers them.
 #[test]
 fn mixed_diagrams_for_the_checker() {
-    let mut picked: Vec<String> = mixed_representatives().into_iter().map(|(_, s)| s).collect();
+    let mut picked: Vec<String> = mixed_representatives().into_iter().take(REPRESENTATIVES_FOR_THE_CHECKER).map(|(_, s)| s).collect();
     let defs = generated_mixed();
-    let n = MIXED_FOR_THE_CHECKER - picked.len();
-    for k in 0..n {
-        picked.push(defs[k * defs.len() / n].clone());
+    let generated: Vec<&String> = GENERATED_FOR_THE_CHECKER.iter().map(|&k| &defs[k]).collect();
+    let ja = generated.iter().filter(|s| s.contains("  lang: ja\n")).count();
+    let en = generated.iter().filter(|s| s.contains("  lang: en\n")).count();
+    assert_eq!((ja, en), (10, 10));
+    for (i, k) in GENERATED_FOR_THE_CHECKER.iter().enumerate() {
+        assert!(!GENERATED_FOR_THE_CHECKER[..i].contains(k), "#{k} twice");
     }
+    picked.extend(generated.into_iter().cloned());
     assert_eq!(picked.len(), MIXED_FOR_THE_CHECKER);
     let r = Rules::builtin();
     for src in &picked {
         let (m, d): (Option<Model>, Diagnostics) = crate::inference::infer(&crate::def::parse(src).unwrap(), &r);
         assert!(m.is_some() && d.errors.is_empty(), "{:?}\n{src}", d.errors);
     }
-    let Some(dir) = std::env::var_os("ARCHWIRE_GEN_OUT") else { return };
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(dir);
+    let Some(dir) = folder_from("ARCHWIRE_GEN_OUT") else { return };
     std::fs::create_dir_all(&dir).unwrap();
     let ours = |stem: &str| {
         let b = stem.as_bytes();
