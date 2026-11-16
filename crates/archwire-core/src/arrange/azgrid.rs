@@ -15,7 +15,7 @@ use super::layered::ROW_STEP;
 use super::check::failed;
 use super::{Crossing, Lane};
 use crate::diag::Problem;
-use crate::route::edge_id;
+use crate::ids::edge_id;
 use crate::def::Rel;
 use crate::layout::{icon, Frame, FrameKind, Icon, Layout, Rect};
 use crate::lines::gather;
@@ -1416,7 +1416,7 @@ pub(in crate::arrange) mod tests {
     /// and CloudWatch outside the VPC.
     pub(in crate::arrange) fn smallest_mix(lambda: &str) -> Model {
         let pri = Area::Subnet(Tier::Private);
-        let (l1, l2) = (copy_id(lambda, "1a"), copy_id(lambda, "1c"));
+        let (l1, l2) = (crate::ids::copy_id(lambda, "1a"), crate::ids::copy_id(lambda, "1c"));
         let nodes = vec![
             node("user", "user", "user", Area::Outside, None, None),
             http_api(),
@@ -1445,9 +1445,6 @@ pub(in crate::arrange) mod tests {
             edges.push(edge(l, "cloudwatch", Rel::Aux, "logs_metrics", None));
         }
         Model { region: "ap-northeast-1".into(), azs: vec!["ap-northeast-1a".into(), "ap-northeast-1c".into()], lang: Lang::Ja, nodes, edges, direction: None }
-    }
-    fn copy_id(part: &str, zone: &str) -> String {
-        if part.contains('.') { format!("{part}@{zone}") } else { format!("{part}-{zone}") }
     }
 
     /// The web example with API Gateway and Lambda copies in ECS's row, both reaching Aurora.

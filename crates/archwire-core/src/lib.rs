@@ -14,6 +14,7 @@ pub mod rules;
 
 mod audit;
 mod grid;
+mod ids;
 mod labels;
 mod lines;
 mod measure;

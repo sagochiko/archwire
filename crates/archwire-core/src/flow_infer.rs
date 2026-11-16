@@ -6,6 +6,7 @@
 
 use crate::def::{Definition, Link, Ref, Rel};
 use crate::diag::{Diagnostics, Hole, Problem, Versions};
+use crate::ids::kind_hole;
 use crate::infer::{area_of, check_direction, check_lang, check_names, check_region, derived};
 use crate::model::{Area, Axis, Edge, Model, Node};
 use crate::rules::{Lang, LinkRule, Rules, Scope};
@@ -36,10 +37,6 @@ fn arrow(rel: Rel) -> &'static str {
 
 fn written(l: &Link) -> String {
     format!("{} {} {}", l.from.name, arrow(l.rel), l.to.name)
-}
-
-fn hole_id(part: &str) -> String {
-    format!("kind.{part}")
 }
 
 pub fn infer(def: &Definition, rules: &Rules) -> (Option<Model>, Diagnostics) {
@@ -89,7 +86,7 @@ pub fn infer(def: &Definition, rules: &Rules) -> (Option<Model>, Diagnostics) {
     let open: Vec<(String, &Ref)> = parts
         .iter()
         .filter(|r| r.option.is_none() && rules.service(&r.service).is_some_and(|s| s.kind_hole))
-        .map(|r| (hole_id(&r.name), *r))
+        .map(|r| (kind_hole(&r.name), *r))
         .collect();
     for (key, value) in &def.choose {
         let at = format!("choose.{key}");
@@ -198,7 +195,7 @@ fn build(
     diag: &mut Diagnostics,
 ) -> Model {
     let svc = |name: &str| rules.service(name).expect("names were checked");
-    let option = |r: &Ref| r.option.clone().or_else(|| def.choose.get(&hole_id(&r.name)).cloned());
+    let option = |r: &Ref| r.option.clone().or_else(|| def.choose.get(&kind_hole(&r.name)).cloned());
     // The connection that moves a part to another Region, if any.
     let moved = |name: &str| accepted.iter().map(|(l, rule)| (*l, *rule)).find(|(l, rule)| l.from.name == name && rule.from_rule.is_some());
 
@@ -561,7 +558,7 @@ mod tests {
         unique.sort();
         unique.dedup();
         assert_eq!(unique.len(), nodes.len());
-        let lines: Vec<String> = m.edges.iter().map(|e| crate::route::edge_id(&e.from, &e.to)).collect();
+        let lines: Vec<String> = m.edges.iter().map(|e| crate::ids::edge_id(&e.from, &e.to)).collect();
         assert_eq!(lines.len(), 12);
         let mut unique = lines.clone();
         unique.sort();
@@ -570,9 +567,9 @@ mod tests {
         assert!(lines.iter().all(|l| !nodes.contains(l)));
         // Each line id names exactly one ordered pair of nodes in the model: the pair it joins.
         for e in &m.edges {
-            let id = crate::route::edge_id(&e.from, &e.to);
+            let id = crate::ids::edge_id(&e.from, &e.to);
             let pairs: Vec<_> = nodes.iter().flat_map(|a| nodes.iter().map(move |b| (a, b)))
-                .filter(|(a, b)| a != b && crate::route::edge_id(a, b) == id).collect();
+                .filter(|(a, b)| a != b && crate::ids::edge_id(a, b) == id).collect();
             assert_eq!(pairs, [(&e.from, &e.to)], "{id}");
         }
     }

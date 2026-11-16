@@ -6,6 +6,7 @@
 
 use crate::def::{Definition, Link, Rel};
 use crate::diag::{Derived, Diagnostics, Hole, Problem, Versions};
+use crate::ids::copy_id;
 use crate::model::{Area, Axis, Edge, Model, Node, Tier};
 use crate::rules::{Lang, Place, Rules, Scope, Service, Subnet};
 
@@ -265,7 +266,7 @@ fn find_routes(def: &Definition, rules: &Rules) -> Vec<Route> {
             from && to
         })
         .map(|l| Route {
-            id: format!("route.{}.{}", l.from.name, l.to.name),
+            id: crate::ids::route_hole(&l.from.name, &l.to.name),
             at: l.at.clone(),
             from: l.from.name.clone(),
             to: l.to.name.clone(),
@@ -387,11 +388,6 @@ pub(crate) fn derived(rules: &Rules, lang: Lang, target: &str, id: &str, added: 
         },
         source: r.source.clone(),
     }
-}
-
-/// The id of the copy of a part in one Availability Zone, e.g. "ecs-1a" for "ecs" in ap-northeast-1a.
-pub(crate) fn copy_id(part: &str, suffix: &str) -> String {
-    format!("{part}-{suffix}")
 }
 
 /// The service key is also the written part: the VPC layout has no named parts.
@@ -969,13 +965,13 @@ mod tests {
         assert_eq!((written, copies), (11, 12));
         // A line id names exactly one ordered pair of nodes, so it points at the parts it joins.
         for (from, to) in &links {
-            let id = crate::route::edge_id(from, to);
+            let id = crate::ids::edge_id(from, to);
             let pairs: Vec<_> = ids.iter().flat_map(|a| ids.iter().map(move |b| (a, b)))
-                .filter(|(a, b)| a != b && crate::route::edge_id(a, b) == id).collect();
+                .filter(|(a, b)| a != b && crate::ids::edge_id(a, b) == id).collect();
             assert_eq!(pairs.len(), 1, "{id}");
             assert_eq!((pairs[0].0.as_str(), pairs[0].1.as_str()), (*from, *to), "{id}");
         }
-        let mut lines: Vec<String> = ids.iter().flat_map(|a| ids.iter().filter(move |b| *b != a).map(move |b| crate::route::edge_id(a, b))).collect();
+        let mut lines: Vec<String> = ids.iter().flat_map(|a| ids.iter().filter(move |b| *b != a).map(move |b| crate::ids::edge_id(a, b))).collect();
         let n = lines.len();
         lines.sort();
         lines.dedup();

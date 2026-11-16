@@ -505,4 +505,11 @@ mod tests {
         let e = parse("flows:\n  - a -> b\nchoose:\n  r.a.b: x\n  r.a.b: y\n").unwrap_err();
         assert_eq!((e[0].code.as_str(), e[0].at.as_deref()), ("DUPLICATE_KEY", Some("choose.r.a.b")));
     }
+
+    // Fails if a hole id with a bracketed named part is not read from `choose`.
+    #[test]
+    fn a_bracketed_hole_is_read_from_choose() {
+        let d = parse("flows:\n  - lambda.api -> s3\nchoose:\n  route.[lambda.api].s3: nat\n").unwrap();
+        assert_eq!(d.choose.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>(), [("route.[lambda.api].s3", "nat")]);
+    }
 }

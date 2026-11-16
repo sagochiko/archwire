@@ -275,4 +275,14 @@ mod tests {
         assert_eq!(set_value("flows:\n  - a -> b\n", "set.x", "a\nb").unwrap_err().code, "BAD_VALUE");
         assert_eq!(set_value("flows:\n  - a -> b\n", "set.x", "").unwrap_err().code, "BAD_VALUE");
     }
+
+    // Fails if a hole id with a bracketed named part cannot be answered with `archwire set`.
+    #[test]
+    fn a_bracketed_hole_can_be_set() {
+        let text = "flows:\n  - lambda.api -> s3\n";
+        let out = set_value(text, "choose.route.[lambda.api].s3", "endpoint").unwrap();
+        assert_eq!(out, "flows:\n  - lambda.api -> s3\nchoose:\n  route.[lambda.api].s3: endpoint\n");
+        let d = crate::def::parse(&out).unwrap();
+        assert_eq!(d.choose.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>(), [("route.[lambda.api].s3", "endpoint")]);
+    }
 }

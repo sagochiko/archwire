@@ -14,6 +14,7 @@
 use crate::audit::audit;
 use crate::def::Rel;
 use crate::grid::IGW;
+use crate::ids::edge_id;
 use crate::labels::{path_length, LabelSpot};
 use crate::layout::{Icon, Layout, Rect};
 use crate::lines::{gather, label_parts, Line};
@@ -167,11 +168,6 @@ pub(crate) const RANK_MAIN: u8 = 0;
 
 pub(crate) const RANK_SIDE: u8 = 2;
 pub(crate) const RANK_AUTO: u8 = 3;
-
-/// The id of the line from one node to another: "edge-<from>-to-<to>".
-pub(crate) fn edge_id(from: &str, to: &str) -> String {
-    format!("edge-{from}-to-{to}")
-}
 
 pub(crate) struct Ctx<'a> {
     pub(crate) model: &'a Model,
