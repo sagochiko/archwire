@@ -1366,24 +1366,8 @@ pub(in crate::arrange) mod tests {
     use crate::path::hits;
     use crate::route::{port_point, Bend, Keep, Port, Side, LABEL_FIRST, LABEL_LINE};
     use crate::rules::Lang;
+    use crate::test_inputs::{FEWER_READERS, WEB_CASES};
     use std::sync::OnceLock;
-
-    pub(in crate::arrange) const WEB_CASES: [(&str, &str); 10] = [
-        ("web-2az-ja", include_str!("../../../../tests/cases/web-2az-ja/def.yaml")),
-        ("web-2az-en", include_str!("../../../../tests/cases/web-2az-en/def.yaml")),
-        ("web-3az-ja", include_str!("../../../../tests/cases/web-3az-ja/def.yaml")),
-        ("web-3az-en", include_str!("../../../../tests/cases/web-3az-en/def.yaml")),
-        ("endpoint-3az-ja", include_str!("../../../../tests/cases/endpoint-3az-ja/def.yaml")),
-        ("endpoint-3az-en", include_str!("../../../../tests/cases/endpoint-3az-en/def.yaml")),
-        ("endpoint-ja", include_str!("../../../../tests/cases/endpoint-ja/def.yaml")),
-        ("hole-s3", include_str!("../../../../tests/cases/hole-s3/def.yaml")),
-        ("aux-to-side", include_str!("../../../../tests/cases/aux-to-side/def.yaml")),
-        ("web-attach-en", include_str!("../../../../tests/cases/web-attach-en/def.yaml")),
-    ];
-
-    /// Three zones and one Reader: Aurora has copies in the first two zones only, and lines run
-    /// back up from Aurora to ECS.
-    pub(in crate::arrange) const FEWER_READERS: &str = "flows:\n  - user -> alb -> ecs -> aurora\n  - aurora -> ecs\n  - aurora -> s3\nset:\n  azs: 3\n  readers: 1\nchoose:\n  route.aurora.s3: endpoint\n";
 
     pub(in crate::arrange) fn grid(src: &str) -> (Model, Diagnostics) {
         let (m, d) = crate::infer::infer(&crate::def::parse(src).unwrap(), &Rules::builtin());
@@ -1587,61 +1571,6 @@ pub(in crate::arrange) mod tests {
     }
 
     pub(in crate::arrange) const LONG: &str = "lambda.resize-images-for-the-we";
-
-    /// Every web definition with a VPC the generator makes, in order: two or three zones, one NAT
-    /// gateway per zone or one in all, one Reader or as many as the zones allow, traffic out to
-    /// the internet or not, ECS's route to S3 left open or answered, the side line to CloudWatch
-    /// from the load balancer, ECS or Aurora, WAF and ACM on CloudFront or not, S3 reached from
-    /// CloudFront, from ECS or from both, and English or Japanese.
-    pub(in crate::arrange) fn generated_with_a_vpc() -> Vec<String> {
-        let mut out = Vec::new();
-        for azs in [2, 3] {
-            for nat in ["per-az", "single"] {
-                for readers in [None, Some(1)].into_iter().filter(|r| azs == 3 || r.is_none()) {
-                    for outbound in [false, true] {
-                        for route in [None, Some("endpoint"), Some("nat")] {
-                            for aux in ["alb", "ecs", "aurora"] {
-                                for attach in [false, true] {
-                                    for s3 in ["cloudfront", "ecs", "both"] {
-                                        for ja in [false, true] {
-                                            let mut src = String::from("flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n");
-                                            if s3 != "ecs" {
-                                                src.push_str("  - cloudfront -> s3\n");
-                                            }
-                                            if s3 != "cloudfront" {
-                                                src.push_str("  - ecs -> s3\n");
-                                            }
-                                            if outbound {
-                                                src.push_str("  - ecs -> internet\n");
-                                            }
-                                            src.push_str(&format!("  - {aux} ~> cloudwatch\n"));
-                                            if attach {
-                                                src.push_str("  - waf -- cloudfront\n  - acm -- cloudfront\n");
-                                            }
-                                            src.push_str(&format!("set:\n  azs: {azs}\n  nat: {nat}\n"));
-                                            if let Some(r) = readers {
-                                                src.push_str(&format!("  readers: {r}\n"));
-                                            }
-                                            if ja {
-                                                src.push_str("  lang: ja\n");
-                                            }
-                                            if let (Some(r), true) = (route, s3 != "cloudfront") {
-                                                src.push_str(&format!("choose:\n  route.ecs.s3: {r}\n"));
-                                            }
-                                            if !out.contains(&src) {
-                                                out.push(src);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        out
-    }
 
     /// Every model the inside of a VPC is laid out for, by name.
     pub(in crate::arrange) fn inputs() -> Vec<(String, Model, Diagnostics)> {

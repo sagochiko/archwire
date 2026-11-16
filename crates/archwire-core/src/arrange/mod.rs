@@ -144,8 +144,8 @@ fn parts(items: &[Item]) -> Vec<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::azgrid::tests::{generated_with_a_vpc, grid, inputs, FEWER_READERS, WEB_CASES};
-    use super::layered::tests::API_CASES;
+    use super::azgrid::tests::{grid, inputs};
+    use crate::test_inputs::{generated_with_a_vpc, API_CASES, FEWER_READERS, WEB_CASES};
     use super::*;
     use crate::diag::Diagnostics;
 

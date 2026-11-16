@@ -994,6 +994,7 @@ pub(super) mod tests {
     use super::super::arrange;
     use crate::measure::{NAME_CHARS, NAME_DRAWN, NAME_WIDE_CHARS, NAME_WIDE_DRAWN};
     use crate::route::{port_point, route_planned, Wire};
+    use crate::test_inputs::{generated, through_cloudfront, API_CASES};
 
     /// The model of a definition without a VPC, and its layout with lines running along `axis`.
     pub(in crate::arrange) fn arranged(src: &str, axis: Axis) -> (Model, Placement) {
@@ -1490,159 +1491,6 @@ set:
         assert_eq!(placed(TARGET).1, p);
     }
 
-    /// Every definition the generator makes.
-    pub(in crate::arrange) fn generated() -> Vec<String> {
-        let mut out = Vec::new();
-        let apis = ["apigateway(http)", "apigateway(rest)", "apigateway.public(http)"];
-        // (CloudFront shape, attachments): 0 none; 1 web; 2 a and b; 3 one CloudFront into a Lambda's S3.
-        let mut fronts: Vec<(usize, usize)> = vec![(0, 0)];
-        for cf in 1..=3 {
-            for att in 0..=3 {
-                if att == 3 && cf != 2 {
-                    continue;
-                }
-                fronts.push((cf, att));
-            }
-        }
-        let mut i = 0usize;
-        for lambdas in 1..=3usize {
-            for dest in 0..3 {
-                for aux in [false, true] {
-                    for api in apis {
-                        for cognito in [false, true] {
-                            for &(cf, att) in &fronts {
-                                out.push(definition(i, lambdas, dest, aux, api, cognito, cf, att));
-                                i += 1;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        out.extend(through_cloudfront());
-        out
-    }
-
-    /// Definitions where the API is reached through CloudFront (`user -> cloudfront ->
-    /// apigateway -> lambda -> s3`), with names as written or every name made of `m` alone at the
-    /// longest allowed.
-    fn through_cloudfront() -> Vec<String> {
-        let mut out = Vec::new();
-        for wide in [false, true] {
-            let n = |svc: &str| if wide { format!("{svc}.{}", "m".repeat(crate::def::MAX_TAG)) } else { svc.to_string() };
-            for api in ["http", "rest"] {
-                for att in 0..3 {
-                    for cognito in [false, true] {
-                        let mut src = format!("flows:\n  - user -> {} -> {}({api}) -> {} -> {}\n", n("cloudfront"), n("apigateway"), n("lambda"), n("s3"));
-                        if att > 0 {
-                            src.push_str(&format!("  - {} -- {}\n", n("waf"), n("cloudfront")));
-                        }
-                        if att > 1 {
-                            src.push_str(&format!("  - {} -- {}\n", n("acm"), n("cloudfront")));
-                        }
-                        if cognito {
-                            src.push_str(&format!("  - {} -- {}\n", n("cognito"), n("apigateway")));
-                        }
-                        src.push_str(&format!("  - {} ~> {}\n", n("lambda"), n("cloudwatch")));
-                        if wide {
-                            src.push_str("set:\n  lang: ja\n");
-                        }
-                        out.push(src);
-                    }
-                }
-            }
-        }
-        out
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn definition(i: usize, lambdas: usize, dest: usize, aux: bool, api: &str, cognito: bool, cf: usize, att: usize) -> String {
-        // Names: as written, or every name after the dot at the longest allowed, filled with `x`
-        // or with `m`, the widest letter a name may hold. Side parts and global parts are named too
-        // then. Taken from the number apart from the settings, which go by `i % 3`.
-        let fill = match (i / 3) % 3 {
-            0 => None,
-            1 => Some("x"),
-            _ => Some("m"),
-        };
-        let tag = |t: &str| match fill {
-            Some(c) => format!("{t}{}", c.repeat(crate::def::MAX_TAG - t.len())),
-            None => t.to_string(),
-        };
-        // A part named only when names are long: `cloudwatch`, or `cloudwatch.l…` filled.
-        let side = |svc: &str, t: &str| if fill.is_some() { format!("{svc}.{}", tag(t)) } else { svc.to_string() };
-        let lambda = |k: usize| if lambdas == 1 { "lambda".to_string() } else { format!("lambda.{}", tag(&format!("f{k}"))) };
-        let table = |t: &str| format!("dynamodb.{}", tag(t));
-        let api_name = api.split('(').next().unwrap();
-        let mut lines: Vec<String> = Vec::new();
-        lines.push(format!("user -> {api} -> {}", lambda(1)));
-        for k in 2..=lambdas {
-            lines.push(format!("{api_name} -> {}", lambda(k)));
-        }
-        match dest {
-            0 => (1..=lambdas).for_each(|k| lines.push(format!("{} -> {}", lambda(k), table(&format!("t{k}"))))),
-            1 => (1..=lambdas).for_each(|k| {
-                lines.push(format!("{} -> {}", lambda(k), table("x")));
-                lines.push(format!("{} -> {}", lambda(k), table("y")));
-            }),
-            _ => (1..=lambdas).rev().for_each(|k| {
-                lines.push(format!("{} -> {}", lambda(k), table("x")));
-                lines.push(format!("{} -> {}", lambda(k), table("y")));
-            }),
-        }
-        let cloudwatch = side("cloudwatch", "l");
-        if aux {
-            (1..=lambdas).for_each(|k| lines.push(format!("{} ~> {cloudwatch}", lambda(k))));
-            lines.push(format!("{api_name} ~> {cloudwatch}"));
-        }
-        if cognito {
-            lines.push(format!("{} -- {api_name}", side("cognito", "g")));
-        }
-        // Each distribution's own letter: "" for the only one, "a" and "b" for two.
-        let fronts: Vec<&str> = if cf == 2 { vec!["a", "b"] } else if cf > 0 { vec![""] } else { vec![] };
-        // `svc` for the only one with short names, else `svc.<letter>` with the letter filled out.
-        let named = |svc: &str, f: &str, alone: &str| match (f.is_empty(), fill.is_some()) {
-            (true, false) => svc.to_string(),
-            (true, true) => format!("{svc}.{}", tag(alone)),
-            (false, _) => format!("{svc}.{}", tag(f)),
-        };
-        let front = |f: &str| named("cloudfront", f, "c");
-        match cf {
-            1 => lines.push(format!("user -> {} -> s3.web", front(""))),
-            2 => {
-                lines.push(format!("user -> {} -> s3.a", front("a")));
-                lines.push(format!("user -> {} -> s3.b", front("b")));
-            }
-            3 => {
-                lines.push(format!("user -> {} -> s3.web", front("")));
-                lines.push(format!("{} -> s3.web", lambda(1)));
-            }
-            _ => {}
-        }
-        match att {
-            1 | 2 => {
-                for f in &fronts {
-                    lines.push(format!("{} -- {}", named("waf", f, "w"), front(f)));
-                    if att == 2 {
-                        lines.push(format!("{} -- {}", named("acm", f, "k"), front(f)));
-                    }
-                }
-            }
-            3 => fronts.iter().for_each(|f| lines.push(format!("{} -- {}", side("waf", "w"), front(f)))),
-            _ => {}
-        }
-        let mut src = String::from("flows:\n");
-        for l in lines {
-            src.push_str(&format!("  - {l}\n"));
-        }
-        match i % 3 {
-            1 => src.push_str("set:\n  lang: ja\n"),
-            2 => src.push_str("set:\n  lang: ja\n  region: ap-northeast-1\n"),
-            _ => {}
-        }
-        src
-    }
-
     #[test]
     fn generated_definitions_lay_out_cleanly() {
         let r = Rules::builtin();
@@ -1744,17 +1592,6 @@ set:
         }
         assert!(failed.is_empty(), "{} of {} definitions failed:\n{}", failed.len(), picked.len(), failed.join("\n"));
     }
-
-    /// The definitions of the fixed examples of the API shape that give a diagram.
-    pub(in crate::arrange) const API_CASES: [(&str, &str); 7] = [
-        ("api-http-ja", include_str!("../../../../tests/cases/api-http-ja/def.yaml")),
-        ("api-merged-ja", include_str!("../../../../tests/cases/api-merged-ja/def.yaml")),
-        ("api-min-en", include_str!("../../../../tests/cases/api-min-en/def.yaml")),
-        ("api-names-ja", include_str!("../../../../tests/cases/api-names-ja/def.yaml")),
-        ("api-rest-en", include_str!("../../../../tests/cases/api-rest-en/def.yaml")),
-        ("edge-waf-en", include_str!("../../../../tests/cases/edge-waf-en/def.yaml")),
-        ("hole-apigateway", include_str!("../../../../tests/cases/hole-apigateway/def.yaml")),
-    ];
 
     /// Every model the down layout is tried on: the fixed API examples and every generated
     /// definition, with the definition each came from.

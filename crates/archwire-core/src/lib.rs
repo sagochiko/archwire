@@ -19,6 +19,8 @@ mod labels;
 mod lines;
 mod measure;
 mod path;
+#[cfg(test)]
+pub(crate) mod test_inputs;
 
 use diag::{Diagnostics, Problem, Versions};
 use engine::Engine;
@@ -97,6 +99,10 @@ pub(crate) fn arranged_drawio(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_inputs::{
+        heavy_variants, CROWDED_SIDE_EN, CROWDED_S3_JA, ID_CLASH, LOAD_BALANCER_ALONE, ONE_FUNCTION_THREE_WAYS, TWIN_APPS, TWO_WEBS, VPC_TEST_DEFINITIONS,
+        WEB_EXAMPLES,
+    };
 
     #[test]
     fn a_definition_mixing_vpc_parts_with_separate_services_stops_before_inference() {
@@ -355,70 +361,6 @@ mod tests {
         }
     }
 
-    /// The fixed web examples: definitions with a VPC that give a diagram.
-    const WEB_EXAMPLES: [&str; 10] = [
-        include_str!("../../../tests/cases/aux-to-side/def.yaml"),
-        include_str!("../../../tests/cases/endpoint-3az-en/def.yaml"),
-        include_str!("../../../tests/cases/endpoint-3az-ja/def.yaml"),
-        include_str!("../../../tests/cases/endpoint-ja/def.yaml"),
-        include_str!("../../../tests/cases/hole-s3/def.yaml"),
-        include_str!("../../../tests/cases/web-2az-en/def.yaml"),
-        include_str!("../../../tests/cases/web-2az-ja/def.yaml"),
-        include_str!("../../../tests/cases/web-3az-en/def.yaml"),
-        include_str!("../../../tests/cases/web-3az-ja/def.yaml"),
-        include_str!("../../../tests/cases/web-attach-en/def.yaml"),
-    ];
-
-    /// Definitions with a VPC from the tests of inference, the old grid layout and its routing that
-    /// are accepted, each once and none of them among the web examples or the heavy variants.
-    const VPC_TEST_DEFINITIONS: [&str; 27] = [
-        "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n",
-        "flows:\n  - user -> alb -> ecs -> aurora\nset:\n  azs: 3\n",
-        "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\n",
-        "flows:\n  - user -> alb -> ecs\n  - cloudfront -> s3\n  - user -> cloudfront\n  - ecs -> s3\n",
-        "flows:\n  - user -> alb -> ecs\n  - ecs -> internet\n",
-        "flows:\n  - user -> alb -> ecs\n  - ecs -> internet\nset:\n  nat: single\n",
-        "flows:\n  - user -> alb -> ecs\n  - ecs ~> cloudwatch\n",
-        "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - cloudfront -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\n  - acm -- cloudfront\n",
-        "flows:\n  - user -> cloudfront -> alb -> ecs\n  - alb ~> s3\n  - cloudfront ~> s3\n",
-        "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\nchoose:\n  route.ecs.s3: endpoint\n",
-        "flows:\n  - user -> alb -> ecs -> aurora\n",
-        "flows:\n  - user -> alb -> ecs -> aurora\n  - aurora -> ecs\n",
-        "flows:\n  - user -> cloudfront -> alb -> ecs\n",
-        "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\n  - ecs ~> cloudwatch\nset:\n  lang: ja\n",
-        "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\nchoose:\n  route.ecs.s3: endpoint\nset:\n  lang: ja\n",
-        "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n",
-        "flows:\n  - user -> alb -> ecs\n  - alb ~> cloudwatch\n",
-        "flows:\n  - user -> alb -> ecs -> aurora\n  - ecs ~> cloudwatch\n",
-        "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\n",
-        "flows:\n  - user -> alb -> ecs -> s3\nset:\n  lang: ja\n  azs: 3\nchoose:\n  route.ecs.s3: endpoint\n",
-        "flows:\n  - user -> alb -> ecs -> s3\n  - ecs ~> cloudwatch\nset:\n  lang: ja\nchoose:\n  route.ecs.s3: endpoint\n",
-        "flows:\n  - user -> alb -> ecs -> s3\n  - ecs ~> cloudwatch\nset:\n  lang: ja\n  azs: 3\nchoose:\n  route.ecs.s3: endpoint\n",
-        "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\nset:\n  azs: 3\n  lang: ja\nchoose:\n  route.ecs.s3: nat\n",
-        "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\nset:\n  azs: 3\n  lang: ja\nchoose:\n  route.ecs.s3: endpoint\n",
-        "flows:\n  - user -> alb -> ecs -> aurora\n  - ecs -> s3\nchoose:\n  route.ecs.s3: nat\n",
-        "flows:\n  - user -> alb -> ecs -> aurora\n  - alb -> aurora\n  - aurora ~> cloudwatch\n  - alb ~> s3\nset:\n  azs: 3\n",
-        "flows:\n  - user -> cloudfront -> alb -> ecs\n  - acm -- cloudfront\n  - waf -- cloudfront\n  - cloudfront -> s3\n  - cloudfront ~> cloudwatch\n",
-    ];
-
-    /// Two zones in Japanese with lines from ECS and Aurora to S3 and the side column: crowded, as in the routing tests.
-    const CROWDED_S3_JA: &str = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - cloudfront ~> cloudwatch\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - aurora ~> cloudwatch\n  - waf -- cloudfront\n  - acm -- cloudfront\n  - aurora -> s3\n  - alb ~> s3\nset:\n  azs: 2\n  lang: ja\n  nat: per-az\nchoose:\n  route.ecs.s3: endpoint\n  route.aurora.s3: nat\n";
-
-    /// Two zones in English with lines from every part to S3 and CloudWatch: crowded, as in the routing tests.
-    const CROWDED_SIDE_EN: &str = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - cloudfront -> s3\n  - cloudfront ~> cloudwatch\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n  - aurora ~> cloudwatch\n  - ecs -> internet\n  - waf -- cloudfront\n  - acm -- cloudfront\n  - user -> alb\n  - aurora -> s3\n  - alb ~> s3\n  - ecs ~> s3\nset:\n  azs: 2\n  lang: en\n  nat: per-az\nchoose:\n  route.aurora.s3: nat\n";
-
-    /// The heavy definition of the routing tests with each of its settings.
-    fn heavy_variants() -> Vec<String> {
-        let heavy = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - user -> alb\n  - cloudfront -> s3\n  - cloudfront ~> cloudwatch\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n  - ecs -> internet\n  - waf -- cloudfront\n  - acm -- cloudfront\nchoose:\n  route.ecs.s3: endpoint\n";
-        let single = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\n  - acm -- cloudfront\n  - ecs -> internet\n";
-        let mut out = Vec::new();
-        for extra in ["", "set:\n  azs: 3\n", "set:\n  nat: single\n", "set:\n  azs: 3\n  nat: single\n", "set:\n  lang: ja\n"] {
-            out.push(format!("{heavy}{extra}"));
-            out.push(format!("{single}{extra}"));
-        }
-        out
-    }
-
     /// How many definitions the old and the new layout are compared on: the web examples, the test
     /// definitions and the heavy variants.
     const KEPT: usize = 47;
@@ -569,16 +511,6 @@ mod tests {
     fn unsupported(at: &str, got: Option<&str>) -> (String, Option<String>, Option<String>) {
         ("UNSUPPORTED".to_string(), Some(at.to_string()), got.map(str::to_string))
     }
-
-    const ID_CLASH: &str = "flows:\n  - user -> apigateway(http) -> lambda.api -> aurora\n  - apigateway -> lambda.api-1a -> dynamodb\n";
-    const TWO_WEBS: &str = "flows:\n  - user -> cloudfront -> alb.web -> ecs.web -> aurora.web\n  - user -> alb.admin -> ecs.admin -> aurora.admin\n";
-    const TWIN_APPS: &str = "flows:\n  - user -> cloudfront -> alb -> ecs.web -> aurora.web\n  - alb -> ecs.admin -> aurora.admin\n";
-    const ONE_FUNCTION_THREE_WAYS: [&str; 3] = [
-        "flows:\n  - user -> apigateway(http) -> lambda -> aurora\n  - lambda -> dynamodb\n  - lambda -> s3\n",
-        "flows:\n  - user -> apigateway(http) -> lambda -> aurora\n  - lambda -> s3\n  - lambda -> dynamodb\n",
-        "flows:\n  - lambda -> s3\n  - lambda -> dynamodb\n  - user -> apigateway(http) -> lambda -> aurora\n",
-    ];
-    const LOAD_BALANCER_ALONE: &str = "flows:\n  - user -> alb\n";
 
     // Today a named function next to a part named like its zone copy stops, because the definition mixes VPC parts with separate services.
     // Fails if a mixed definition is let through without an error.
