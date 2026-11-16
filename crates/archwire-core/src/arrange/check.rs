@@ -265,8 +265,19 @@ pub(crate) fn fixed_ends_apart(model: &Model, placement: &Placement, drawn: &[us
 /// A drawn line whose draft runs along a band keeps a track there: the stretch is in its
 /// `tracks` and its band holds it. `bands` are the bands as laid out, before the tracks of the
 /// lines not drawn are taken off. A line drawn that was not expected to be shows up here.
-pub(crate) fn bands_kept(model: &Model, placement: &Placement, bands: &[Lane], drawn: &[usize]) -> Vec<Problem> {
+/// `needs` are the lines the layout decided run along a band, apart from the tracks it gave
+/// out: each of them that is drawn has a track in its draft and in a band, so a band left out
+/// altogether shows up too.
+pub(crate) fn bands_kept(model: &Model, placement: &Placement, bands: &[Lane], drawn: &[usize], needs: &[usize]) -> Vec<Problem> {
     let mut out = Vec::new();
+    for &e in needs.iter().filter(|e| drawn.contains(e)) {
+        let Some(pl) = placement.lines.iter().find(|pl| pl.edge == e) else { continue };
+        let kept = !pl.tracks.is_empty() && pl.tracks.iter().all(|t| placement.lanes.iter().any(|l| l.tracks.contains(&(e, t.at))));
+        if !kept {
+            let line = edge_id(&model.edges[e].from, &model.edges[e].to);
+            out.push(failed(&line, line.clone(), "a band to run along"));
+        }
+    }
     for pl in placement.lines.iter().filter(|pl| drawn.contains(&pl.edge)) {
         let points: Vec<(i32, i32)> = match &pl.keep {
             Keep::Whole => match &pl.bend {
@@ -333,6 +344,32 @@ mod tests {
         let (m, p) = web_along(Axis::Down);
         let reps = crate::lines::gather(&m, &p.layout, &crate::rules::Rules::builtin()).0.iter().map(|l| l.rep).collect();
         (m, p, reps)
+    }
+    /// The lines the inside of the web example's VPC, running down, needs a band for.
+    fn needs_of(m: &Model) -> Vec<usize> {
+        let inside: Vec<usize> = (0..m.nodes.len()).filter(|&i| matches!(m.nodes[i].area, Area::VpcEdge | Area::Subnet(_))).collect();
+        super::super::azgrid::lay_vpc(m, &crate::rules::Rules::builtin(), &inside, Axis::Down).unwrap_or_else(|e| panic!("{e:?}")).needs
+    }
+
+    // Fails if a band the layout never made goes unnoticed: a drawn line needing one is passed
+    // over when neither its draft nor the bands hold its track.
+    #[test]
+    fn check_finds_a_band_left_out() {
+        let (m, p, reps) = with_a_vpc();
+        let needs = needs_of(&m);
+        assert!(!needs.is_empty());
+        assert_eq!(bands_kept(&m, &p, &p.lanes, &reps, &needs), Vec::new());
+        // Drop one band whole, as if it had never been made, and the tracks its lines had in it.
+        let gone = p.lanes[0].clone();
+        let mut left = p.clone();
+        left.lanes.retain(|l| *l != gone);
+        for pl in left.lines.iter_mut().filter(|pl| gone.tracks.iter().any(|t| t.0 == pl.edge)) {
+            pl.tracks.clear();
+        }
+        let got = bands_kept(&m, &left, &left.lanes, &reps, &needs);
+        let (e, _) = gone.tracks[0];
+        let id = edge_id(&m.edges[e].from, &m.edges[e].to);
+        assert!(got.iter().any(|x| x.at.as_deref() == Some(id.as_str()) && x.message.contains("a band to run along")), "{got:?}");
     }
     /// The web example with two zones, laid out along `axis`.
     fn web_along(axis: Axis) -> (Model, Placement) {
@@ -474,17 +511,17 @@ mod tests {
     #[test]
     fn check_finds_a_drawn_line_without_its_track() {
         let (m, p, reps) = with_a_vpc();
-        assert_eq!(bands_kept(&m, &p, &p.lanes, &reps), Vec::new());
+        assert_eq!(bands_kept(&m, &p, &p.lanes, &reps, &[]), Vec::new());
         let k = p.lines.iter().position(|l| !l.tracks.is_empty() && reps.contains(&l.edge)).expect("a drawn line on a track");
         let e = &m.edges[p.lines[k].edge];
         let id = edge_id(&e.from, &e.to);
         let mut draft = p.clone();
         draft.lines[k].tracks.clear();
-        let got = bands_kept(&m, &draft, &p.lanes, &reps);
+        let got = bands_kept(&m, &draft, &p.lanes, &reps, &[]);
         assert!(got.iter().any(|x| x.at.as_deref() == Some(id.as_str()) && x.message.contains("a track in its band")), "{got:?}");
         let mut band = p.clone();
         band.lanes.iter_mut().for_each(|l| l.tracks.retain(|t| t.0 != p.lines[k].edge));
-        let got = bands_kept(&m, &band, &p.lanes, &reps);
+        let got = bands_kept(&m, &band, &p.lanes, &reps, &[]);
         assert!(got.iter().any(|x| x.at.as_deref() == Some(id.as_str())), "{got:?}");
     }
 

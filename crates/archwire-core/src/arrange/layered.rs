@@ -796,21 +796,23 @@ fn plans(model: &Model, layout: &Layout, col_u: &[i32], axis: Axis) -> Vec<LineP
         }
         let (Some(a), Some(b)) = (find(&e.from), find(&e.to)) else { continue };
         let ((au, av), (bu, bv)) = (at(a), at(b));
-        let (exit, entry, bend) = if e.rel == Rel::Main {
-            let bend = if av == bv {
-                Bend::Straight
-            } else {
-                let from = au + uv(axis, on_lines(a)).0 .1;
-                let next = layout
-                    .frames
-                    .iter()
-                    .map(|f| uv(axis, (f.rect.x, f.rect.y)).0)
-                    .chain(col_u.iter().map(|c| c - ICON / 2))
-                    .filter(|&s| s > from)
-                    .min()
-                    .unwrap_or(from + 2 * NAME_ROOM);
-                bend_at(axis, true, (from + next).div_euclid(2))
-            };
+        // Main lines bend halfway from the end of `a` to whatever comes next along the main axis.
+        let from = au + uv(axis, on_lines(a)).0 .1;
+        let next = layout
+            .frames
+            .iter()
+            .map(|f| uv(axis, (f.rect.x, f.rect.y)).0)
+            .chain(col_u.iter().map(|c| c - ICON / 2))
+            .filter(|&s| s > from)
+            .min()
+            .unwrap_or(from + 2 * NAME_ROOM);
+        let turn = (from + next).div_euclid(2);
+        let way_around = (e.rel == Rel::Main && av != bv).then(|| around_the_vpc(layout, a, b, axis, turn)).flatten();
+        let around = way_around.is_some();
+        let (exit, entry, bend) = if let Some(points) = way_around {
+            (cross_start, cross_start, Bend::Points(points))
+        } else if e.rel == Rel::Main {
+            let bend = if av == bv { Bend::Straight } else { bend_at(axis, true, turn) };
             (main_end, main_start, bend)
         } else {
             let first = av <= bv;
@@ -833,14 +835,42 @@ fn plans(model: &Model, layout: &Layout, col_u: &[i32], axis: Axis) -> Vec<LineP
             exit,
             entry,
             bend,
-            exit_pos: None,
-            entry_pos: None,
+            // A way around the Region leaves and enters at the middle of its sides, where its points meet them.
+            exit_pos: around.then_some(50),
+            entry_pos: around.then_some(50),
             keep: Keep::Free,
             tracks: Vec::new(),
             axis,
         });
     }
     out
+}
+
+/// For a main line from a part outside the Region into a part in it whose plain draft would run
+/// through the VPC: the points of a way around the Region on its low side across the main axis
+/// (above it when lines run right, left of it when they run down), midway between the Region's
+/// side and its parent frame's, clear of the Region's and the VPC's names. The line leaves and
+/// enters by the low side of its parts across the main axis.
+fn around_the_vpc(layout: &Layout, a: &Icon, b: &Icon, axis: Axis, turn: i32) -> Option<Vec<(i32, i32)>> {
+    let frame = |id: &str| layout.frames.iter().find(|f| f.id == id);
+    let (vpc, region) = (frame(super::azgrid::VPC_FRAME)?.rect, frame(REGION_FRAME)?);
+    if a.parent.as_deref() == Some(REGION_FRAME) || b.parent.as_deref() != Some(REGION_FRAME) {
+        return None;
+    }
+    let cloud = frame(region.parent.as_deref()?)?.rect;
+    let region = region.rect;
+    let centre = |r: Rect| uv(axis, (r.x + r.w / 2, r.y + r.h / 2));
+    let ((au, av), (bu, bv)) = (centre(a.rect), centre(b.rect));
+    let end = |r: Rect| uv(axis, (right(r), bottom(r))).0;
+    let start = |r: Rect| uv(axis, (r.x, r.y)).0;
+    // The plain draft: out of the end of `a`, across at `turn`, along into the start of `b`.
+    let plain = [(end(a.rect), av), (turn, av), (turn, bv), (start(b.rect), bv)].map(|p| uv(axis, p));
+    if !plain.windows(2).any(|s| crate::path::hits(s[0], s[1], vpc)) {
+        return None;
+    }
+    let low = |r: Rect| uv(axis, (r.x, r.y)).1;
+    let w = (low(cloud) + low(region)).div_euclid(2);
+    Some(vec![uv(axis, (au, w)), uv(axis, (bu, w))])
 }
 
 /// A bend at `at`, a coordinate along the main axis (`main`) or across it.

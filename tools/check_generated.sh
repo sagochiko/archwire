@@ -1,14 +1,14 @@
 #!/bin/sh
 # Runs the diagram checker on the diagrams made from generated definitions. Write them first:
 #
-#     ARCHWIRE_GEN_OUT=out/gen cargo test -p archwire-core generated
+#     ARCHWIRE_GEN_OUT=out/gen cargo test -p archwire-core -- generated_diagrams_compile_for_the_checker arranged_diagrams_for_the_checker
 #     sh tools/check_generated.sh out/gen
 #
-# Every <number>.yaml in the folder must have its <number>.drawio, and there must be exactly
-# 40 of them, so a definition that gave no diagram is not passed over. Each diagram is checked
+# Every <name>.yaml in the folder must have its <name>.drawio, and there must be exactly
+# 80 of them (40 made by compile, 40 by the layout for a VPC), so a definition that gave no diagram is not passed over. Each diagram is checked
 # with tools/geocheck.py, with no known findings.
 # Exit status: 0 if every diagram passes; 1 if any diagram has a blocking finding (their names
-# are listed), a definition has no diagram, or the count is not 40; 2 if the draw.io desktop CLI
+# are listed), a definition has no diagram, or the count is not 80; 2 if the draw.io desktop CLI
 # (`drawio`) is not on PATH. A diagram the checker could not read is listed apart: that says
 # nothing about the diagram itself, and it also gives 1.
 set -u
@@ -18,7 +18,7 @@ if [ "$#" -ne 1 ]; then
 fi
 dir=$1
 here=$(cd "$(dirname "$0")" && pwd)
-expected=40
+expected=80
 
 if ! command -v drawio >/dev/null 2>&1; then
     echo "check_generated: the draw.io desktop CLI 'drawio' is not on PATH; install draw.io desktop and put its command-line tool on PATH" >&2

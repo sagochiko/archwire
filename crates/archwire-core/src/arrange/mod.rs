@@ -121,7 +121,8 @@ pub fn arrange(model: &Model, rules: &Rules, axis: Axis) -> Result<Placement, Ve
             pl.tracks.clear();
         }
         problems.extend(check::fixed_ends_apart(model, &placement, &reps));
-        problems.extend(check::bands_kept(model, &placement, &bands, &reps));
+        let needs: Vec<usize> = placed.as_ref().map(|p| p.needs.clone()).unwrap_or_default();
+        problems.extend(check::bands_kept(model, &placement, &bands, &reps, &needs));
     }
     problems.extend(check::check(model, &placement));
     if !problems.is_empty() {
@@ -143,7 +144,7 @@ fn parts(items: &[Item]) -> Vec<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::azgrid::tests::inputs;
+    use super::azgrid::tests::{generated_with_a_vpc, grid, inputs, FEWER_READERS, WEB_CASES};
     use super::layered::tests::API_CASES;
     use super::*;
     use crate::diag::Diagnostics;
@@ -181,6 +182,110 @@ mod tests {
         for m in &models {
             assert_eq!(default_axis(m), Axis::Down);
         }
+    }
+
+    /// A definition with its direction written in its settings.
+    fn with_direction(src: &str, way: &str) -> String {
+        match src.find("set:\n") {
+            Some(at) => format!("{}  direction: {way}\n{}", &src[..at + 5], &src[at + 5..]),
+            None => format!("{src}set:\n  direction: {way}\n"),
+        }
+    }
+
+    /// How many diagrams of the new layout `arranged_diagrams_for_the_checker` writes: twenty
+    /// inputs, each along both axes.
+    const ARRANGED: usize = 40;
+
+    /// The inputs drawn with the new layout for the diagram checker: the definition, or the name
+    /// of a model built by hand, and the model. Nine fixed shapes first: the web examples
+    /// with two and three zones, three zones with one Reader, three zones with one NAT gateway,
+    /// WAF and ACM, and the four models mixing Lambda in the VPC with parts outside it. Then
+    /// eleven taken evenly from the generated definitions whose models are none of those.
+    fn arranged_for_the_checker() -> Vec<(Result<String, String>, Model)> {
+        let single = WEB_CASES[2].1.replace("  azs: 3\n", "  azs: 3\n  nat: single\n");
+        let fixed: Vec<String> = vec![WEB_CASES[0].1.into(), WEB_CASES[2].1.into(), FEWER_READERS.into(), single, WEB_CASES[9].1.into()];
+        let mut out: Vec<(Result<String, String>, Model)> = fixed.iter().map(|s| (Ok(s.clone()), grid(s).0)).collect();
+        for (name, m, _) in inputs().into_iter().filter(|(n, _, _)| n.starts_with("mix-")) {
+            out.push((Err(name), m));
+        }
+        assert_eq!(out.len(), 9);
+        let r = Rules::builtin();
+        let defs: Vec<(String, Model)> = generated_with_a_vpc()
+            .into_iter()
+            .filter_map(|src| {
+                let (m, d) = crate::infer::infer(&crate::def::parse(&src).unwrap(), &r);
+                assert!(d.errors.is_empty(), "{:?}\n{src}", d.errors);
+                m.map(|m| (src, m))
+            })
+            .filter(|(_, m)| !out.iter().any(|(_, o)| o == m))
+            .collect();
+        assert!(defs.len() > 100, "{}", defs.len());
+        let n = ARRANGED / 2 - out.len();
+        for k in 0..n {
+            let (src, m) = &defs[k * defs.len() / n];
+            out.push((Ok(src.clone()), m.clone()));
+        }
+        out
+    }
+
+    // Fails if a diagram of the new layout handed to the checker cannot be laid out or breaks a line.
+    /// With `ARCHWIRE_GEN_OUT=<dir>`, removes the `v<number>-<axis>` files a run left there, then
+    /// writes each input drawn with the new layout along both axes as `<dir>/v<number>-<axis>.drawio`
+    /// and `<dir>/v<number>-<axis>.yaml`: the definition with its direction written, or one comment
+    /// line naming a model built by hand. Without it, only draws them.
+    #[test]
+    fn arranged_diagrams_for_the_checker() {
+        let picked = arranged_for_the_checker();
+        let r = Rules::builtin();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let dir = std::env::var_os("ARCHWIRE_GEN_OUT").map(|d| root.join(d));
+        let ours = |stem: &str| {
+            let b = stem.as_bytes();
+            b.len() > 4 && b[0] == b'v' && b[1].is_ascii_digit() && b[2].is_ascii_digit() && (stem.ends_with("-right") || stem.ends_with("-down"))
+        };
+        if let Some(d) = &dir {
+            std::fs::create_dir_all(d).unwrap();
+            for entry in std::fs::read_dir(d).unwrap() {
+                let path = entry.unwrap().path();
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if ours(stem) && ["yaml", "drawio"].contains(&ext) {
+                    std::fs::remove_file(&path).unwrap();
+                }
+            }
+        }
+        let mut failed = Vec::new();
+        let mut written = 0;
+        for (k, (src, model)) in picked.iter().enumerate() {
+            for (axis, way) in [(Axis::Right, "right"), (Axis::Down, "down")] {
+                let name = format!("v{:02}-{way}", k + 1);
+                let (m, d, yaml) = match src {
+                    Ok(s) => {
+                        let s = with_direction(s, way);
+                        let (m, d) = grid(&s);
+                        assert_eq!(m.direction, Some(axis), "{name}");
+                        (m, d, s)
+                    }
+                    Err(hand) => (model.clone(), Diagnostics::default(), format!("# hand-built model: {hand}\n")),
+                };
+                match crate::arranged_drawio(&m, &d, &r, axis) {
+                    Ok((x, notes)) => {
+                        let broken: Vec<&String> = notes.iter().filter(|n| n.contains("edge-")).collect();
+                        if !broken.is_empty() {
+                            failed.push(format!("{name}: {broken:?}\n{yaml}"));
+                        }
+                        if let Some(d) = &dir {
+                            std::fs::write(d.join(format!("{name}.yaml")), &yaml).unwrap();
+                            std::fs::write(d.join(format!("{name}.drawio")), x).unwrap();
+                        }
+                        written += 1;
+                    }
+                    Err(e) => failed.push(format!("{name}: {e:?}\n{yaml}")),
+                }
+            }
+        }
+        assert!(failed.is_empty(), "{} of {ARRANGED} diagrams failed:\n{}", failed.len(), failed.join("\n"));
+        assert_eq!(written, ARRANGED);
     }
 
     // With the folder given, fails if a sample cannot be laid out or a line breaks or leaves its draft.

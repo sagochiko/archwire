@@ -52,8 +52,9 @@ pub(super) const PAD: i32 = 20;
 pub(super) const ROOM: i32 = 8;
 /// The distance between two tracks in a band: a line's label and some room.
 pub(super) const TRACK_STEP: i32 = 25;
-/// The distance between two tracks, and from a track to the band's sides, in a band no label sits
-/// in: room, and the line's own width.
+/// The distance between two tracks, and from a track to the band's sides, in a band where the
+/// layout keeps no room for a label: room, and the line's own width. The router may still put a
+/// label on such a track; its last check reports a label it cannot keep clear.
 pub(super) const TRACK_EDGE: i32 = ROOM + 2;
 /// The least distance between the tops of two rows in a subnet, and from a band's last track to the row below.
 const ROW_MIN: i32 = 210;
@@ -83,6 +84,9 @@ pub(crate) struct Placed {
     /// One per semantic edge that crosses the VPC frame's side.
     pub crossing: Vec<Crossing>,
     pub lanes: Vec<Lane>,
+    /// The semantic edges whose drawn line runs along a band, decided apart from the tracks
+    /// given out: a line that bends once or runs straight is not among them.
+    pub needs: Vec<usize>,
 }
 
 /// What a part inside the VPC is to the grid.
@@ -135,6 +139,13 @@ enum Kind {
     Out,
     /// To outside, down to a track below the row, then right to a gate on the VPC's right side.
     OutTrack,
+    /// To outside from a part spanning the zones whose row holds public copies right of it: down
+    /// to a track of the band above the private tier, then right to a gate on the VPC's right side.
+    OutFan,
+    /// From a part to a public copy in another zone: out of the side facing that zone, to the gap
+    /// between the zones, up to a track of the band above the private tier, along it, and up
+    /// into the copy.
+    NatAcross,
 }
 
 /// A band kept for lines: above the zones for the NAT gateways' lines when lines run right, above
@@ -534,6 +545,9 @@ impl<'a> Grid<'a> {
                         (Place::Private, Place::Public) if self.az(f) == self.az(t) => {
                             (r.kind, r.exit, r.entry) = (Kind::NatIn, side_to(f, t).0, Side::Bottom);
                         }
+                        (Place::Private, Place::Public) if !self.beside_toward(f, t) => {
+                            (r.kind, r.exit, r.entry, r.band) = (Kind::NatAcross, side_to(f, t).0, Side::Bottom, Some(Band::Fan));
+                        }
                         (Place::Private, Place::Public) => {
                             (r.kind, r.exit, r.entry, r.band) = (Kind::Track, Side::Top, Side::Bottom, Some(Band::Fan));
                         }
@@ -594,6 +608,9 @@ impl<'a> Grid<'a> {
                     if x == Place::Private && r.drawn && self.blocked(f) {
                         (r.kind, r.exit, r.band) = (Kind::OutTrack, Side::Bottom, Some(Band::Below(self.group(f).row)));
                     }
+                    if x == Place::Span && self.shares_row() && self.public_right_of(a, f) {
+                        (r.kind, r.exit, r.band) = (Kind::OutFan, Side::Bottom, Some(Band::Fan));
+                    }
                 }
                 (None, None) => unreachable!("skipped above"),
             }
@@ -608,8 +625,10 @@ impl<'a> Grid<'a> {
     /// Whether the parts spanning the zones sit in the public tier's row of copies: on the
     /// boundary between the zones, unless the entry gateway's line comes into them from the side,
     /// where it would run along that row.
-    fn shares_row(&self, runs: &[Run]) -> bool {
-        let from_side = runs.iter().any(|r| self.place(r.from) == Some(Place::Entry) && self.place(r.to) == Some(Place::Span) && matches!(r.entry, Side::Left | Side::Right));
+    fn shares_row(&self) -> bool {
+        // The entry gateway's line into a spanning part comes in from the side when lines run right.
+        let into_span = self.model.edges.iter().any(|e| self.place(self.index(&e.from)) == Some(Place::Entry) && self.place(self.index(&e.to)) == Some(Place::Span));
+        let from_side = self.axis == Axis::Right && into_span;
         self.spans().next().is_some() && !self.above() && self.groups.iter().any(|g| g.place == Place::Public) && !from_side
     }
 
@@ -627,6 +646,27 @@ impl<'a> Grid<'a> {
             let z = self.az(j);
             (z == lo && c > g.col) || (z == hi && c < g.col)
         })
+    }
+
+    /// Whether a part of the same row sits beside `f` in its zone on the side facing the zone of `t`.
+    fn beside_toward(&self, f: usize, t: usize) -> bool {
+        let (g, z) = (self.group(f), self.az(f));
+        let left = self.az(t) < z;
+        self.groups.iter().filter(|o| o.place == Place::Private && o.row == g.row).flat_map(|o| o.nodes.iter().map(move |&j| (j, o.col))).any(|(j, c)| {
+            self.az(j) == z && if left { c < g.col } else { c > g.col }
+        })
+    }
+
+    /// The middle of the gap between the zone of `f` and its neighbour toward the zone of `t`.
+    fn gap_beside(&self, a: &Across, f: usize, t: usize) -> i32 {
+        let z = self.az(f);
+        if self.az(t) < z { a.az_x(z) - a.gap / 2 } else { a.az_x(z) + a.w + a.gap / 2 }
+    }
+
+    /// Whether a public copy sits right of `f` across.
+    fn public_right_of(&self, a: &Across, f: usize) -> bool {
+        let x = self.cx(a, f);
+        self.groups.iter().filter(|g| g.place == Place::Public).flat_map(|g| g.nodes.iter()).any(|&i| self.cx(a, i) > x)
     }
 
     /// Straight lines between copies one above the other keep one position at both ends: toward
@@ -674,7 +714,7 @@ impl<'a> Grid<'a> {
         let other_x = || if known { self.cx(a, other) as i64 } else { 0 };
         match (r.kind, side) {
             (Kind::InTrack, _) => -1_000_000,
-            (Kind::OutTrack, _) => 1_000_000,
+            (Kind::OutTrack | Kind::OutFan, _) => 1_000_000,
             (Kind::NatIn, _) if at_exit => -1_000_000,
             (Kind::NatOut, _) if !at_exit => -((self.cx(a, r.from) - self.cx(a, r.to)).abs() as i64),
             (Kind::Out, _) => r.edge as i64,
@@ -785,7 +825,8 @@ impl<'a> Grid<'a> {
         let (from, to) = (|| at(r.from, r.exit, r.exit_pos), || at(r.to, r.entry, r.entry_pos));
         match r.kind {
             Kind::InTrack => (0, to()),
-            Kind::OutTrack => (from(), a.vpc_w),
+            Kind::OutTrack | Kind::OutFan => (from(), a.vpc_w),
+            Kind::NatAcross => (self.gap_beside(a, r.from, r.to), to()),
             Kind::NatOut => (self.cx(a, r.from), to()),
             _ => (from(), to()),
         }
@@ -809,7 +850,7 @@ impl<'a> Grid<'a> {
         let line = |r: &Run| edge_id(&self.model.edges[r.edge].from, &self.model.edges[r.edge].to);
         let clash = |r: &Run, against: String, by: i32| Clash { what: line(r), against, short: by, room: "the line passing over it" };
         // Parts spanning the zones and public copies sharing their row keep their names apart.
-        if self.shares_row(runs) {
+        if self.shares_row() {
             let spans: Vec<(i32, i32, String)> = self.spans().zip(&a.spans).map(|(g, &x)| (x, g.half, id(g.nodes[0]))).collect();
             let copies = self.groups.iter().filter(|g| g.place == Place::Public).flat_map(|g| g.nodes.iter().map(move |&i| (a.az_x(self.az(i)) + a.pubs[g.col], g.half, i)));
             for (x, h, i) in copies {
@@ -911,7 +952,7 @@ impl<'a> Grid<'a> {
                 last = d.span_y + names(Place::Span);
             }
             if pub_parts {
-                d.pub_row = if self.shares_row(runs) {
+                d.pub_row = if self.shares_row() {
                     d.span_y
                 } else if last == top {
                     top + SUB_HEAD
@@ -1072,10 +1113,16 @@ impl<'a> Grid<'a> {
                     let e = e.expect("inside");
                     vec![base(Vec::new(), Some((a.vpc_w, e.1)))]
                 }
-                Kind::OutTrack => {
+                Kind::OutTrack | Kind::OutFan => {
                     let e = e.expect("inside");
-                    let y = ty.expect("a drawn line kept below its row has a track");
+                    let y = ty.unwrap_or_else(|| self.middle_of(d, r));
                     vec![base(vec![(e.0, y)], Some((a.vpc_w, y)))]
+                }
+                Kind::NatAcross => {
+                    let (e, n) = (e.expect("inside"), n.expect("inside"));
+                    let x = self.gap_beside(a, r.from, r.to);
+                    let y = ty.unwrap_or_else(|| self.middle_of(d, r));
+                    vec![base(vec![(x, e.1), (x, y), (n.0, y)], None)]
                 }
             };
             drawn.push(forms);
@@ -1181,7 +1228,8 @@ impl<'a> Grid<'a> {
                 Lane { frame: VPC_FRAME.into(), horizontal: true, from: 0, to: a.vpc_w, lo, hi, tracks }
             })
             .collect();
-        Placed { w: a.vpc_w, h: d.h, icons, frames, inside, crossing, lanes }
+        let needs = runs.iter().filter(|r| r.drawn && r.band.is_some()).map(|r| r.edge).collect();
+        Placed { w: a.vpc_w, h: d.h, icons, frames, inside, crossing, lanes, needs }
     }
 
     /// From the VPC frame's top to the first thing in it: past the frame's name, with room.
@@ -1191,9 +1239,9 @@ impl<'a> Grid<'a> {
     }
 
     /// How far apart the tracks of the band above the private tier are, and how far they keep
-    /// from its sides (the subnet frames and the private subnet's name): room and the line's own
-    /// width, or a label's height when a line in it, coming from outside along the outside axis,
-    /// may carry its label on its track.
+    /// from its sides (the subnet frames and the private subnet's name): a label's height when a
+    /// line in it comes from outside along the outside axis, the line the layout keeps room for a
+    /// label for; else room and the line's own width, with no room kept for a label.
     fn fan_pitch(&self, runs: &[Run]) -> i32 {
         let labelled = runs.iter().any(|r| r.band == Some(Band::Fan) && r.track.is_some() && r.kind == Kind::InTrack);
         if labelled { TRACK_STEP } else { TRACK_EDGE }
@@ -1320,7 +1368,7 @@ pub(in crate::arrange) mod tests {
     use crate::rules::Lang;
     use std::sync::OnceLock;
 
-    const WEB_CASES: [(&str, &str); 10] = [
+    pub(in crate::arrange) const WEB_CASES: [(&str, &str); 10] = [
         ("web-2az-ja", include_str!("../../../../tests/cases/web-2az-ja/def.yaml")),
         ("web-2az-en", include_str!("../../../../tests/cases/web-2az-en/def.yaml")),
         ("web-3az-ja", include_str!("../../../../tests/cases/web-3az-ja/def.yaml")),
@@ -1335,9 +1383,9 @@ pub(in crate::arrange) mod tests {
 
     /// Three zones and one Reader: Aurora has copies in the first two zones only, and lines run
     /// back up from Aurora to ECS.
-    const FEWER_READERS: &str = "flows:\n  - user -> alb -> ecs -> aurora\n  - aurora -> ecs\n  - aurora -> s3\nset:\n  azs: 3\n  readers: 1\nchoose:\n  route.aurora.s3: endpoint\n";
+    pub(in crate::arrange) const FEWER_READERS: &str = "flows:\n  - user -> alb -> ecs -> aurora\n  - aurora -> ecs\n  - aurora -> s3\nset:\n  azs: 3\n  readers: 1\nchoose:\n  route.aurora.s3: endpoint\n";
 
-    fn grid(src: &str) -> (Model, Diagnostics) {
+    pub(in crate::arrange) fn grid(src: &str) -> (Model, Diagnostics) {
         let (m, d) = crate::infer::infer(&crate::def::parse(src).unwrap(), &Rules::builtin());
         (m.unwrap_or_else(|| panic!("{:?}\n{src}", d.errors)), d)
     }
@@ -1477,9 +1525,10 @@ pub(in crate::arrange) mod tests {
         assert_eq!(y(&right, "igw"), y(&right, "alb"));
     }
 
-    // Fails if the band above the private tier keeps a label's height for lines whose labels sit beside them.
+    // Fails if the band above the private tier keeps a label's height when no line in it is one
+    // the layout keeps room for a label for.
     #[test]
-    fn a_band_without_labels_is_as_tall_as_its_tracks() {
+    fn a_band_keeping_no_label_room_is_as_tall_as_its_tracks() {
         let p = on_the_boundary(Axis::Down);
         let (pubf, pri) = (frame(&p, "pub-1a"), frame(&p, "pri-1a"));
         let fan = p.lanes.iter().find(|l| l.lo == pubf.y + pubf.h).expect("the band above the private tier");
@@ -1541,6 +1590,61 @@ pub(in crate::arrange) mod tests {
     }
 
     pub(in crate::arrange) const LONG: &str = "lambda.resize-images-for-the-we";
+
+    /// Every web definition with a VPC the generator makes, in order: two or three zones, one NAT
+    /// gateway per zone or one in all, one Reader or as many as the zones allow, traffic out to
+    /// the internet or not, ECS's route to S3 left open or answered, the side line to CloudWatch
+    /// from the load balancer, ECS or Aurora, WAF and ACM on CloudFront or not, S3 reached from
+    /// CloudFront, from ECS or from both, and English or Japanese.
+    pub(in crate::arrange) fn generated_with_a_vpc() -> Vec<String> {
+        let mut out = Vec::new();
+        for azs in [2, 3] {
+            for nat in ["per-az", "single"] {
+                for readers in [None, Some(1)].into_iter().filter(|r| azs == 3 || r.is_none()) {
+                    for outbound in [false, true] {
+                        for route in [None, Some("endpoint"), Some("nat")] {
+                            for aux in ["alb", "ecs", "aurora"] {
+                                for attach in [false, true] {
+                                    for s3 in ["cloudfront", "ecs", "both"] {
+                                        for ja in [false, true] {
+                                            let mut src = String::from("flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n");
+                                            if s3 != "ecs" {
+                                                src.push_str("  - cloudfront -> s3\n");
+                                            }
+                                            if s3 != "cloudfront" {
+                                                src.push_str("  - ecs -> s3\n");
+                                            }
+                                            if outbound {
+                                                src.push_str("  - ecs -> internet\n");
+                                            }
+                                            src.push_str(&format!("  - {aux} ~> cloudwatch\n"));
+                                            if attach {
+                                                src.push_str("  - waf -- cloudfront\n  - acm -- cloudfront\n");
+                                            }
+                                            src.push_str(&format!("set:\n  azs: {azs}\n  nat: {nat}\n"));
+                                            if let Some(r) = readers {
+                                                src.push_str(&format!("  readers: {r}\n"));
+                                            }
+                                            if ja {
+                                                src.push_str("  lang: ja\n");
+                                            }
+                                            if let (Some(r), true) = (route, s3 != "cloudfront") {
+                                                src.push_str(&format!("choose:\n  route.ecs.s3: {r}\n"));
+                                            }
+                                            if !out.contains(&src) {
+                                                out.push(src);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
 
     /// Every model the inside of a VPC is laid out for, by name.
     pub(in crate::arrange) fn inputs() -> Vec<(String, Model, Diagnostics)> {
@@ -2020,6 +2124,77 @@ pub(in crate::arrange) mod tests {
         let m = m.unwrap_or_else(|| panic!("{:?}", d.errors));
         assert_eq!(m.nodes.iter().filter(|n| n.service == "lambda").count(), 4);
         lays_out_cleanly("long names", &m, &d, Axis::Down);
+    }
+
+    // Fails if, with two zones and one NAT gateway, the line from the other zone's copy into it
+    // overlaps, breaks or leaves its draft, or shares a track with the lines fanning out below.
+    #[test]
+    fn two_zones_with_one_nat_lay_out_cleanly() {
+        let (m, d) = grid(&WEB_CASES[0].1.replace("set:\n", "set:\n  nat: single\n"));
+        assert_eq!(m.nodes.iter().filter(|n| n.part == "nat").count(), 1);
+        let across = m.edges.iter().position(|e| e.from == "ecs-1c" && e.to == "nat-1a").expect("a line to the other zone's NAT gateway");
+        for axis in [Axis::Right, Axis::Down] {
+            let p = lays_out_cleanly("two zones, one NAT gateway", &m, &d, axis);
+            let pl = p.lines.iter().find(|l| l.edge == across).unwrap();
+            // Out of the side facing the NAT gateway's zone, up the gap between the zones.
+            let (left, right) = (frame(&p, "az-1a"), frame(&p, "az-1c"));
+            let Bend::Points(pts) = &pl.bend else { panic!("{pl:?}") };
+            assert_eq!(pl.exit, Side::Left, "{axis:?}");
+            assert!(pts[0].0 > left.x + left.w && pts[0].0 < right.x, "{axis:?} {pts:?}");
+            let t = pl.tracks.first().expect("a track");
+            let fan = p.lanes.iter().find(|l| l.tracks.contains(&(across, t.at))).expect("its band");
+            assert_eq!(fan.tracks.iter().filter(|x| x.1 == t.at).count(), 1, "{axis:?} {fan:?}");
+        }
+    }
+
+    // Fails if the line to the other zone's NAT gateway is drawn along its row through a part
+    // beside it there, instead of up from its top.
+    #[test]
+    fn a_part_beside_sends_the_line_to_the_other_zones_nat_gateway_up() {
+        let (mut m, d) = grid(&WEB_CASES[0].1.replace("set:\n", "set:\n  nat: single\n"));
+        let pri = Area::Subnet(Tier::Private);
+        let at = m.nodes.iter().position(|n| n.part == "ecs").unwrap();
+        for (k, zone) in ["1a", "1c"].iter().enumerate() {
+            m.nodes.insert(at + k, node(&format!("lambda.api@{zone}"), "lambda", "lambda.api", pri, Some(k), None));
+            m.edges.push(edge("alb", &format!("lambda.api@{zone}"), Rel::Main, "http", None));
+        }
+        let across = m.edges.iter().position(|e| e.from == "ecs-1c" && e.to == "nat-1a").unwrap();
+        for axis in [Axis::Right, Axis::Down] {
+            let p = lays_out_cleanly("a part beside", &m, &d, axis);
+            assert!(icon(&p, "lambda.api@1c").rect.x < icon(&p, "ecs-1c").rect.x);
+            assert_eq!(p.lines.iter().find(|l| l.edge == across).unwrap().exit, Side::Top, "{axis:?}");
+        }
+    }
+
+    // Fails if, with two zones, a NAT gateway per zone and a side line out of the load balancer
+    // in their row, that line overlaps or breaks, or the load balancer leaves the NAT gateways' row.
+    #[test]
+    fn a_side_line_out_of_the_balancer_beside_the_nat_gateways_lays_out_cleanly() {
+        let (m, d) = grid(&WEB_CASES[0].1.replace("  - ecs ~> cloudwatch\n", "  - alb ~> cloudwatch\n"));
+        let side = m.edges.iter().position(|e| e.from == "alb" && e.to == "cloudwatch").unwrap();
+        let p = lays_out_cleanly("side line out of the load balancer", &m, &d, Axis::Down);
+        assert_eq!(icon(&p, "alb").rect.y, icon(&p, "nat-1c").rect.y);
+        let c = p.crossings.iter().find(|c| c.edge == side).expect("a crossing");
+        // Down out of the load balancer, along a track below the public subnets, out by the right side.
+        assert_eq!(c.inner_side, Side::Bottom);
+        assert!(c.through.inner.iter().all(|q| q.1 > frame(&p, "pub-1c").y + frame(&p, "pub-1c").h), "{c:?}");
+        lays_out_cleanly("side line out of the load balancer", &m, &d, Axis::Right);
+    }
+
+    // Fails if a line from outside the Region into a part below or beside the VPC is drafted
+    // through the VPC, or breaks.
+    #[test]
+    fn a_line_into_the_region_goes_around_the_vpc() {
+        let src = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - cloudfront -> s3\n  - ecs -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\nset:\n  nat: single\n";
+        let (m, d) = grid(src);
+        let line = m.edges.iter().position(|e| e.from == "cloudfront" && e.to == "s3").unwrap();
+        for axis in [Axis::Right, Axis::Down] {
+            let p = lays_out_cleanly("line around the VPC", &m, &d, axis);
+            let pl = p.lines.iter().find(|l| l.edge == line).unwrap();
+            let Bend::Points(pts) = &pl.bend else { panic!("{axis:?} {pl:?}") };
+            let vpc = frame(&p, "vpc");
+            assert!(pts.windows(2).all(|s| !hits(s[0], s[1], vpc)), "{axis:?} {pts:?}");
+        }
     }
 
     // Fails if writing a side line before the main lines moves a part on the main lines.
