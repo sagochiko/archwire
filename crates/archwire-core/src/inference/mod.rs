@@ -343,37 +343,66 @@ mod tests {
         ("reasons.rs", include_str!("reasons.rs")),
     ];
 
-    /// Rust source without its comments: what follows `//` to the end of a line, outside string literals.
-    fn without_comments(src: &str) -> String {
+    /// Rust source without its line comments (`//` to the end of the line, outside a string).
+    /// Only line comments and ordinary strings closed on their own line are read; any other way
+    /// of writing that could hide or split a string (`/*`, a raw string `r"` or `r#"`, a string
+    /// left open at the end of its line) is an error naming the file and the line.
+    fn without_comments(file: &str, src: &str) -> Result<String, String> {
+        let ident = |c: Option<&u8>| c.is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_');
         let mut out = String::new();
-        for line in src.lines() {
-            let mut in_string = false;
-            let mut escaped = false;
-            let mut end = line.len();
+        for (n, line) in src.lines().enumerate() {
+            let at = |what: &str| format!("{file}:{}: {what} is not read by this test; write it with `//` and strings on one line", n + 1);
             let bytes = line.as_bytes();
+            let (mut in_string, mut escaped, mut end) = (false, false, line.len());
             for (i, &c) in bytes.iter().enumerate() {
+                let before = |k: usize| if i >= k { bytes.get(i - k) } else { None };
                 match c {
                     _ if escaped => escaped = false,
                     b'\\' if in_string => escaped = true,
                     b'"' => in_string = !in_string,
-                    b'/' if !in_string && bytes.get(i + 1) == Some(&b'/') => {
+                    _ if in_string => {}
+                    b'/' if bytes.get(i + 1) == Some(&b'/') => {
                         end = i;
                         break;
+                    }
+                    b'/' if bytes.get(i + 1) == Some(&b'*') => return Err(at("a block comment `/*`")),
+                    b'*' if bytes.get(i + 1) == Some(&b'/') => return Err(at("the end of a block comment `*/`")),
+                    b'r' if matches!(bytes.get(i + 1), Some(b'"') | Some(b'#'))
+                        && (!ident(before(1)) || (before(1) == Some(&b'b') && !ident(before(2)))) =>
+                    {
+                        return Err(at("a raw string"))
                     }
                     _ => {}
                 }
             }
+            if in_string {
+                return Err(at("a string that goes on past its line"));
+            }
             out.push_str(&line[..end]);
             out.push('\n');
         }
-        out
+        Ok(out)
     }
 
-    // Fails if a rule id written only in a comment is counted as one the code names.
+    // Fails if a rule id written only in a line comment is counted as one the code names, or a
+    // way of writing the reading does not follow (`/*`, raw strings, strings over lines) passes.
     #[test]
     fn a_rule_named_only_in_a_comment_is_not_used() {
-        let src = "let a = \"nat-per-az\"; // \"default-region\"\n/// \"compute-in-private\"\nlet b = \"a // b\";\n";
-        assert_eq!(without_comments(src), "let a = \"nat-per-az\"; \n\nlet b = \"a // b\";\n");
+        let src = "let a = \"nat-per-az\"; // \"default-region\"\n/// \"compute-in-private\"\nlet b = \"a // b \\\" c\";\n";
+        assert_eq!(without_comments("x.rs", src).unwrap(), "let a = \"nat-per-az\"; \n\nlet b = \"a // b \\\" c\";\n");
+        let fails = [
+            ("let a = 1;\nlet b = 2; /* \"default-region\" */\n", "x.rs:2: a block comment `/*`"),
+            ("let a = r\"default-region\";\n", "x.rs:1: a raw string"),
+            ("let a = r#\"de\"fault\"#;\n", "x.rs:1: a raw string"),
+            ("let a = br\"x\";\n", "x.rs:1: a raw string"),
+            ("let a = 1;\n\nlet b = \"one\ntwo\";\n", "x.rs:3: a string that goes on past its line"),
+        ];
+        for (src, want) in fails {
+            let e = without_comments("x.rs", src).unwrap_err();
+            assert!(e.starts_with(want), "{src:?}: {e}");
+        }
+        // Names that only end in `r` before a string are not raw strings.
+        assert!(without_comments("x.rs", "let a = for_r(\"x\"); let b = matches!(c, br);\n").is_ok());
     }
 
     // Fails if the code names a rule missing from RULES, or a file of this module is not read for it,
@@ -393,7 +422,7 @@ mod tests {
         // and outside the declaration of RULES itself.
         let mut used: Vec<String> = Vec::new();
         for (name, src) in SOURCES {
-            let mut code = without_comments(src.find("#[cfg(test)]").map_or(src, |i| &src[..i]));
+            let mut code = without_comments(name, src.find("#[cfg(test)]").map_or(src, |i| &src[..i])).unwrap_or_else(|e| panic!("{e}"));
             if let Some(start) = code.find("pub(crate) const RULES") {
                 let end = start + code[start..].find("];").expect("the list ends") + 2;
                 assert!(name == "mod.rs" && code[end..].find("const RULES").is_none(), "RULES is declared once, in mod.rs");
@@ -1180,6 +1209,10 @@ mod tests {
     /// A named part in a definition with a VPC, and a bad language.
     const NAMED_PART_AND_BAD_LANG: &str = "flows:\n  - user -> alb -> ecs.web\nset:\n  lang: fr\n";
     /// A part no main flow from the user reaches, and a bad answer to its route.
+    /// A web stack written with Aurora before the load balancer: the VPC's reasons come from Aurora.
+    const AURORA_BEFORE_ALB: &str = "flows:\n  - ecs -> aurora\n  - user -> alb -> ecs\n";
+    /// The same lines the other way round: the load balancer comes first.
+    const ALB_BEFORE_AURORA: &str = "flows:\n  - user -> alb -> ecs\n  - ecs -> aurora\n";
     const UNREACHED_AND_BAD_CHOICE: &str = "flows:\n  - user -> alb -> ecs\n  - aurora -> s3\nchoose:\n  route.aurora.s3: tunnel\n";
 
     /// How the answers of the inference with a VPC and of this one may differ for an input.
@@ -1247,6 +1280,26 @@ mod tests {
         d.errors.insert(0, bad("UNSUPPORTED", "flows[1]", "aurora -> s3", &[], "`aurora -> s3` is not reached by main flows (->) from `user`"));
     }
 
+    /// The VPC's reasons, which the old inference took from the load balancer, come from Aurora,
+    /// written first: the rule id, its text and its source of each reason for `vpc` and `az`.
+    fn vpc_reasons_from_aurora(d: &mut Diagnostics) {
+        let rules = Rules::builtin();
+        let swap = [
+            ("load-balancer-in-vpc", "aurora-cluster-in-vpc"),
+            ("alb-spans-two-azs", "aurora-subnet-group-two-azs"),
+            ("default-two-azs", "default-two-azs-for-database"),
+        ];
+        let targets: Vec<_> = d.derived.iter().filter(|x| x.target == "vpc" || x.target == "az").map(|x| (x.target.as_str(), x.rule.as_str())).collect();
+        assert_eq!(targets, [("vpc", swap[0].0), ("az", swap[1].0), ("az", swap[2].0)]);
+        for x in d.derived.iter_mut().filter(|x| x.target == "vpc" || x.target == "az") {
+            let (_, to) = swap.iter().find(|(from, _)| *from == x.rule).expect("listed above");
+            let r = rules.rule(to);
+            x.rule = to.to_string();
+            x.reason = r.reason_en.clone();
+            x.source = r.source.clone();
+        }
+    }
+
     fn twin_apps(m: &Model, d: &Diagnostics) {
         twin_apps_built(m);
         twin_apps_explained(d);
@@ -1261,7 +1314,7 @@ mod tests {
     }
 
     /// The inputs whose answer changes on purpose, by their name in the lists.
-    const VPC_CHANGED: [(&str, VpcExpect); 33] = [
+    const VPC_CHANGED: [(&str, VpcExpect); 34] = [
         // CloudFront's side line is outside the VPC.
         ("VPC_TEST_DEFINITIONS#26", VpcExpect::Fields("notes: note.aux_not_routed is gone", aux_note_gone)),
         // A line outside the pairs: only the text of its error changes.
@@ -1293,6 +1346,8 @@ mod tests {
         ("UNSUPPORTED_AND_UNKNOWN_HOLE", VpcExpect::Fields("the order of errors, and the text of UNSUPPORTED", unsupported_first)),
         ("NAMED_PART_AND_BAD_LANG", VpcExpect::Fields("the UNSUPPORTED of the named part is gone", named_part_accepted)),
         ("UNREACHED_AND_BAD_CHOICE", VpcExpect::Fields("an UNSUPPORTED for the unreached line comes first", unreached_first)),
+        // The first part with VPC reasons is Aurora, not the load balancer.
+        ("AURORA_BEFORE_ALB", VpcExpect::Fields("the rule, text and source of the reasons for vpc and az", vpc_reasons_from_aurora)),
         // Named VPC parts, a load balancer with nothing behind it, and a named part outside the VPC.
         ("LOAD_BALANCER_ALONE", VpcExpect::NewlyBuilt(load_balancer_alone)),
         ("TWIN_APPS", VpcExpect::NewlyBuilt(twin_apps)),
@@ -1302,12 +1357,12 @@ mod tests {
         ("VPC_TEST_DEFINITIONS#25", VpcExpect::NewlyStopped(&[("UNSUPPORTED", "flows[1]", "alb -> aurora", "`alb -> aurora` is not a supported connection")])),
     ];
     const VPC_SAME_COUNT: usize = 1099;
-    const VPC_FIELDS_COUNT: usize = 28;
+    const VPC_FIELDS_COUNT: usize = 29;
     const VPC_NEWLY_BUILT_COUNT: usize = 4;
     const VPC_NEWLY_STOPPED_COUNT: usize = 1;
     /// No input stops in both with the same errors in another order.
     const VPC_ERROR_ORDER_COUNT: usize = 0;
-    const VPC_INPUT_COUNT: usize = 1132;
+    const VPC_INPUT_COUNT: usize = 1133;
 
     // Fails if the model, labels, reasons, holes, notes or errors of a definition with a VPC
     // differ from the inference with a VPC outside the listed inputs and the listed changes, or an
@@ -1341,6 +1396,7 @@ mod tests {
             ("UNSUPPORTED_AND_UNKNOWN_HOLE", UNSUPPORTED_AND_UNKNOWN_HOLE),
             ("NAMED_PART_AND_BAD_LANG", NAMED_PART_AND_BAD_LANG),
             ("UNREACHED_AND_BAD_CHOICE", UNREACHED_AND_BAD_CHOICE),
+            ("AURORA_BEFORE_ALB", AURORA_BEFORE_ALB),
         ] {
             inputs.push((name.to_string(), src.to_string()));
         }
@@ -1739,6 +1795,117 @@ mod tests {
         assert_eq!(d.errors.len(), 1, "{:?}", d.errors);
         assert_eq!(first(&d), ("UNKNOWN_HOLE", Some("choose.route.lambda.api.s3"), Some("route.lambda.api.s3")));
         assert_eq!(d.errors[0].allowed, ["route.ecs.dynamodb", "route.[lambda.api].s3"]);
+    }
+
+    // Fails if the VPC's reasons are not taken from the first part written that has them when
+    // Aurora comes before the load balancer, or if the order of the lines changes the parts and lines.
+    #[test]
+    fn aurora_written_first_gives_the_vpc_its_reasons() {
+        let vpc_az = |d: &Diagnostics| d.derived.iter().filter(|x| x.target == "vpc" || x.target == "az").map(|x| x.rule.clone()).collect::<Vec<_>>();
+        let (first, d) = passes(AURORA_BEFORE_ALB);
+        assert_eq!(vpc_az(&d), ["aurora-cluster-in-vpc", "aurora-subnet-group-two-azs", "default-two-azs-for-database"]);
+        let (second, d) = passes(ALB_BEFORE_AURORA);
+        assert_eq!(vpc_az(&d), ["load-balancer-in-vpc", "alb-spans-two-azs", "default-two-azs"]);
+        // Each node and line by its id: where it is, its role and its label.
+        let nodes = |m: &Model| {
+            let mut v: Vec<_> = m.nodes.iter().map(|n| (n.id.clone(), format!("{:?}", n.area), n.az, n.role.clone(), n.added)).collect();
+            v.sort();
+            v
+        };
+        let edges = |m: &Model| {
+            let mut v: Vec<_> = m.edges.iter().map(|e| (crate::ids::edge_id(&e.from, &e.to), format!("{:?}", e.rel), e.label.clone(), e.hole.clone())).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(nodes(&first), nodes(&second));
+        assert_eq!(edges(&first), edges(&second));
+        assert!(!first.nodes.is_empty() && !first.edges.is_empty());
+    }
+
+    // Fails if the parts or lines of a model of the mixed shape come in another order: the
+    // arrangement gives columns in this order.
+    #[test]
+    fn a_mixed_model_keeps_its_order() {
+        use crate::def::Rel::Aux;
+        let (m, _) = passes(crate::test_inputs::MIX_SMALLEST);
+        let parts = ["user", "lambda-1a", "lambda-1c", "aurora-1a", "aurora-1c", "apigateway", "s3", "cloudwatch"];
+        let written = [
+            ("user", "apigateway", Main, "https"),
+            ("apigateway", "lambda-1a", Main, "invoke"),
+            ("apigateway", "lambda-1c", Main, "invoke"),
+            ("lambda-1a", "aurora-1a", Main, "read_write"),
+            ("lambda-1a", "aurora-1c", Main, "read"),
+            ("lambda-1c", "aurora-1a", Main, "read_write"),
+            ("lambda-1c", "aurora-1c", Main, "read"),
+            ("lambda-1a", "s3", Main, "read_write"),
+            ("lambda-1c", "s3", Main, "read_write"),
+            ("lambda-1a", "cloudwatch", Aux, "logs_metrics"),
+            ("lambda-1c", "cloudwatch", Aux, "logs_metrics"),
+            ("aurora-1a", "aurora-1c", Aux, "replication"),
+        ];
+        assert_eq!(node_ids(&m), parts);
+        assert_eq!(lines(&m), written);
+
+        let (m, _) = passes(crate::test_inputs::MIX_NAT);
+        let parts = ["user", "igw", "nat-1a", "nat-1c", "lambda-1a", "lambda-1c", "aurora-1a", "aurora-1c", "apigateway", "s3", "cloudwatch"];
+        let out = [
+            ("lambda-1a", "nat-1a", Main, "outbound"),
+            ("lambda-1c", "nat-1c", Main, "outbound"),
+            ("nat-1a", "igw", Main, "outbound"),
+            ("nat-1c", "igw", Main, "outbound"),
+        ];
+        assert_eq!(node_ids(&m), parts);
+        assert_eq!(lines(&m), [&written[..], &out[..]].concat());
+    }
+
+    /// A function attached to the VPC through its database, with traffic out to the internet.
+    const ATTACHED_TO_INTERNET: &str = "flows:\n  - user -> apigateway(http) -> lambda -> aurora\n  - lambda -> internet\n";
+
+    // Fails if a function in the VPC cannot send traffic to the internet through NAT gateways, or
+    // the gateways, the lines out or the reasons are not added.
+    #[test]
+    fn an_attached_function_reaches_the_internet_through_nat() {
+        let (m, d) = passes(ATTACHED_TO_INTERNET);
+        assert!(d.holes.is_empty(), "{:?}", d.holes);
+        assert_eq!(d.exit_code(), 0);
+        assert_eq!(node_ids(&m), ["user", "igw", "nat-1a", "nat-1c", "lambda-1a", "lambda-1c", "aurora-1a", "aurora-1c", "apigateway"]);
+        let out: Vec<_> = lines(&m).into_iter().filter(|(_, _, _, label)| *label == "outbound").collect();
+        assert_eq!(
+            out,
+            [
+                ("lambda-1a", "nat-1a", Main, "outbound"),
+                ("lambda-1c", "nat-1c", Main, "outbound"),
+                ("nat-1a", "igw", Main, "outbound"),
+                ("nat-1c", "igw", Main, "outbound"),
+            ]
+        );
+        assert!(m.nodes.iter().all(|n| n.service != "internet"));
+        assert_eq!(rules_of(&d, "lambda"), [FUNCTION_IN_VPC[0], FUNCTION_IN_VPC[1], "attached-function-internet-through-nat"]);
+        assert_eq!(rules_of(&d, "igw"), ["private-egress-through-nat"]);
+        assert_eq!(rules_of(&d, "nat"), ["nat-per-az"]);
+
+        let (m, d) = passes(&format!("{ATTACHED_TO_INTERNET}set:\n  azs: 3\n  nat: single\n"));
+        assert!(d.holes.is_empty(), "{:?}", d.holes);
+        assert_eq!(d.exit_code(), 0);
+        assert_eq!(
+            node_ids(&m),
+            ["user", "igw", "nat-1a", "lambda-1a", "lambda-1c", "lambda-1d", "aurora-1a", "aurora-1c", "aurora-1d", "apigateway"]
+        );
+        assert_eq!(spot(&m, "nat-1a"), (Area::Subnet(Tier::Public), Some(0), None));
+        let out: Vec<_> = lines(&m).into_iter().filter(|(_, _, _, label)| *label == "outbound").collect();
+        assert_eq!(
+            out,
+            [
+                ("lambda-1a", "nat-1a", Main, "outbound"),
+                ("lambda-1c", "nat-1a", Main, "outbound"),
+                ("lambda-1d", "nat-1a", Main, "outbound"),
+                ("nat-1a", "igw", Main, "outbound"),
+            ]
+        );
+        assert!(m.nodes.iter().all(|n| n.service != "internet"));
+        assert_eq!(rules_of(&d, "lambda"), [FUNCTION_IN_VPC[0], FUNCTION_IN_VPC[1], "attached-function-internet-through-nat"]);
+        assert_eq!(rules_of(&d, "igw"), ["private-egress-through-nat"]);
+        assert!(rules_of(&d, "nat").is_empty());
     }
 
     /// The tests of the inference with a VPC, run on this one.
