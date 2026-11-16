@@ -2176,4 +2176,42 @@ pub(in crate::arrange) mod tests {
         }
         std::fs::write(dir.join("notes.tsv"), report).unwrap();
     }
+
+    // Fails if the grid tells the gateways from other parts by their service names.
+    #[test]
+    fn the_grid_finds_gateways_whatever_their_key() {
+        let names = [("igw", "gate"), ("nat", "exit")];
+        let mut services = include_str!("../../../../rules/aws/services.toml").to_string();
+        for (from, to) in names {
+            let key = format!("key = \"{from}\"");
+            assert!(services.contains(&key), "no service {from}");
+            services = services.replacen(&key, &format!("key = \"{to}\""), 1);
+        }
+        let renamed = Rules::load(
+            &services,
+            include_str!("../../../../rules/aws/rules.toml"),
+            include_str!("../../../../rules/aws/labels.toml"),
+            include_str!("../../../../rules/aws/links.toml"),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let r = Rules::builtin();
+        let mut seen = [0; 2];
+        for (name, m, _) in inputs() {
+            let mut m2 = m.clone();
+            for n in &mut m2.nodes {
+                if let Some(k) = names.iter().position(|(from, _)| n.service == *from) {
+                    n.service = names[k].1.to_string();
+                    seen[k] += 1;
+                }
+            }
+            for axis in [Axis::Right, Axis::Down] {
+                let at = |m: &Model, r: &Rules| -> Vec<(String, Rect)> {
+                    let p = arrange(m, r, axis).unwrap_or_else(|e| panic!("{name} {}: {e:?}", axis_name(axis)));
+                    p.layout.icons.iter().map(|i| (i.id.clone(), i.rect)).collect()
+                };
+                assert_eq!(at(&m2, &renamed), at(&m, &r), "{name} {}", axis_name(axis));
+            }
+        }
+        assert!(seen.iter().all(|&n| n > 0), "{seen:?}");
+    }
 }

@@ -13,7 +13,6 @@
 
 use crate::audit::audit;
 use crate::def::Rel;
-use crate::grid::IGW;
 use crate::ids::edge_id;
 use crate::labels::{path_length, LabelSpot};
 use crate::layout::{Icon, Layout, Rect};
@@ -21,7 +20,7 @@ use crate::lines::{gather, label_parts, Line};
 use crate::measure::Measure;
 use crate::model::{Axis, Model, Node};
 use crate::path::{outward, reverse, Draft, Pt, Scene};
-use crate::rules::{Rules, Scope};
+use crate::rules::{DerivedRole, Rules, Scope};
 
 pub use crate::grid::route;
 
@@ -177,6 +176,13 @@ pub(crate) struct Ctx<'a> {
     pub(crate) measure: Measure,
 }
 
+impl Ctx<'_> {
+    /// True if the part is the gateway traffic enters the VPC by, as the rules data marks it.
+    fn enters_the_vpc(&self, id: &str) -> bool {
+        self.rules.service(&self.node(id).service).and_then(|s| s.derived_role) == Some(DerivedRole::EntryGateway)
+    }
+}
+
 /// Like `route`, with every line's first try taken from `plans`. A line with no plan gets the
 /// usual `candidates`; `plan()` is never called. Reads only frames and icons the layout has.
 pub fn route_planned(model: &Model, layout: &Layout, rules: &Rules, plans: &[LinePlan]) -> (Vec<Wire>, Vec<String>) {
@@ -259,7 +265,7 @@ pub(crate) fn draw(ctx: &Ctx, specs: &[Line], drafts: &[Draft], plans: &[LinePla
     for i in by_length {
         let s = &specs[i];
         let (fr, tr) = (layout.rect(&s.from), layout.rect(&s.to));
-        let near_source = ctx.node(&s.from).service == IGW;
+        let near_source = ctx.enters_the_vpc(&s.from);
         let axis = drafts[i].axis;
         // Running right, ends level in height put the label above the line, else beside it;
         // running down, ends level left to right put it beside the line, else above it.
@@ -280,7 +286,7 @@ pub(crate) fn draw(ctx: &Ctx, specs: &[Line], drafts: &[Draft], plans: &[LinePla
     let mut wires = Vec::new();
     for (((s, (exit, entry)), path), spot) in specs.iter().zip(ports).zip(&paths).zip(spots) {
         let spot = spot.expect("every line has a label spot");
-        let near_source = ctx.node(&s.from).service == IGW;
+        let near_source = ctx.enters_the_vpc(&s.from);
         if !spot.clear {
             notes.push(rules.text("note.unplaced_label", lang).replace("{line}", &edge_id(&s.from, &s.to)));
         }
@@ -1832,5 +1838,50 @@ mod tests {
         w[0].points = vec![(100, 30), (100, 80), (200, 80), (200, 30)];
         assert_eq!(audit(&m, &l, &w, &[], Measure::Flow), Vec::<String>::new(), "the line overlaps nothing");
         assert!(audit(&m, &l, &w, &plans, Measure::Flow).contains(&"edge-a-to-b".to_string()));
+    }
+
+    /// The built-in rules with the services `from` renamed `to`, and `model` with its parts of
+    /// those services renamed the same way.
+    fn renamed(model: &Model, names: &[(&str, &str)]) -> (Model, Rules) {
+        let mut services = include_str!("../../../rules/aws/services.toml").to_string();
+        let mut m = model.clone();
+        for &(from, to) in names {
+            let key = format!("key = \"{from}\"");
+            assert!(services.contains(&key), "no service {from}");
+            services = services.replacen(&key, &format!("key = \"{to}\""), 1);
+            for n in m.nodes.iter_mut().filter(|n| n.service == from) {
+                n.service = to.to_string();
+            }
+        }
+        let r = Rules::load(
+            &services,
+            include_str!("../../../rules/aws/rules.toml"),
+            include_str!("../../../rules/aws/labels.toml"),
+            include_str!("../../../rules/aws/links.toml"),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        (m, r)
+    }
+
+    // Fails if where a label sits on a line out of the entry gateway is decided by the gateway's service name.
+    #[test]
+    fn a_label_leaving_the_entry_gateway_sits_near_it_whatever_its_key() {
+        let src = crate::test_inputs::WEB_CASES.iter().find(|c| c.0 == "web-2az-ja").unwrap().1;
+        let r = Rules::builtin();
+        let (m, d) = crate::inference::infer(&crate::def::parse(src).unwrap(), &r);
+        let m = m.unwrap_or_else(|| panic!("{:?}", d.errors));
+        let gate: Vec<String> = m.nodes.iter().filter(|n| r.service(&n.service).and_then(|s| s.derived_role) == Some(crate::rules::DerivedRole::EntryGateway)).map(|n| n.id.clone()).collect();
+        assert_eq!(gate.len(), 1);
+        let leaving = |m: &Model, r: &Rules| {
+            let axis = m.direction.unwrap_or_else(|| crate::arrange::default_axis(m));
+            let p = crate::arrange::arrange(m, r, axis).unwrap_or_else(|e| panic!("{e:?}"));
+            let (w, _) = route_planned(m, &p.layout, r, &p.lines);
+            w.into_iter().filter(|x| x.from == gate[0]).map(|x| (x.id, x.label_at, x.label_near_source)).collect::<Vec<_>>()
+        };
+        let before = leaving(&m, &r);
+        assert!(!before.is_empty());
+        assert!(before.iter().all(|x| x.2), "{before:?}");
+        let (m2, r2) = renamed(&m, &[("igw", "gate")]);
+        assert_eq!(leaving(&m2, &r2), before);
     }
 }

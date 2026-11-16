@@ -462,15 +462,9 @@ fn lay_region(model: &Model, rules: &Rules, axis: Axis, piece: Option<&Piece>) -
 
     // Main ranks: their lengths come from the main parts alone, so side parts never move them.
     let named = |i: usize| icon_of(model, rules, i, icon_at(0, 0), None);
-    let lone_main = lone.iter().map(|&i| spans(&named(i)).0 .1).max();
-    let block_main = piece.map_or((0, 0), |p| {
-        let (w, h) = (p.placed.w, p.placed.h);
-        let extra = match (axis, lone_main) {
-            (Axis::Right, Some(end)) => gap + end,
-            _ => 0,
-        };
-        (0, uv(axis, (w, h)).0 + extra)
-    });
+    // The parts only the VPC's parts are joined to sit right of it: they widen its block, never heighten it.
+    let lone_right = lone.iter().map(|&i| spans(&named(i)).0 .1).max().map_or(0, |end| gap + end);
+    let block_main = piece.map_or((0, 0), |p| (0, uv(axis, (p.placed.w + lone_right, p.placed.h)).0));
     let main = |i: usize| if i == vpc_id { block_main } else { uv(axis, spans(&named(i))).0 };
     let on_line = |i: usize| if i == vpc_id { block_main } else { uv(axis, on_lines(&named(i))).0 };
     let off = |i: usize| inner_offset(model, piece, axis, i);
