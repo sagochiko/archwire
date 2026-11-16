@@ -349,6 +349,7 @@ mod tests {
     use crate::layout::{Frame, FrameKind};
     use crate::measure::{frame_name_area, label_area, wire_label_area, wire_text_width};
     use crate::path::{hits, opposite, overlaps, shared};
+    use crate::test_inputs::{CROWDED_SIDE_EN, CROWDED_S3_JA};
 
     fn wires(src: &str) -> (Model, Layout, Vec<Wire>, Vec<String>) {
         let r = Rules::builtin();
@@ -771,14 +772,6 @@ mod tests {
     const SHOWCASE: &str = "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\nset:\n  azs: 3\n  lang: ja\nchoose:\n  route.ecs.s3: nat\n";
 
     const HEAVY: &str = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - user -> alb\n  - cloudfront -> s3\n  - cloudfront ~> cloudwatch\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n  - ecs -> internet\n  - waf -- cloudfront\n  - acm -- cloudfront\nchoose:\n  route.ecs.s3: endpoint\n";
-
-    /// Two AZs in Japanese with lines from ECS and Aurora to S3 and the side column: the label of
-    /// the line from ECS to S3 has no spot clear of lines and text even over frame sides.
-    const CROWDED_S3_JA: &str = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - cloudfront ~> cloudwatch\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - aurora ~> cloudwatch\n  - waf -- cloudfront\n  - acm -- cloudfront\n  - aurora -> s3\n  - alb ~> s3\nset:\n  azs: 2\n  lang: ja\n  nat: per-az\nchoose:\n  route.ecs.s3: endpoint\n  route.aurora.s3: nat\n";
-
-    /// Two AZs in English with lines from every part to S3 and CloudWatch: the labels of the lines
-    /// to CloudWatch have no spot clear of lines and text even over frame sides.
-    const CROWDED_SIDE_EN: &str = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - cloudfront -> s3\n  - cloudfront ~> cloudwatch\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n  - aurora ~> cloudwatch\n  - ecs -> internet\n  - waf -- cloudfront\n  - acm -- cloudfront\n  - user -> alb\n  - aurora -> s3\n  - alb ~> s3\n  - ecs ~> s3\nset:\n  azs: 2\n  lang: en\n  nat: per-az\nchoose:\n  route.aurora.s3: nat\n";
 
     /// Accepted definitions this version cannot draw without a fault: too many lines and labels
     /// meet in one gap. They are still drawn, and every line at fault must be named in a note.

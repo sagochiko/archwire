@@ -470,7 +470,7 @@ mod tests {
         assert_eq!(GRID_INFER_TEST_DEFINITIONS.len(), 64);
     }
 
-    // Fails if a definition is copied wrong, listed twice, or put in the wrong one of the two inference lists.
+    // Fails if a definition no longer parses, is listed twice in one list, or is put in the wrong one of the two inference lists.
     #[test]
     fn the_shared_inputs_parse_and_appear_once() {
         let rules = Rules::builtin();

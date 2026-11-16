@@ -231,6 +231,7 @@ mod tests {
     use crate::layout::{Icon, Layout, Rect};
     use crate::model::{Area, Edge, Node, Tier};
     use crate::rules::{Lang, Rules};
+    use crate::test_inputs::FEWER_READERS;
 
     /// The fixed examples that give a diagram.
     const CASES: [(&str, &str); 17] = [
@@ -252,9 +253,6 @@ mod tests {
         ("web-3az-ja", include_str!("../../../tests/cases/web-3az-ja/def.yaml")),
         ("web-attach-en", include_str!("../../../tests/cases/web-attach-en/def.yaml")),
     ];
-
-    /// Three AZs and one Reader: Aurora has copies in the first two AZs only.
-    const FEWER_READERS: &str = "flows:\n  - user -> alb -> ecs -> aurora\n  - aurora -> ecs\n  - aurora -> s3\nset:\n  azs: 3\n  readers: 1\nchoose:\n  route.aurora.s3: endpoint\n";
 
     fn fewer_readers_en() -> String {
         FEWER_READERS.replace("  readers: 1\n", "  readers: 1\n  lang: en\n")
