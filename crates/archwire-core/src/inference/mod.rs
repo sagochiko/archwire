@@ -13,10 +13,10 @@ mod reasons;
 pub(crate) use links::check_names;
 pub(crate) use reasons::derived;
 
-use crate::def::Definition;
+use crate::def::{Definition, Link, Ref};
 use crate::diag::{Diagnostics, Problem, Versions};
 use crate::model::{Area, Axis, Model, Tier};
-use crate::rules::{Lang, Place, Rules, Scope, Service, Subnet};
+use crate::rules::{Lang, LinkRule, Place, Rules, Scope, Service, Subnet};
 
 /// The rules this module's code names itself; the rest come from the data, which loading checks.
 pub(crate) const RULES: [&str; 5] = [
@@ -39,10 +39,26 @@ const NAT_MODES: [&str; 2] = ["per-az", "single"];
 const ROUTE_CHOICES: [&str; 2] = ["endpoint", "nat"];
 
 /// The settings a model is built with.
-struct Settings {
+pub(crate) struct Settings {
     region: String,
     lang: Lang,
     direction: Option<Axis>,
+    /// The number of Availability Zones: 2 unless a definition with a VPC writes `azs`.
+    azs: usize,
+    /// The number of Readers of a Writer: one fewer than the zones unless `readers` is written.
+    readers: usize,
+    /// `nat: single`: one NAT gateway in the first zone instead of one in every zone.
+    nat_single: bool,
+}
+
+/// What the checks found in a definition that passed them.
+struct Checked<'a> {
+    /// The definition writes a part of a service whose scope is the VPC.
+    vpc: bool,
+    settings: Settings,
+    parts: Vec<&'a Ref>,
+    accepted: Vec<(&'a Link, &'a LinkRule)>,
+    kinds: Vec<(String, &'a Ref)>,
 }
 
 fn problem(code: &str, at: &str, got: &str, allowed: Vec<String>, message: String) -> Problem {
@@ -62,9 +78,21 @@ pub fn infer(def: &Definition, rules: &Rules) -> (Option<Model>, Diagnostics) {
         versions: Versions { archwire: env!("CARGO_PKG_VERSION").to_string(), rules: rules.version.clone() },
         ..Default::default()
     };
+    let Some(checked) = check(def, rules, &mut diag) else { return (None, diag) };
+    if checked.vpc {
+        return crate::infer::infer(def, rules);
+    }
+    let Checked { parts, accepted, kinds, settings, .. } = checked;
+    let model = build::build(def, rules, &parts, &accepted, &kinds, settings);
+    reasons::explain(def, rules, &model, &parts, &accepted, &kinds, &mut diag);
+    (Some(model), diag)
+}
+
+/// Every check, in order, adding its errors to `diag`; None if any check stopped the definition.
+fn check<'a>(def: &'a Definition, rules: &'a Rules, diag: &mut Diagnostics) -> Option<Checked<'a>> {
     diag.errors = rules.require(&RULES);
     if !diag.errors.is_empty() {
-        return (None, diag);
+        return None;
     }
     let vpc = def
         .links
@@ -81,15 +109,9 @@ pub fn infer(def: &Definition, rules: &Rules) -> (Option<Model>, Diagnostics) {
     let routes = links::route_holes(def, rules);
     links::check_choices(def, rules, &kinds, &routes, errors);
     if !diag.errors.is_empty() {
-        return (None, diag);
+        return None;
     }
-
-    if vpc {
-        return crate::infer::infer(def, rules);
-    }
-    let model = build::build(def, rules, &parts, &accepted, &kinds, settings);
-    reasons::explain(def, rules, &model, &parts, &accepted, &kinds, &mut diag);
-    (Some(model), diag)
+    Some(Checked { vpc, settings, parts, accepted, kinds })
 }
 
 /// The settings in this order: `azs`, `region`, `lang`, `direction`, `nat`, `readers`, then
@@ -110,21 +132,25 @@ fn check_settings(def: &Definition, vpc: bool, errors: &mut Vec<Problem>) -> Set
     let region = check_region(def, errors);
     let lang = check_lang(def, errors);
     let direction = check_direction(def, errors);
+    let mut readers = azs - 1;
+    let mut nat_single = false;
     if vpc {
         match get("nat") {
-            None | Some("per-az") | Some("single") => {}
+            None | Some("per-az") => {}
+            Some("single") => nat_single = true,
             Some(v) => bad_setting(errors, "nat", v, strings(&NAT_MODES)),
         }
         if let Some(v) = get("readers") {
-            if !v.parse::<usize>().is_ok_and(|n| (1..azs).contains(&n)) {
-                bad_setting(errors, "readers", v, (1..azs).map(|n| n.to_string()).collect());
+            match v.parse::<usize>() {
+                Ok(n) if (1..azs).contains(&n) => readers = n,
+                _ => bad_setting(errors, "readers", v, (1..azs).map(|n| n.to_string()).collect()),
             }
         }
     }
     for key in def.set.keys().filter(|k| !allowed.contains(&k.as_str())) {
         errors.push(problem("UNKNOWN_SETTING", &format!("set.{key}"), key, strings(allowed), format!("unknown setting `{key}`")));
     }
-    Settings { region, lang, direction }
+    Settings { region, lang, direction, azs, readers, nat_single }
 }
 
 /// The value of `set.region`, ap-northeast-1 when it is not written. A value outside the list
@@ -597,5 +623,262 @@ mod tests {
         assert_eq!((same, error_order), (SAME_COUNT, ERROR_ORDER_COUNT));
         assert_eq!(inputs.len(), INPUT_COUNT);
         assert_eq!(SAME_COUNT + ERROR_ORDER_COUNT, INPUT_COUNT);
+    }
+
+    /// The model of a definition with a VPC that passes the checks, built with these rules.
+    fn vpc_with(src: &str, rules: &Rules) -> Model {
+        let def = crate::def::parse(src).unwrap();
+        let mut diag = Diagnostics::default();
+        let checked = check(&def, rules, &mut diag).unwrap_or_else(|| panic!("{:?}", diag.errors));
+        assert!(checked.vpc);
+        build::vpc_model(&def, rules, &checked.settings)
+    }
+    fn vpc(src: &str) -> Model { vpc_with(src, &Rules::builtin()) }
+    fn node_ids(m: &Model) -> Vec<&str> { m.nodes.iter().map(|n| n.id.as_str()).collect() }
+    fn lines(m: &Model) -> Vec<(&str, &str, &str)> {
+        m.edges.iter().map(|e| (e.from.as_str(), e.to.as_str(), e.label.as_str())).collect()
+    }
+    fn role<'m>(m: &'m Model, id: &str) -> Option<&'m str> {
+        m.nodes.iter().find(|n| n.id == id).unwrap_or_else(|| panic!("{id}")).role.as_deref()
+    }
+
+    // Fails if copies are gathered by service rather than by part, replication joins the Writer of
+    // one part to the Reader of another, or the entry is looked up by the written name.
+    #[test]
+    fn named_vpc_parts_build_by_part() {
+        use crate::test_inputs::TWIN_APPS;
+        let m = vpc(TWIN_APPS);
+        assert_eq!(node_ids(&m), [
+            "user", "cloudfront", "igw", "alb", "ecs.web@1a", "ecs.web@1c", "aurora.web@1a", "aurora.web@1c",
+            "ecs.admin@1a", "ecs.admin@1c", "aurora.admin@1a", "aurora.admin@1c",
+        ]);
+        for id in ["aurora.web@1a", "aurora.admin@1a"] {
+            assert_eq!(role(&m, id), Some("writer"), "{id}");
+        }
+        for id in ["aurora.web@1c", "aurora.admin@1c"] {
+            assert_eq!(role(&m, id), Some("reader"), "{id}");
+        }
+        assert_eq!(lines(&m), [
+            ("user", "cloudfront", "https"),
+            ("cloudfront", "igw", "https"),
+            ("igw", "alb", "https"),
+            ("alb", "ecs.web@1a", "http"),
+            ("alb", "ecs.web@1c", "http"),
+            ("ecs.web@1a", "aurora.web@1a", "read_write"),
+            ("ecs.web@1a", "aurora.web@1c", "read"),
+            ("ecs.web@1c", "aurora.web@1a", "read_write"),
+            ("ecs.web@1c", "aurora.web@1c", "read"),
+            ("alb", "ecs.admin@1a", "http"),
+            ("alb", "ecs.admin@1c", "http"),
+            ("ecs.admin@1a", "aurora.admin@1a", "read_write"),
+            ("ecs.admin@1a", "aurora.admin@1c", "read"),
+            ("ecs.admin@1c", "aurora.admin@1a", "read_write"),
+            ("ecs.admin@1c", "aurora.admin@1c", "read"),
+            ("aurora.web@1a", "aurora.web@1c", "replication"),
+            ("aurora.admin@1a", "aurora.admin@1c", "replication"),
+        ]);
+        assert!(!m.edges.iter().any(|e| e.from == "aurora.web@1a" && e.to == "aurora.admin@1c"));
+    }
+
+    // Fails if the two load balancers become one, the entry gateway is made twice, one of the web
+    // stacks is dropped, copies are gathered by service, or lines cross from one part to another.
+    #[test]
+    fn two_load_balancers_build_by_part() {
+        use crate::model::Tier;
+        use crate::test_inputs::TWO_WEBS;
+        let m = vpc(TWO_WEBS);
+        assert_eq!(node_ids(&m), [
+            "user", "cloudfront", "igw", "alb.web", "alb.admin", "ecs.web@1a", "ecs.web@1c", "aurora.web@1a",
+            "aurora.web@1c", "ecs.admin@1a", "ecs.admin@1c", "aurora.admin@1a", "aurora.admin@1c",
+        ]);
+        for id in ["alb.web", "alb.admin"] {
+            let n = m.nodes.iter().find(|n| n.id == id).unwrap();
+            assert_eq!((n.area, n.az), (Area::Subnet(Tier::Public), None), "{id}");
+        }
+        assert_eq!(m.nodes.iter().filter(|n| n.area == Area::VpcEdge).count(), 1);
+        assert_eq!(lines(&m), [
+            ("user", "cloudfront", "https"),
+            ("cloudfront", "igw", "https"),
+            ("igw", "alb.web", "https"),
+            ("alb.web", "ecs.web@1a", "http"),
+            ("alb.web", "ecs.web@1c", "http"),
+            ("ecs.web@1a", "aurora.web@1a", "read_write"),
+            ("ecs.web@1a", "aurora.web@1c", "read"),
+            ("ecs.web@1c", "aurora.web@1a", "read_write"),
+            ("ecs.web@1c", "aurora.web@1c", "read"),
+            ("user", "igw", "https"),
+            ("igw", "alb.admin", "https"),
+            ("alb.admin", "ecs.admin@1a", "http"),
+            ("alb.admin", "ecs.admin@1c", "http"),
+            ("ecs.admin@1a", "aurora.admin@1a", "read_write"),
+            ("ecs.admin@1a", "aurora.admin@1c", "read"),
+            ("ecs.admin@1c", "aurora.admin@1a", "read_write"),
+            ("ecs.admin@1c", "aurora.admin@1c", "read"),
+            ("aurora.web@1a", "aurora.web@1c", "replication"),
+            ("aurora.admin@1a", "aurora.admin@1c", "replication"),
+        ]);
+        let part = |id: &str| m.nodes.iter().find(|n| n.id == id).unwrap().part.clone();
+        assert!(!m.edges.iter().any(|e| part(&e.from).starts_with("aurora.") && part(&e.to).starts_with("aurora.") && part(&e.from) != part(&e.to)));
+        assert!(!m.edges.iter().any(|e| (part(&e.from), part(&e.to)) == ("alb.web".into(), "ecs.admin".into())));
+        assert!(m.edges.iter().all(|e| e.hole.is_none()));
+    }
+
+    // Fails if the parts inference adds are looked up by a service name instead of their role in the rules data.
+    #[test]
+    fn the_entry_gateway_and_nat_gateways_are_found_by_their_role() {
+        let src = crate::test_inputs::WEB_CASES.iter().find(|(n, _)| *n == "web-2az-ja").unwrap().1;
+        let services = include_str!("../../../../rules/aws/services.toml");
+        let renamed = services.replace("key = \"igw\"", "key = \"door\"").replace("key = \"nat\"", "key = \"exit\"");
+        assert_eq!(renamed.matches("key = \"door\"").count() + renamed.matches("key = \"exit\"").count(), 2);
+        let rules = Rules::load(
+            &renamed,
+            include_str!("../../../../rules/aws/rules.toml"),
+            include_str!("../../../../rules/aws/labels.toml"),
+            include_str!("../../../../rules/aws/links.toml"),
+        )
+        .unwrap();
+        let (before, after) = (vpc(src), vpc_with(src, &rules));
+        let added = |m: &Model| m.nodes.iter().filter(|n| n.added).map(|n| (n.id.clone(), n.service.clone())).collect::<Vec<_>>();
+        assert_eq!(added(&before), [("igw", "igw"), ("nat-1a", "nat"), ("nat-1c", "nat")].map(|(a, b)| (a.to_string(), b.to_string())));
+        assert_eq!(added(&after), [("door", "door"), ("exit-1a", "exit"), ("exit-1c", "exit")].map(|(a, b)| (a.to_string(), b.to_string())));
+        assert_eq!((after.nodes.len(), after.edges.len()), (before.nodes.len(), before.edges.len()));
+    }
+
+    // Fails if a definition with only a public tier loses a part or a line.
+    #[test]
+    fn a_public_tier_alone_builds_its_gateway() {
+        let m = vpc(crate::test_inputs::LOAD_BALANCER_ALONE);
+        assert_eq!(node_ids(&m), ["user", "igw", "alb"]);
+        assert_eq!(lines(&m), [("user", "igw", "https"), ("igw", "alb", "https")]);
+    }
+
+    /// How the inference with a VPC and this one may differ for an input.
+    #[derive(Debug, PartialEq)]
+    enum Built {
+        /// Both give a model, and the models are equal.
+        Same,
+        /// The checks here pass where the inference with a VPC stops.
+        NewlyBuilt,
+        /// The checks here stop where the inference with a VPC gives a model.
+        NewlyStopped,
+        /// Both stop.
+        BothStop,
+    }
+
+    /// The inputs whose answer is not the same model, by their name in the lists.
+    const NOT_SAME: [(&str, Built); 46] = [
+        // Named VPC parts, and a load balancer with nothing behind it.
+        ("GRID_INFER_TEST_DEFINITIONS#53", Built::NewlyBuilt),
+        ("TWIN_APPS", Built::NewlyBuilt),
+        ("TWO_WEBS", Built::NewlyBuilt),
+        ("LOAD_BALANCER_ALONE", Built::NewlyBuilt),
+        // `alb -> aurora` is not a listed connection.
+        ("VPC_TEST_DEFINITIONS#25", Built::NewlyStopped),
+        ("tests/cases/err-unknown-service", Built::BothStop),
+        // A name, a setting, an answer or a connection outside the lists.
+        ("GRID_INFER_TEST_DEFINITIONS#8", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#9", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#10", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#11", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#12", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#13", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#14", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#15", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#16", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#17", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#18", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#25", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#26", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#27", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#28", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#29", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#30", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#31", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#32", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#33", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#34", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#36", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#37", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#38", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#39", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#40", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#41", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#42", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#43", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#44", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#45", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#46", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#47", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#48", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#49", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#51", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#57", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#58", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#59", Built::BothStop),
+        ("GRID_INFER_TEST_DEFINITIONS#60", Built::BothStop),
+    ];
+    const VPC_SAME_COUNT: usize = 1080;
+    const VPC_NEWLY_BUILT_COUNT: usize = 4;
+    const VPC_NEWLY_STOPPED_COUNT: usize = 1;
+    const VPC_BOTH_STOP_COUNT: usize = 41;
+    const VPC_INPUT_COUNT: usize = 1126;
+
+    // Fails if a part, copy, area, line, label, hole id or the order of the model of a definition
+    // with a VPC differs from the inference with a VPC outside the listed inputs, or an input drops out of the lists.
+    #[test]
+    fn definitions_with_a_vpc_build_the_same_model() {
+        use crate::test_inputs::*;
+        let mut inputs: Vec<(String, String)> = Vec::new();
+        let mut list = |name: &str, srcs: Vec<String>| {
+            for (i, src) in srcs.into_iter().enumerate() {
+                inputs.push((format!("{name}#{i}"), src));
+            }
+        };
+        let owned = |srcs: &[&str]| srcs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        list("WEB_EXAMPLES", owned(&WEB_EXAMPLES));
+        list("VPC_TEST_DEFINITIONS", owned(&VPC_TEST_DEFINITIONS));
+        list("heavy_variants", heavy_variants());
+        list("generated_with_a_vpc", generated_with_a_vpc());
+        list("GRID_INFER_TEST_DEFINITIONS", owned(&GRID_INFER_TEST_DEFINITIONS));
+        for (name, src) in [
+            ("CROWDED_S3_JA", CROWDED_S3_JA),
+            ("CROWDED_SIDE_EN", CROWDED_SIDE_EN),
+            ("FEWER_READERS", FEWER_READERS),
+            ("TWIN_APPS", TWIN_APPS),
+            ("TWO_WEBS", TWO_WEBS),
+            ("LOAD_BALANCER_ALONE", LOAD_BALANCER_ALONE),
+            ("tests/cases/err-unknown-service", include_str!("../../../../tests/cases/err-unknown-service/def.yaml")),
+        ] {
+            inputs.push((name.to_string(), src.to_string()));
+        }
+
+        let rules = Rules::builtin();
+        let mut counts = [0usize; 4];
+        for (id, src) in &inputs {
+            let def = crate::def::parse(src).unwrap_or_else(|e| panic!("{id}: {e:?}"));
+            let (old, old_diag) = crate::infer::infer(&def, &rules);
+            let mut diag = Diagnostics::default();
+            let checked = check(&def, &rules, &mut diag);
+            let want = NOT_SAME.iter().find(|(name, _)| name == id).map(|(_, b)| b).unwrap_or(&Built::Same);
+            let got = match (&old, &checked) {
+                (Some(_), Some(_)) => Built::Same,
+                (None, Some(_)) => Built::NewlyBuilt,
+                (Some(_), None) => Built::NewlyStopped,
+                (None, None) => Built::BothStop,
+            };
+            assert_eq!(&got, want, "{id}:\n{src}\nold errors {:?}\nnew errors {:?}", old_diag.errors, diag.errors);
+            if let Some(c) = &checked {
+                assert!(c.vpc, "{id}");
+                let model = build::vpc_model(&def, &rules, &c.settings);
+                if let Some(old) = &old {
+                    assert_eq!(old, &model, "{id}:\n{src}");
+                }
+            }
+            counts[[Built::Same, Built::NewlyBuilt, Built::NewlyStopped, Built::BothStop].iter().position(|b| b == want).unwrap()] += 1;
+        }
+        assert_eq!(counts, [VPC_SAME_COUNT, VPC_NEWLY_BUILT_COUNT, VPC_NEWLY_STOPPED_COUNT, VPC_BOTH_STOP_COUNT]);
+        assert_eq!(inputs.len(), VPC_INPUT_COUNT);
+        assert_eq!(VPC_SAME_COUNT + VPC_NEWLY_BUILT_COUNT + VPC_NEWLY_STOPPED_COUNT + VPC_BOTH_STOP_COUNT, VPC_INPUT_COUNT);
+        assert_eq!(NOT_SAME.len(), VPC_INPUT_COUNT - VPC_SAME_COUNT);
     }
 }

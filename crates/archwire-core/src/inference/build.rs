@@ -1,11 +1,15 @@
-//! The parts and lines of a definition without a VPC part: every written part becomes one node
-//! and every accepted connection one edge.
+//! The parts and lines of a definition. Without a VPC part every written part becomes one node
+//! and every accepted connection one edge. With one, parts in a private subnet are copied per
+//! zone, and the gateways the traffic needs are added with the lines that join them.
 
-use super::{area_of, Settings};
-use crate::def::{Definition, Link, Ref};
-use crate::ids::kind_hole;
-use crate::model::{Edge, Model, Node};
-use crate::rules::{LinkRule, Rules};
+use super::{area_of, links, Settings};
+use crate::def::{Definition, Link, Ref, Rel};
+use crate::ids::{copy_id, kind_hole, route_hole};
+use crate::model::{Area, Edge, Model, Node, Tier};
+use crate::rules::{DerivedLink, DerivedRole, LinkRule, Place, Rules, Scope, Service, Subnet};
+
+/// The letters after the Region of the zones a definition with a VPC uses, in order.
+const AZ_LETTERS: [&str; 3] = ["a", "c", "d"];
 
 /// The kind a part has: written after its service, or answered in `choose`.
 pub(super) fn kind(def: &Definition, r: &Ref) -> Option<String> {
@@ -61,6 +65,200 @@ pub(super) fn build(
         });
     }
 
-    let Settings { region, lang, direction } = settings;
+    let Settings { region, lang, direction, .. } = settings;
     Model { region, azs: Vec::new(), lang, nodes, edges, direction }
+}
+
+fn tier(subnet: Subnet) -> Tier {
+    match subnet {
+        Subnet::Public => Tier::Public,
+        Subnet::Private => Tier::Private,
+    }
+}
+
+/// The service that plays this role at the VPC's edge.
+fn by_role(rules: &Rules, role: DerivedRole) -> &Service {
+    rules
+        .service_keys()
+        .iter()
+        .filter_map(|k| rules.service(k))
+        .find(|s| s.derived_role == Some(role))
+        .expect("the rules data has a service for every role inference adds")
+}
+
+/// The line inference adds from a part of one role to a part of another.
+fn derived_line<'r>(rules: &'r Rules, from: &str, to: &str) -> &'r DerivedLink {
+    rules.derived_link(from, to).expect("the rules data has every line inference adds")
+}
+
+/// A node inference adds: one per service, or one per zone.
+fn added(id: String, s: &Service, az: Option<usize>) -> Node {
+    Node {
+        id,
+        service: s.key.clone(),
+        option: None,
+        az,
+        role: None,
+        added: true,
+        region: None,
+        part: s.key.clone(),
+        tag: None,
+        area: area_of(s),
+        undecided: false,
+    }
+}
+
+/// The semantic model of a definition with a VPC part that passed the checks: parts, copies, added parts and lines.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn vpc_model(def: &Definition, rules: &Rules, settings: &Settings) -> Model {
+    let svc = |name: &str| rules.service(name).expect("names were checked");
+    let parts = links::parts(def);
+    let accepted: Vec<(&Link, &LinkRule)> = def
+        .links
+        .iter()
+        .map(|l| (l, rules.link(&l.from.service, &l.to.service, l.rel).expect("connections were checked")))
+        .collect();
+    let open = links::kind_holes(rules, &parts);
+    let azs: Vec<String> = AZ_LETTERS[..settings.azs].iter().map(|l| format!("{}{l}", settings.region)).collect();
+    let suffix = |i: usize| azs[i][azs[i].len() - 2..].to_string();
+
+    // Where every written part belongs, read from all the connections before any node is made:
+    // a connection with `from_subnet` puts its `from` part in that tier, one copy per zone.
+    let into_subnet = |r: &Ref| accepted.iter().find(|(l, rule)| l.from.name == r.name && rule.from_subnet.is_some()).and_then(|(_, rule)| rule.from_subnet);
+    let area = |r: &Ref| into_subnet(r).map_or_else(|| area_of(svc(&r.service)), |s| Area::Subnet(tier(s)));
+    let egress = |r: &Ref| svc(&r.service).egress;
+    let private = |r: &Ref| area(r) == Area::Subnet(Tier::Private);
+
+    // A main flow from a private part to a Regional part outside the VPC: its route is a hole until answered.
+    let route = |l: &Link| (l.rel == Rel::Main && private(&l.from) && area(&l.to) == Area::Region).then(|| route_hole(&l.from.name, &l.to.name));
+    let answer = |l: &Link| route(l).and_then(|id| def.choose.get(&id).map(String::as_str));
+
+    // Private parts whose traffic leaves the VPC: main flows to where traffic leaves, then routes answered `nat`.
+    let mut outbound: Vec<&str> = Vec::new();
+    let leaving = accepted.iter().filter(|(l, _)| l.rel == Rel::Main && egress(&l.to)).map(|(l, _)| l);
+    let through_nat = accepted.iter().filter(|(l, _)| answer(l) == Some("nat")).map(|(l, _)| l);
+    for l in leaving.chain(through_nat) {
+        if !outbound.contains(&l.from.name.as_str()) {
+            outbound.push(&l.from.name);
+        }
+    }
+    let nat_azs: Vec<usize> = match (outbound.is_empty(), settings.nat_single) {
+        (true, _) => Vec::new(),
+        (false, true) => vec![0],
+        (false, false) => (0..settings.azs).collect(),
+    };
+    // A main flow from outside the VPC into a public part enters through the entry gateway.
+    let entry_line = |l: &Link| {
+        l.rel == Rel::Main
+            && matches!(svc(&l.from.service).scope, Scope::Outside | Scope::Global)
+            && area(&l.to) == Area::Subnet(Tier::Public)
+    };
+    let entry = accepted.iter().any(|(l, _)| entry_line(l));
+    let gateway = (entry || !nat_azs.is_empty()).then(|| by_role(rules, DerivedRole::EntryGateway));
+    let nat = (!nat_azs.is_empty()).then(|| by_role(rules, DerivedRole::EgressNat));
+    let nat_id = |i: usize| copy_id(&nat.expect("a NAT gateway is added").key, &suffix(i));
+
+    let written = |r: &Ref, id: String, az: Option<usize>, role: Option<&str>| Node {
+        id,
+        service: r.service.clone(),
+        option: kind(def, r),
+        az,
+        role: role.map(String::from),
+        added: false,
+        region: moved(&accepted, &r.name).and_then(|rule| rule.from_region.clone()),
+        part: r.name.clone(),
+        tag: r.tag.clone(),
+        area: area(r),
+        undecided: open.iter().any(|(id, o)| o.name == r.name && !def.choose.contains_key(id)),
+    };
+    // A part in a subnet: one per zone, a Writer and its Readers, or one spanning the zones.
+    let in_subnet = |r: &Ref, nodes: &mut Vec<Node>| {
+        let place = svc(&r.service).place;
+        if into_subnet(r).is_some() || (private(r) && place == Place::PerAz) {
+            for i in 0..settings.azs {
+                nodes.push(written(r, copy_id(&r.name, &suffix(i)), Some(i), None));
+            }
+        } else if private(r) && place == Place::WriterReader {
+            for i in 0..=settings.readers {
+                let role = if i == 0 { "writer" } else { "reader" };
+                nodes.push(written(r, copy_id(&r.name, &suffix(i)), Some(i), Some(role)));
+            }
+        } else {
+            nodes.push(written(r, r.name.clone(), None, None));
+        }
+    };
+
+    // Nodes, in the order the diagram reads: outside and global parts, the entry gateway, public
+    // parts, NAT gateways, private parts with their copies, Regional parts.
+    let drawn: Vec<&Ref> = parts.iter().copied().filter(|r| !egress(r)).collect();
+    let mut nodes: Vec<Node> = Vec::new();
+    for r in drawn.iter().filter(|r| matches!(area(r), Area::Outside | Area::Cloud)) {
+        nodes.push(written(r, r.name.clone(), None, None));
+    }
+    if let Some(g) = gateway {
+        nodes.push(added(g.key.clone(), g, None));
+    }
+    for r in drawn.iter().filter(|r| area(r) == Area::Subnet(Tier::Public)) {
+        in_subnet(r, &mut nodes);
+    }
+    for &i in &nat_azs {
+        nodes.push(added(nat_id(i), nat.expect("a NAT gateway is added"), Some(i)));
+    }
+    for r in drawn.iter().filter(|r| private(r)) {
+        in_subnet(r, &mut nodes);
+    }
+    for r in drawn.iter().filter(|r| area(r) == Area::Region) {
+        nodes.push(written(r, r.name.clone(), None, None));
+    }
+
+    // Edges, one per pair of ends and relation.
+    let mut edges: Vec<Edge> = Vec::new();
+    let find = |id: &str| nodes.iter().find(|n| n.id == id).expect("edge ends are nodes");
+    let copies = |part: &str| nodes.iter().filter(|n| n.part == part && !n.added).collect::<Vec<_>>();
+    let add = |edges: &mut Vec<Edge>, from: &Node, to: &Node, rel: Rel, label: &str, hole: Option<String>, endpoint: bool| {
+        if !edges.iter().any(|e| e.from == from.id && e.to == to.id && e.rel == rel) {
+            edges.push(Edge { from: from.id.clone(), to: to.id.clone(), rel, label: label.to_string(), hole, endpoint });
+        }
+    };
+    for (l, rule) in accepted.iter().filter(|(l, _)| !egress(&l.to)) {
+        if entry_line(l) {
+            let g = find(&gateway.expect("an entry adds the gateway").key);
+            for from in copies(&l.from.name) {
+                add(&mut edges, from, g, Rel::Main, &rule.label, None, false);
+            }
+            for to in copies(&l.to.name) {
+                add(&mut edges, g, to, Rel::Main, &rule.label, None, false);
+            }
+            continue;
+        }
+        let hole = route(l).filter(|_| answer(l).is_none());
+        let endpoint = answer(l) == Some("endpoint");
+        for from in copies(&l.from.name) {
+            for to in copies(&l.to.name) {
+                let label = to.role.as_ref().and_then(|role| rule.to_role.get(role)).unwrap_or(&rule.label);
+                add(&mut edges, from, to, l.rel, label, hole.clone(), endpoint);
+            }
+        }
+    }
+    let replication = derived_line(rules, "writer", "reader");
+    for w in nodes.iter().filter(|n| n.role.as_deref() == Some("writer")) {
+        for r in nodes.iter().filter(|n| n.part == w.part && n.role.as_deref() == Some("reader")) {
+            add(&mut edges, w, r, replication.rel, &replication.label, None, false);
+        }
+    }
+    if let Some(g) = gateway.filter(|_| nat.is_some()) {
+        let out = derived_line(rules, "private", "egress_nat");
+        for name in &outbound {
+            for from in copies(name) {
+                let i = if settings.nat_single { 0 } else { from.az.unwrap_or(0) };
+                add(&mut edges, from, find(&nat_id(i)), out.rel, &out.label, None, false);
+            }
+        }
+        let up = derived_line(rules, "egress_nat", "entry_gateway");
+        for &i in &nat_azs {
+            add(&mut edges, find(&nat_id(i)), find(&g.key), up.rel, &up.label, None, false);
+        }
+    }
+
+    Model { region: settings.region.clone(), azs, lang: settings.lang, nodes, edges, direction: settings.direction }
 }
