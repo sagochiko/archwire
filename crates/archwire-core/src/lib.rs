@@ -6,6 +6,7 @@ pub mod edit;
 pub mod engine;
 pub mod flow_infer;
 pub mod infer;
+pub mod inference;
 pub mod layout;
 pub mod model;
 pub mod place;

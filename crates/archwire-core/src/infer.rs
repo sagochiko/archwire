@@ -5,17 +5,15 @@
 //! route the connections alone cannot decide becomes a hole.
 
 use crate::def::{Definition, Link, Rel};
-use crate::diag::{Derived, Diagnostics, Hole, Problem, Versions};
+use crate::diag::{Diagnostics, Hole, Problem, Versions};
 use crate::ids::copy_id;
-use crate::model::{Area, Axis, Edge, Model, Node, Tier};
+pub(crate) use crate::inference::{area_of, check_direction, check_lang, check_names, check_region, derived};
+use crate::model::{Axis, Edge, Model, Node};
 use crate::rules::{Lang, Place, Rules, Scope, Service, Subnet};
 
 const SETTINGS: [&str; 6] = ["azs", "direction", "lang", "nat", "readers", "region"];
 const AZ_COUNTS: [&str; 2] = ["2", "3"];
 const AZ_LETTERS: [&str; 3] = ["a", "c", "d"];
-const REGIONS: [&str; 1] = ["ap-northeast-1"];
-const LANGS: [&str; 2] = ["en", "ja"];
-const DIRECTIONS: [&str; 2] = ["down", "right"];
 const NAT_MODES: [&str; 2] = ["per-az", "single"];
 const ROUTE_CHOICES: [&str; 2] = ["endpoint", "nat"];
 /// Parts a main flow into the load balancer may start from.
@@ -101,48 +99,6 @@ pub fn infer(def: &Definition, rules: &Rules) -> (Option<Model>, Diagnostics) {
     (Some(model), diag)
 }
 
-/// Every part must be a writable service, and its kind one the service has.
-/// Returns false if any name is unknown.
-pub(crate) fn check_names(def: &Definition, rules: &Rules, errors: &mut Vec<Problem>) -> bool {
-    let writable: Vec<String> =
-        rules.service_keys().into_iter().filter(|k| rules.service(k).is_some_and(|s| !s.derived_only)).collect();
-    let mut seen_at: Vec<&str> = Vec::new();
-    let mut seen_option: Vec<&str> = Vec::new();
-    let mut ok = true;
-    for r in def.links.iter().flat_map(|l| [&l.from, &l.to]) {
-        if seen_at.contains(&r.at.as_str()) {
-            continue;
-        }
-        seen_at.push(&r.at);
-        match rules.service(&r.service).filter(|s| !s.derived_only) {
-            None => {
-                ok = false;
-                errors.push(problem(
-                    "UNKNOWN_SERVICE",
-                    &r.at,
-                    &r.service,
-                    writable.clone(),
-                    format!("unknown service `{}`", r.service),
-                ));
-            }
-            Some(s) => {
-                let Some(opt) = &r.option else { continue };
-                if !s.options.contains_key(opt) && !seen_option.contains(&r.name.as_str()) {
-                    seen_option.push(&r.name);
-                    errors.push(problem(
-                        "UNKNOWN_OPTION",
-                        &r.at,
-                        opt,
-                        s.options.keys().cloned().collect(),
-                        format!("`{}` has no kind `{opt}`", r.name),
-                    ));
-                }
-            }
-        }
-    }
-    ok
-}
-
 /// The VPC layout draws one part per service, so a part with a name after the dot stops here,
 /// once per part. Returns false if any part has one.
 fn check_no_tags(def: &Definition, errors: &mut Vec<Problem>) -> bool {
@@ -165,57 +121,6 @@ fn check_no_tags(def: &Definition, errors: &mut Vec<Problem>) -> bool {
 
 fn bad_setting(errors: &mut Vec<Problem>, key: &str, got: &str, allowed: Vec<String>) {
     errors.push(problem("BAD_SETTING", &format!("set.{key}"), got, allowed, format!("`{got}` is not a valid value for `{key}`")));
-}
-
-/// The value of `set.region`, ap-northeast-1 when it is not written. A value outside the list
-/// adds BAD_SETTING.
-pub(crate) fn check_region(def: &Definition, errors: &mut Vec<Problem>) -> String {
-    match def.set.get("region").map(String::as_str) {
-        Some(v) if !REGIONS.contains(&v) => {
-            bad_setting(errors, "region", v, strings(&REGIONS));
-            REGIONS[0].to_string()
-        }
-        v => v.unwrap_or(REGIONS[0]).to_string(),
-    }
-}
-
-/// The value of `set.lang`, English when it is not written. A value outside the list adds BAD_SETTING.
-pub(crate) fn check_lang(def: &Definition, errors: &mut Vec<Problem>) -> Lang {
-    match def.set.get("lang").map(String::as_str) {
-        None | Some("en") => Lang::En,
-        Some("ja") => Lang::Ja,
-        Some(v) => {
-            bad_setting(errors, "lang", v, strings(&LANGS));
-            Lang::En
-        }
-    }
-}
-
-/// `set.direction`: None when it is not written; a value other than `down` and `right` adds BAD_SETTING.
-pub(crate) fn check_direction(def: &Definition, errors: &mut Vec<Problem>) -> Option<Axis> {
-    match def.set.get("direction").map(String::as_str) {
-        None => None,
-        Some("down") => Some(Axis::Down),
-        Some("right") => Some(Axis::Right),
-        Some(v) => {
-            bad_setting(errors, "direction", v, strings(&DIRECTIONS));
-            None
-        }
-    }
-}
-
-/// The area a part of this service belongs to, from its scope, subnet and place in the rules data.
-pub(crate) fn area_of(service: &Service) -> Area {
-    match (service.scope, service.place, service.subnet) {
-        (Scope::Outside, _, _) => Area::Outside,
-        (Scope::Global, _, _) => Area::Cloud,
-        (Scope::Regional, _, _) => Area::Region,
-        (Scope::Vpc, Place::Gateway, _) => Area::VpcEdge,
-        (Scope::Vpc, _, Some(Subnet::Private)) => Area::Subnet(Tier::Private),
-        // Loading the rules data stops a VPC service that is neither a gateway nor in a subnet,
-        // so `None` never reaches here.
-        (Scope::Vpc, _, Some(Subnet::Public) | None) => Area::Subnet(Tier::Public),
-    }
 }
 
 fn check_settings(def: &Definition, errors: &mut Vec<Problem>) -> Settings {
@@ -372,21 +277,6 @@ fn arrow(rel: Rel) -> &'static str {
         Rel::Main => "->",
         Rel::Aux => "~>",
         Rel::Assoc => "--",
-    }
-}
-
-pub(crate) fn derived(rules: &Rules, lang: Lang, target: &str, id: &str, added: bool) -> Derived {
-    let r = rules.rule(id);
-    Derived {
-        target: target.into(),
-        added,
-        kind: r.kind.clone(),
-        rule: id.into(),
-        reason: match lang {
-            Lang::En => r.reason_en.clone(),
-            Lang::Ja => r.reason_ja.clone(),
-        },
-        source: r.source.clone(),
     }
 }
 
