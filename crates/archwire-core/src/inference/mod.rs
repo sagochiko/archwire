@@ -3,8 +3,10 @@
 //! The same checks run for every definition, in this order: names, settings, connections,
 //! whether the main flows are reached, limits, and the answers given to holes. Whether a
 //! definition has a VPC is decided before them, from the scope of the services it writes.
-//! A definition without a VPC part is then built here: every written part becomes one node and
-//! every connection one edge, with the labels, limits and reasons of links.toml.
+//! A definition without a VPC part is then built with every written part as one node and every
+//! connection as one edge, with the labels, limits and reasons of links.toml. A definition with
+//! one also gets per-zone copies of its private parts, the gateways its traffic needs, and the
+//! reasons for the VPC, its zones and subnets and every part added, from the same checked result.
 
 mod build;
 mod links;
@@ -19,12 +21,21 @@ use crate::model::{Area, Axis, Model, Tier};
 use crate::rules::{Lang, LinkRule, Place, Rules, Scope, Service, Subnet};
 
 /// The rules this module's code names itself; the rest come from the data, which loading checks.
-pub(crate) const RULES: [&str; 5] = [
+pub(crate) const RULES: [&str; 14] = [
     "resources-inside-aws-cloud-frame",
     "resources-inside-region-frame",
     "default-region",
     "global-service-outside-region",
     "regional-service-outside-vpc",
+    "public-and-private-subnet-per-az",
+    "public-subnet-per-az",
+    "private-subnet-per-az",
+    "compute-in-private",
+    "database-in-private",
+    "aurora-writer-reader",
+    "internet-facing-alb-in-vpc-with-igw",
+    "private-egress-through-nat",
+    "nat-per-az",
 ];
 
 /// The settings a definition with a VPC may write.
@@ -58,7 +69,10 @@ struct Checked<'a> {
     settings: Settings,
     parts: Vec<&'a Ref>,
     accepted: Vec<(&'a Link, &'a LinkRule)>,
+    /// Kind holes, answered or not, in the order the parts first appear.
     kinds: Vec<(String, &'a Ref)>,
+    /// Route holes, answered or not, with the line each is on, in the order written.
+    routes: Vec<(String, &'a Link)>,
 }
 
 fn problem(code: &str, at: &str, got: &str, allowed: Vec<String>, message: String) -> Problem {
@@ -79,12 +93,29 @@ pub fn infer(def: &Definition, rules: &Rules) -> (Option<Model>, Diagnostics) {
         ..Default::default()
     };
     let Some(checked) = check(def, rules, &mut diag) else { return (None, diag) };
-    if checked.vpc {
-        return crate::infer::infer(def, rules);
-    }
-    let Checked { parts, accepted, kinds, settings, .. } = checked;
-    let model = build::build(def, rules, &parts, &accepted, &kinds, settings);
-    reasons::explain(def, rules, &model, &parts, &accepted, &kinds, &mut diag);
+    let model = if checked.vpc {
+        // What the rules data lacks for this definition stops it, as a rule the code names does.
+        let mut errors = Vec::new();
+        if reasons::vpc_reasons(rules, &checked.parts).is_none() {
+            errors.push(Problem {
+                code: "RULE_MISSING".into(),
+                at: Some("vpc_reasons".into()),
+                message: "no service of a part in the definition has `vpc_reasons` in services.toml".into(),
+                ..Default::default()
+            });
+        }
+        let model = build::vpc_model(def, rules, &checked).map_err(|e| errors.extend(e)).ok();
+        match model {
+            Some(m) if errors.is_empty() => m,
+            _ => {
+                diag.errors = errors;
+                return (None, diag);
+            }
+        }
+    } else {
+        build::build(def, rules, &checked.parts, &checked.accepted, &checked.kinds, &checked.settings)
+    };
+    reasons::explain(def, rules, &model, &checked, &mut diag);
     (Some(model), diag)
 }
 
@@ -111,7 +142,7 @@ fn check<'a>(def: &'a Definition, rules: &'a Rules, diag: &mut Diagnostics) -> O
     if !diag.errors.is_empty() {
         return None;
     }
-    Some(Checked { vpc, settings, parts, accepted, kinds })
+    Some(Checked { vpc, settings, parts, accepted, kinds, routes })
 }
 
 /// The settings in this order: `azs`, `region`, `lang`, `direction`, `nat`, `readers`, then
@@ -276,8 +307,7 @@ mod tests {
         type Infer = fn(&Definition, &Rules) -> (Option<Model>, Diagnostics);
         let api = crate::def::parse(API).unwrap();
         let web = crate::def::parse("flows:\n  - user -> alb -> ecs -> aurora\n  - ecs -> internet\n").unwrap();
-        // A definition with a VPC is checked here and then built by the inference with a VPC,
-        // so the rules both name are needed for it.
+        // Every rule the inference with a VPC names is named here too, or by the data.
         let runs: [(&[&str], &Definition, Infer); 3] = [(&RULES, &api, infer), (&RULES, &web, infer), (&crate::infer::RULES, &web, infer)];
         // The rules the data names too, so loading already stops: by where in the data they are named.
         let named_by_links = ["cloudfront-certificate-in-us-east-1"];
@@ -632,7 +662,7 @@ mod tests {
         let mut diag = Diagnostics::default();
         let checked = check(&def, rules, &mut diag).unwrap_or_else(|| panic!("{:?}", diag.errors));
         assert!(checked.vpc);
-        build::vpc_model(&def, rules, &checked.settings).unwrap_or_else(|e| panic!("{e:?}"))
+        build::vpc_model(&def, rules, &checked).unwrap_or_else(|e| panic!("{e:?}"))
     }
     fn vpc(src: &str) -> Model { vpc_with(src, &Rules::builtin()) }
     fn node_ids(m: &Model) -> Vec<&str> { m.nodes.iter().map(|n| n.id.as_str()).collect() }
@@ -652,8 +682,11 @@ mod tests {
     // relation, a copy's zone or area, or the name after the dot changes.
     #[test]
     fn named_vpc_parts_build_by_part() {
-        use crate::test_inputs::TWIN_APPS;
-        let m = vpc(TWIN_APPS);
+        twin_apps_built(&vpc(crate::test_inputs::TWIN_APPS));
+    }
+
+    /// The parts, copies and lines of TWIN_APPS.
+    fn twin_apps_built(m: &Model) {
         assert_eq!(node_ids(&m), [
             "user", "cloudfront", "igw", "alb", "ecs.web@1a", "ecs.web@1c", "aurora.web@1a", "aurora.web@1c",
             "ecs.admin@1a", "ecs.admin@1c", "aurora.admin@1a", "aurora.admin@1c",
@@ -706,8 +739,11 @@ mod tests {
     // line's relation, a part's zone or area, or the name after the dot changes.
     #[test]
     fn two_load_balancers_build_by_part() {
-        use crate::test_inputs::TWO_WEBS;
-        let m = vpc(TWO_WEBS);
+        two_webs_built(&vpc(crate::test_inputs::TWO_WEBS));
+    }
+
+    /// The parts, copies and lines of TWO_WEBS.
+    fn two_webs_built(m: &Model) {
         assert_eq!(node_ids(&m), [
             "user", "cloudfront", "igw", "alb.web", "alb.admin", "ecs.web@1a", "ecs.web@1c", "aurora.web@1a",
             "aurora.web@1c", "ecs.admin@1a", "ecs.admin@1c", "aurora.admin@1a", "aurora.admin@1c",
@@ -779,91 +815,416 @@ mod tests {
         assert_eq!(added(&before), [("igw", "igw"), ("nat-1a", "nat"), ("nat-1c", "nat")].map(|(a, b)| (a.to_string(), b.to_string())));
         assert_eq!(added(&after), [("door", "door"), ("exit-1a", "exit"), ("exit-1c", "exit")].map(|(a, b)| (a.to_string(), b.to_string())));
         assert_eq!((after.nodes.len(), after.edges.len()), (before.nodes.len(), before.edges.len()));
+        // Their reasons are found by the same roles.
+        let (m, d) = infer(&crate::def::parse(src).unwrap(), &rules);
+        assert!(m.is_some(), "{:?}", d.errors);
+        assert_eq!(rules_of(&d, "door"), ["internet-facing-alb-in-vpc-with-igw"]);
+        assert_eq!(rules_of(&d, "exit-1a"), ["private-egress-through-nat"]);
+        assert_eq!(rules_of(&d, "exit-1c"), ["private-egress-through-nat"]);
+        assert_eq!(rules_of(&d, "exit"), ["nat-per-az"]);
+        assert!(["igw", "nat-1a", "nat-1c", "nat"].iter().all(|t| rules_of(&d, t).is_empty()));
     }
 
     // Fails if a definition with only a public tier loses a part or a line.
     #[test]
     fn a_public_tier_alone_builds_its_gateway() {
-        let m = vpc(crate::test_inputs::LOAD_BALANCER_ALONE);
-        assert_eq!(node_ids(&m), ["user", "igw", "alb"]);
-        assert_eq!(lines(&m), [("user", "igw", Main, "https"), ("igw", "alb", Main, "https")]);
+        load_balancer_alone_built(&vpc(crate::test_inputs::LOAD_BALANCER_ALONE));
     }
 
-    /// How the inference with a VPC and this one may differ for an input.
-    #[derive(Debug, PartialEq)]
-    enum Built {
-        /// Both give a model, and the models are equal.
+    /// The parts and lines of LOAD_BALANCER_ALONE.
+    fn load_balancer_alone_built(m: &Model) {
+        assert_eq!(node_ids(m), ["user", "igw", "alb"]);
+        assert_eq!(lines(m), [("user", "igw", Main, "https"), ("igw", "alb", Main, "https")]);
+    }
+
+    /// Each reason's target and rule, in order.
+    fn reasons(d: &Diagnostics) -> Vec<(&str, &str)> {
+        d.derived.iter().map(|x| (x.target.as_str(), x.rule.as_str())).collect()
+    }
+
+    // Fails if the reasons of the VPC and its zones are not taken from the first part whose service
+    // has `vpc_reasons` in the rules data.
+    #[test]
+    fn vpc_reasons_come_from_the_first_part_that_has_them() {
+        let src = crate::test_inputs::WEB_CASES.iter().find(|(n, _)| *n == "web-2az-ja").unwrap().1;
+        let (_, d) = run(src);
+        assert_eq!(rules_of(&d, "vpc"), ["load-balancer-in-vpc"]);
+        assert_eq!(rules_of(&d, "az"), ["alb-spans-two-azs", "default-two-azs"]);
+        // Other ids in the data: ECS, written after the load balancer, has them too.
+        let services = include_str!("../../../../rules/aws/services.toml");
+        let ecs_too = services.replace(
+            "key = \"ecs\"\n",
+            "key = \"ecs\"\nvpc_reasons = { vpc = \"compute-in-private\", az = [\"database-in-private\"], default_azs = \"nat-per-az\" }\n",
+        );
+        let alb_line = "vpc_reasons = { vpc = \"load-balancer-in-vpc\", az = [\"alb-spans-two-azs\"], default_azs = \"default-two-azs\" }\n";
+        let ecs_only = ecs_too.replacen(alb_line, "", 1);
+        assert!(ecs_too != services && ecs_only != ecs_too);
+        let load = |services: &str| {
+            Rules::load(
+                services,
+                include_str!("../../../../rules/aws/rules.toml"),
+                include_str!("../../../../rules/aws/labels.toml"),
+                include_str!("../../../../rules/aws/links.toml"),
+            )
+            .unwrap()
+        };
+        let def = crate::def::parse(src).unwrap();
+        let (_, d) = infer(&def, &load(&ecs_too));
+        assert_eq!(rules_of(&d, "vpc"), ["load-balancer-in-vpc"]);
+        assert_eq!(rules_of(&d, "az"), ["alb-spans-two-azs", "default-two-azs"]);
+        let (_, d) = infer(&def, &load(&ecs_only));
+        assert_eq!(rules_of(&d, "vpc"), ["compute-in-private"]);
+        assert_eq!(rules_of(&d, "az"), ["database-in-private", "nat-per-az"]);
+        // Without any part that has them, the definition stops as a rule the data lacks does.
+        let none = ecs_only.replacen(
+            "vpc_reasons = { vpc = \"compute-in-private\", az = [\"database-in-private\"], default_azs = \"nat-per-az\" }\n",
+            "",
+            1,
+        );
+        let (m, d) = infer(&def, &load(&none));
+        assert!(m.is_none());
+        assert!(d.derived.is_empty());
+        assert_eq!(d.errors.len(), 1, "{:?}", d.errors);
+        let e = &d.errors[0];
+        assert_eq!((e.code.as_str(), e.at.as_deref(), e.got.as_deref()), ("RULE_MISSING", Some("vpc_reasons"), None));
+        assert_eq!(e.message, "no service of a part in the definition has `vpc_reasons` in services.toml");
+        assert_eq!(d.exit_code(), 1);
+    }
+
+    // Fails if the note that auxiliary flows are not routed is given for a line from outside the
+    // VPC, or not given for one from inside it.
+    #[test]
+    fn the_aux_note_is_for_lines_from_inside_the_vpc() {
+        let outside = "flows:\n  - user -> cloudfront -> alb -> ecs\n  - cloudfront ~> cloudwatch\n";
+        let (m, d) = run(outside);
+        assert!(m.is_some(), "{:?}", d.errors);
+        assert!(d.notes.is_empty(), "{:?}", d.notes);
+        let (m, d) = run(&format!("{outside}  - ecs ~> cloudwatch\n"));
+        assert!(m.is_some(), "{:?}", d.errors);
+        assert_eq!(d.notes, ["Auxiliary flows (~>) are drawn as lines only; their network route is not handled."]);
+    }
+
+    /// The reasons, holes and notes of LOAD_BALANCER_ALONE.
+    fn load_balancer_alone_explained(d: &Diagnostics) {
+        assert!(d.errors.is_empty(), "{:?}", d.errors);
+        assert_eq!(d.exit_code(), 0);
+        assert_eq!(rules_of(d, "subnet"), ["public-subnet-per-az"]);
+        assert_eq!(rules_of(d, "igw"), ["internet-facing-alb-in-vpc-with-igw"]);
+        assert!(d.holes.is_empty() && d.notes.is_empty());
+    }
+
+    // Fails if a definition with only a public tier is stopped, or its subnets or entry gateway get
+    // the wrong reason.
+    #[test]
+    fn a_public_tier_alone_gets_its_subnet_reason() {
+        let (m, d) = run(crate::test_inputs::LOAD_BALANCER_ALONE);
+        load_balancer_alone_built(&m.unwrap());
+        load_balancer_alone_explained(&d);
+    }
+
+    /// The reasons, holes and notes of TWO_WEBS.
+    fn two_webs_explained(d: &Diagnostics) {
+        assert!(d.errors.is_empty(), "{:?}", d.errors);
+        assert_eq!(d.exit_code(), 0);
+        assert_eq!(reasons(d), [
+            ("aws-cloud", "resources-inside-aws-cloud-frame"),
+            ("region", "resources-inside-region-frame"),
+            ("region", "default-region"),
+            ("vpc", "load-balancer-in-vpc"),
+            ("az", "alb-spans-two-azs"),
+            ("az", "default-two-azs"),
+            ("subnet", "public-and-private-subnet-per-az"),
+            ("cloudfront", "global-service-outside-region"),
+            ("ecs.web", "compute-in-private"),
+            ("aurora.web", "database-in-private"),
+            ("aurora.web", "aurora-writer-reader"),
+            ("ecs.admin", "compute-in-private"),
+            ("aurora.admin", "database-in-private"),
+            ("aurora.admin", "aurora-writer-reader"),
+            ("igw", "internet-facing-alb-in-vpc-with-igw"),
+        ]);
+        assert!(["alb.web", "alb.admin", "user"].iter().all(|t| rules_of(d, t).is_empty()));
+        assert!(d.holes.is_empty() && d.notes.is_empty());
+    }
+
+    // Fails if the reasons of one of two named load balancers' parts are dropped, reasons are given
+    // per copy, or the entry gateway gets the wrong reason.
+    #[test]
+    fn two_load_balancers_get_reasons_per_part() {
+        let (m, d) = run(crate::test_inputs::TWO_WEBS);
+        two_webs_built(&m.unwrap());
+        two_webs_explained(&d);
+    }
+
+    /// The reasons of the named parts of TWIN_APPS.
+    fn twin_apps_explained(d: &Diagnostics) {
+        assert!(d.errors.is_empty(), "{:?}", d.errors);
+        assert_eq!(d.exit_code(), 0);
+        for part in ["ecs.web", "ecs.admin"] {
+            assert_eq!(rules_of(d, part), ["compute-in-private"], "{part}");
+        }
+        for part in ["aurora.web", "aurora.admin"] {
+            assert_eq!(rules_of(d, part), ["database-in-private", "aurora-writer-reader"], "{part}");
+        }
+        assert!(d.derived.iter().all(|x| !x.target.contains('@')), "{:?}", reasons(d));
+        assert!(d.holes.is_empty() && d.notes.is_empty());
+    }
+
+    // Fails if reasons are given per copy, or a named part's reasons are dropped.
+    #[test]
+    fn named_parts_under_one_balancer_get_reasons_per_part() {
+        let (m, d) = run(crate::test_inputs::TWIN_APPS);
+        twin_apps_built(&m.unwrap());
+        twin_apps_explained(&d);
+    }
+
+    /// The whole answer for a named bucket behind CloudFront next to a web stack.
+    fn named_bucket_inferred(m: &Model, d: &Diagnostics) {
+        assert_eq!(node_ids(m), ["user", "cloudfront", "igw", "alb", "ecs-1a", "ecs-1c", "s3.web"]);
+        assert_eq!(lines(m), [
+            ("user", "cloudfront", Main, "https"),
+            ("cloudfront", "igw", Main, "https"),
+            ("igw", "alb", Main, "https"),
+            ("alb", "ecs-1a", Main, "http"),
+            ("alb", "ecs-1c", Main, "http"),
+            ("cloudfront", "s3.web", Main, "static_files"),
+        ]);
+        let web = m.nodes.iter().find(|n| n.id == "s3.web").unwrap();
+        assert_eq!((web.service.as_str(), web.part.as_str(), web.tag.as_deref(), web.area), ("s3", "s3.web", Some("web"), Area::Region));
+        assert!(d.errors.is_empty(), "{:?}", d.errors);
+        assert_eq!(d.exit_code(), 0);
+        assert_eq!(reasons(d), [
+            ("aws-cloud", "resources-inside-aws-cloud-frame"),
+            ("region", "resources-inside-region-frame"),
+            ("region", "default-region"),
+            ("vpc", "load-balancer-in-vpc"),
+            ("az", "alb-spans-two-azs"),
+            ("az", "default-two-azs"),
+            ("subnet", "public-and-private-subnet-per-az"),
+            ("cloudfront", "global-service-outside-region"),
+            ("ecs", "compute-in-private"),
+            ("s3.web", "regional-service-outside-vpc"),
+            ("igw", "internet-facing-alb-in-vpc-with-igw"),
+        ]);
+        assert!(d.holes.is_empty() && d.notes.is_empty());
+    }
+
+    // Fails if a reason's kind, rule, text in either language or source is not the one the rules
+    // data writes, or the reason given in a diagram is not made this way.
+    #[test]
+    fn a_reason_carries_its_rule_text_and_source() {
+        use crate::diag::{Derived, DerivedKind};
+        let rules = Rules::builtin();
+        let igw = Derived {
+            target: "igw".into(),
+            added: true,
+            kind: DerivedKind::Constraint,
+            rule: "internet-facing-alb-in-vpc-with-igw".into(),
+            reason: "With an internet-facing Application Load Balancer, only VPCs that have an Internet Gateway can be selected, so the VPC gets an Internet Gateway.".into(),
+            source: Some("https://docs.aws.amazon.com/elasticloadbalancing/latest/application/create-application-load-balancer.html".into()),
+        };
+        assert_eq!(derived(&rules, Lang::En, "igw", "internet-facing-alb-in-vpc-with-igw", true), igw);
+        let region = Derived {
+            target: "region".into(),
+            added: true,
+            kind: DerivedKind::Default,
+            rule: "default-region".into(),
+            reason: "リージョンの指定が無いので、ap-northeast-1（東京）にする。".into(),
+            source: None,
+        };
+        assert_eq!(derived(&rules, Lang::Ja, "region", "default-region", true), region);
+        let (_, d) = run("flows:\n  - user -> alb -> ecs\n");
+        assert!(d.derived.contains(&igw), "{:?}", d.derived);
+        let (_, d) = run("flows:\n  - user -> alb -> ecs\nset:\n  lang: ja\n");
+        assert!(d.derived.contains(&region), "{:?}", d.derived);
+    }
+
+    fn bad(code: &str, at: &str, got: &str, allowed: &[&str], message: &str) -> Problem {
+        Problem { code: code.into(), at: Some(at.into()), got: Some(got.into()), allowed: strings(allowed), rule: None, message: message.into() }
+    }
+
+    // Fails if a setting's error changes its code, place, value, allowed values, text or order,
+    // with a VPC or without one.
+    #[test]
+    fn every_bad_setting_is_reported_in_full() {
+        let src = "flows:\n  - user -> alb -> ecs\nset:\n  azs: 4\n  colour: red\n  direction: up\n  lang: fr\n  nat: none\n  readers: 5\n  region: us-east-1\n";
+        let (m, d) = run(src);
+        assert!(m.is_none());
+        assert_eq!(d.errors, [
+            bad("BAD_SETTING", "set.azs", "4", &["2", "3"], "`4` is not a valid value for `azs`"),
+            bad("BAD_SETTING", "set.region", "us-east-1", &["ap-northeast-1"], "`us-east-1` is not a valid value for `region`"),
+            bad("BAD_SETTING", "set.lang", "fr", &["en", "ja"], "`fr` is not a valid value for `lang`"),
+            bad("BAD_SETTING", "set.direction", "up", &["down", "right"], "`up` is not a valid value for `direction`"),
+            bad("BAD_SETTING", "set.nat", "none", &["per-az", "single"], "`none` is not a valid value for `nat`"),
+            bad("BAD_SETTING", "set.readers", "5", &["1"], "`5` is not a valid value for `readers`"),
+            bad("UNKNOWN_SETTING", "set.colour", "colour", &["azs", "direction", "lang", "nat", "readers", "region"], "unknown setting `colour`"),
+        ]);
+        let (m, d) = run(&format!("{B}set:\n  azs: 3\n  nat: single\n"));
+        assert!(m.is_none());
+        let flow = ["direction", "lang", "region"];
+        assert_eq!(d.errors, [
+            bad("UNKNOWN_SETTING", "set.azs", "azs", &flow, "unknown setting `azs`"),
+            bad("UNKNOWN_SETTING", "set.nat", "nat", &flow, "unknown setting `nat`"),
+        ]);
+    }
+
+    // Fails if an unknown service or kind is reported with another place, value, list or text.
+    #[test]
+    fn unknown_names_are_reported_in_full() {
+        let (_, d) = run("flows:\n  - user -> cloudfrnt -> alb -> ecs(lambda)\n");
+        let services = ["acm", "alb", "apigateway", "aurora", "cloudfront", "cloudwatch", "cognito", "dynamodb", "ecs", "internet", "lambda", "s3", "user", "waf"];
+        assert_eq!(d.errors, [
+            bad("UNKNOWN_SERVICE", "flows[0][1]", "cloudfrnt", &services, "unknown service `cloudfrnt`"),
+            bad("UNKNOWN_OPTION", "flows[0][3]", "lambda", &["fargate"], "`ecs` has no kind `lambda`"),
+        ]);
+    }
+
+    // Fails if a named part outside the VPC stops a definition with a VPC, or loses its reason or its line.
+    #[test]
+    fn a_named_bucket_next_to_a_web_stack_infers() {
+        let (m, d) = run("flows:\n  - user -> cloudfront -> alb -> ecs\n  - cloudfront -> s3.web\n");
+        named_bucket_inferred(&m.unwrap(), &d);
+    }
+
+    /// UNSUPPORTED for a line outside the pairs, and an answer to a hole the definition does not have.
+    const UNSUPPORTED_AND_UNKNOWN_HOLE: &str = "flows:\n  - user -> alb -> ecs\n  - user -> s3\nchoose:\n  route.ecs.rds: nat\n";
+    /// A named part in a definition with a VPC, and a bad language.
+    const NAMED_PART_AND_BAD_LANG: &str = "flows:\n  - user -> alb -> ecs.web\nset:\n  lang: fr\n";
+    /// A part no main flow from the user reaches, and a bad answer to its route.
+    const UNREACHED_AND_BAD_CHOICE: &str = "flows:\n  - user -> alb -> ecs\n  - aurora -> s3\nchoose:\n  route.aurora.s3: tunnel\n";
+
+    /// How the answers of the inference with a VPC and of this one may differ for an input.
+    enum VpcExpect {
+        /// The same model and the same diagnostics.
         Same,
-        /// The checks here pass where the inference with a VPC stops.
-        NewlyBuilt,
-        /// The checks here stop where the inference with a VPC gives a model.
-        NewlyStopped,
-        /// Both stop.
-        BothStop,
+        /// What may change, and the old diagnostics changed that way, which must then equal the new
+        /// ones; the models must be equal.
+        Fields(&'static str, fn(&mut Diagnostics)),
+        /// The old inference stops; this one gives this model and these diagnostics.
+        NewlyBuilt(fn(&Model, &Diagnostics)),
+        /// The old inference gives a model; this one stops with these errors: code, at, got, text.
+        NewlyStopped(&'static [(&'static str, &'static str, &'static str, &'static str)]),
     }
 
-    /// The inputs whose answer is not the same model, by their name in the lists.
-    const NOT_SAME: [(&str, Built); 46] = [
-        // Named VPC parts, and a load balancer with nothing behind it.
-        ("GRID_INFER_TEST_DEFINITIONS#53", Built::NewlyBuilt),
-        ("TWIN_APPS", Built::NewlyBuilt),
-        ("TWO_WEBS", Built::NewlyBuilt),
-        ("LOAD_BALANCER_ALONE", Built::NewlyBuilt),
-        // `alb -> aurora` is not a listed connection.
-        ("VPC_TEST_DEFINITIONS#25", Built::NewlyStopped),
-        ("tests/cases/err-unknown-service", Built::BothStop),
-        // A name, a setting, an answer or a connection outside the lists.
-        ("GRID_INFER_TEST_DEFINITIONS#8", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#9", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#10", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#11", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#12", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#13", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#14", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#15", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#16", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#17", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#18", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#25", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#26", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#27", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#28", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#29", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#30", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#31", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#32", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#33", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#34", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#36", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#37", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#38", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#39", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#40", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#41", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#42", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#43", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#44", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#45", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#46", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#47", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#48", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#49", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#51", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#57", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#58", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#59", Built::BothStop),
-        ("GRID_INFER_TEST_DEFINITIONS#60", Built::BothStop),
+    /// The text of UNSUPPORTED for a connection that is not in the pairs.
+    fn not_supported(got: &str) -> String {
+        format!("`{got}` is not a supported connection")
+    }
+
+    /// The only error is UNSUPPORTED for the line written; its text says the pair is not listed.
+    fn message_only(d: &mut Diagnostics) {
+        assert_eq!(d.errors.len(), 1, "{:?}", d.errors);
+        let e = &mut d.errors[0];
+        assert_eq!(e.code, "UNSUPPORTED");
+        assert!(e.message.starts_with("v0.1 does not support"), "{}", e.message);
+        e.message = not_supported(e.got.as_deref().unwrap());
+    }
+
+    /// The shape check stops at `flows`; the pairs stop at the line without a pair instead.
+    fn alb_to_aurora_at_its_line(d: &mut Diagnostics) {
+        assert_eq!(d.errors.len(), 1, "{:?}", d.errors);
+        let e = &mut d.errors[0];
+        assert_eq!((e.code.as_str(), e.at.as_deref(), e.got.as_deref()), ("UNSUPPORTED", Some("flows"), None));
+        e.at = Some("flows[0]".into());
+        e.got = Some("alb -> aurora".into());
+        e.message = not_supported("alb -> aurora");
+    }
+
+    /// The note that auxiliary flows are not routed is gone: the only one is from outside the VPC.
+    fn aux_note_gone(d: &mut Diagnostics) {
+        let note = Rules::builtin().text("note.aux_not_routed", Lang::En);
+        assert_eq!(d.notes, [note]);
+        d.notes.clear();
+    }
+
+    /// The connections are checked before the answers, so UNSUPPORTED comes first, with its new text.
+    fn unsupported_first(d: &mut Diagnostics) {
+        let codes: Vec<_> = d.errors.iter().map(|e| e.code.as_str()).collect();
+        assert_eq!(codes, ["UNKNOWN_HOLE", "UNSUPPORTED"]);
+        d.errors.swap(0, 1);
+        d.errors[0].message = not_supported("user -> s3");
+    }
+
+    /// A named part is no longer stopped with a VPC.
+    fn named_part_accepted(d: &mut Diagnostics) {
+        let e = d.errors.remove(0);
+        assert_eq!((e.code.as_str(), e.at.as_deref(), e.got.as_deref()), ("UNSUPPORTED", Some("flows[0][2]"), Some("ecs.web")));
+        assert_eq!(d.errors.iter().map(|e| e.code.as_str()).collect::<Vec<_>>(), ["BAD_SETTING"]);
+    }
+
+    /// A main flow no main flow from the user reaches stops, before the answers are checked.
+    fn unreached_first(d: &mut Diagnostics) {
+        assert_eq!(d.errors.iter().map(|e| e.code.as_str()).collect::<Vec<_>>(), ["BAD_CHOICE"]);
+        d.errors.insert(0, bad("UNSUPPORTED", "flows[1]", "aurora -> s3", &[], "`aurora -> s3` is not reached by main flows (->) from `user`"));
+    }
+
+    fn twin_apps(m: &Model, d: &Diagnostics) {
+        twin_apps_built(m);
+        twin_apps_explained(d);
+    }
+    fn two_webs(m: &Model, d: &Diagnostics) {
+        two_webs_built(m);
+        two_webs_explained(d);
+    }
+    fn load_balancer_alone(m: &Model, d: &Diagnostics) {
+        load_balancer_alone_built(m);
+        load_balancer_alone_explained(d);
+    }
+
+    /// The inputs whose answer changes on purpose, by their name in the lists.
+    const VPC_CHANGED: [(&str, VpcExpect); 33] = [
+        // CloudFront's side line is outside the VPC.
+        ("VPC_TEST_DEFINITIONS#26", VpcExpect::Fields("notes: note.aux_not_routed is gone", aux_note_gone)),
+        // A line outside the pairs: only the text of its error changes.
+        ("GRID_INFER_TEST_DEFINITIONS#26", VpcExpect::Fields("errors[0].message", message_only)),
+        ("GRID_INFER_TEST_DEFINITIONS#28", VpcExpect::Fields("errors[0].message", message_only)),
+        ("GRID_INFER_TEST_DEFINITIONS#29", VpcExpect::Fields("errors[0].message", message_only)),
+        ("GRID_INFER_TEST_DEFINITIONS#30", VpcExpect::Fields("errors[0].message", message_only)),
+        ("GRID_INFER_TEST_DEFINITIONS#31", VpcExpect::Fields("errors[0].message", message_only)),
+        ("GRID_INFER_TEST_DEFINITIONS#32", VpcExpect::Fields("errors[0].message", message_only)),
+        ("GRID_INFER_TEST_DEFINITIONS#33", VpcExpect::Fields("errors[0].message", message_only)),
+        ("GRID_INFER_TEST_DEFINITIONS#34", VpcExpect::Fields("errors[0].message", message_only)),
+        ("GRID_INFER_TEST_DEFINITIONS#36", VpcExpect::Fields("errors[0].message", message_only)),
+        ("GRID_INFER_TEST_DEFINITIONS#37", VpcExpect::Fields("errors[0].message", message_only)),
+        ("GRID_INFER_TEST_DEFINITIONS#38", VpcExpect::Fields("errors[0].message", message_only)),
+        ("GRID_INFER_TEST_DEFINITIONS#39", VpcExpect::Fields("errors[0].message", message_only)),
+        ("GRID_INFER_TEST_DEFINITIONS#40", VpcExpect::Fields("errors[0].message", message_only)),
+        ("GRID_INFER_TEST_DEFINITIONS#41", VpcExpect::Fields("errors[0].message", message_only)),
+        ("GRID_INFER_TEST_DEFINITIONS#42", VpcExpect::Fields("errors[0].message", message_only)),
+        ("GRID_INFER_TEST_DEFINITIONS#43", VpcExpect::Fields("errors[0].message", message_only)),
+        ("GRID_INFER_TEST_DEFINITIONS#44", VpcExpect::Fields("errors[0].message", message_only)),
+        ("GRID_INFER_TEST_DEFINITIONS#45", VpcExpect::Fields("errors[0].message", message_only)),
+        ("GRID_INFER_TEST_DEFINITIONS#46", VpcExpect::Fields("errors[0].message", message_only)),
+        ("GRID_INFER_TEST_DEFINITIONS#47", VpcExpect::Fields("errors[0].message", message_only)),
+        ("GRID_INFER_TEST_DEFINITIONS#48", VpcExpect::Fields("errors[0].message", message_only)),
+        ("GRID_INFER_TEST_DEFINITIONS#49", VpcExpect::Fields("errors[0].message", message_only)),
+        ("GRID_INFER_TEST_DEFINITIONS#51", VpcExpect::Fields("errors[0].message", message_only)),
+        // `alb -> aurora` is not a pair: the error is at its line.
+        ("GRID_INFER_TEST_DEFINITIONS#8", VpcExpect::Fields("errors[0].at, errors[0].got, errors[0].message", alb_to_aurora_at_its_line)),
+        ("UNSUPPORTED_AND_UNKNOWN_HOLE", VpcExpect::Fields("the order of errors, and the text of UNSUPPORTED", unsupported_first)),
+        ("NAMED_PART_AND_BAD_LANG", VpcExpect::Fields("the UNSUPPORTED of the named part is gone", named_part_accepted)),
+        ("UNREACHED_AND_BAD_CHOICE", VpcExpect::Fields("an UNSUPPORTED for the unreached line comes first", unreached_first)),
+        // Named VPC parts, a load balancer with nothing behind it, and a named part outside the VPC.
+        ("LOAD_BALANCER_ALONE", VpcExpect::NewlyBuilt(load_balancer_alone)),
+        ("TWIN_APPS", VpcExpect::NewlyBuilt(twin_apps)),
+        ("TWO_WEBS", VpcExpect::NewlyBuilt(two_webs)),
+        ("GRID_INFER_TEST_DEFINITIONS#53", VpcExpect::NewlyBuilt(named_bucket_inferred)),
+        // `alb -> aurora` is not a pair.
+        ("VPC_TEST_DEFINITIONS#25", VpcExpect::NewlyStopped(&[("UNSUPPORTED", "flows[1]", "alb -> aurora", "`alb -> aurora` is not a supported connection")])),
     ];
-    const VPC_SAME_COUNT: usize = 1080;
+    const VPC_SAME_COUNT: usize = 1096;
+    const VPC_FIELDS_COUNT: usize = 28;
     const VPC_NEWLY_BUILT_COUNT: usize = 4;
     const VPC_NEWLY_STOPPED_COUNT: usize = 1;
-    const VPC_BOTH_STOP_COUNT: usize = 41;
-    const VPC_INPUT_COUNT: usize = 1126;
+    /// No input stops in both with the same errors in another order.
+    const VPC_ERROR_ORDER_COUNT: usize = 0;
+    const VPC_INPUT_COUNT: usize = 1129;
 
-    // Fails if a part, copy, area, line, label, hole id or the order of the model of a definition
-    // with a VPC differs from the inference with a VPC outside the listed inputs, or an input drops out of the lists.
+    // Fails if the model, labels, reasons, holes, notes or errors of a definition with a VPC
+    // differ from the inference with a VPC outside the listed inputs and the listed changes, or an
+    // input drops out of the lists.
     #[test]
-    fn definitions_with_a_vpc_build_the_same_model() {
+    fn definitions_with_a_vpc_infer_as_before() {
         use crate::test_inputs::*;
         let mut inputs: Vec<(String, String)> = Vec::new();
         let mut list = |name: &str, srcs: Vec<String>| {
@@ -885,38 +1246,61 @@ mod tests {
             ("TWO_WEBS", TWO_WEBS),
             ("LOAD_BALANCER_ALONE", LOAD_BALANCER_ALONE),
             ("tests/cases/err-unknown-service", include_str!("../../../../tests/cases/err-unknown-service/def.yaml")),
+            ("UNSUPPORTED_AND_UNKNOWN_HOLE", UNSUPPORTED_AND_UNKNOWN_HOLE),
+            ("NAMED_PART_AND_BAD_LANG", NAMED_PART_AND_BAD_LANG),
+            ("UNREACHED_AND_BAD_CHOICE", UNREACHED_AND_BAD_CHOICE),
         ] {
             inputs.push((name.to_string(), src.to_string()));
         }
 
         let rules = Rules::builtin();
-        let mut counts = [0usize; 4];
+        let (mut same, mut fields, mut built, mut stopped) = (0, 0, 0, 0);
         for (id, src) in &inputs {
             let def = crate::def::parse(src).unwrap_or_else(|e| panic!("{id}: {e:?}"));
-            let (old, old_diag) = crate::infer::infer(&def, &rules);
-            let mut diag = Diagnostics::default();
-            let checked = check(&def, &rules, &mut diag);
-            let want = NOT_SAME.iter().find(|(name, _)| name == id).map(|(_, b)| b).unwrap_or(&Built::Same);
-            let got = match (&old, &checked) {
-                (Some(_), Some(_)) => Built::Same,
-                (None, Some(_)) => Built::NewlyBuilt,
-                (Some(_), None) => Built::NewlyStopped,
-                (None, None) => Built::BothStop,
-            };
-            assert_eq!(&got, want, "{id}:\n{src}\nold errors {:?}\nnew errors {:?}", old_diag.errors, diag.errors);
-            if let Some(c) = &checked {
-                assert!(c.vpc, "{id}");
-                let model = build::vpc_model(&def, &rules, &c.settings).unwrap_or_else(|e| panic!("{id}: {e:?}"));
-                if let Some(old) = &old {
-                    assert_eq!(old, &model, "{id}:\n{src}");
+            let (old_model, old) = crate::infer::infer(&def, &rules);
+            let (new_model, new) = infer(&def, &rules);
+            let says = || format!("{id}:\n{src}\nold {}\nnew {}", old.to_json(), new.to_json());
+            match VPC_CHANGED.iter().find(|(name, _)| name == id).map(|(_, e)| e).unwrap_or(&VpcExpect::Same) {
+                VpcExpect::Same => {
+                    assert_eq!(old_model, new_model, "{}", says());
+                    assert_eq!(old.to_json(), new.to_json(), "{}", says());
+                    same += 1;
+                }
+                VpcExpect::Fields(what, change) => {
+                    assert_eq!(old_model, new_model, "{what}: {}", says());
+                    assert_ne!(old.to_json(), new.to_json(), "{what}: nothing changed: {}", says());
+                    let mut changed = old.clone();
+                    change(&mut changed);
+                    assert_eq!(changed.to_json(), new.to_json(), "{what}: {}", says());
+                    fields += 1;
+                }
+                VpcExpect::NewlyBuilt(check) => {
+                    assert!(old_model.is_none() && !old.errors.is_empty(), "{}", says());
+                    let m = new_model.as_ref().unwrap_or_else(|| panic!("{}", says()));
+                    check(m, &new);
+                    built += 1;
+                }
+                VpcExpect::NewlyStopped(want) => {
+                    assert!(old_model.is_some() && old.errors.is_empty(), "{}", says());
+                    assert!(new_model.is_none(), "{}", says());
+                    let got: Vec<_> = new
+                        .errors
+                        .iter()
+                        .map(|e| (e.code.as_str(), e.at.as_deref().unwrap_or(""), e.got.as_deref().unwrap_or(""), e.message.as_str()))
+                        .collect();
+                    assert_eq!(got, *want, "{}", says());
+                    assert!(new.derived.is_empty() && new.holes.is_empty() && new.notes.is_empty(), "{}", says());
+                    stopped += 1;
                 }
             }
-            counts[[Built::Same, Built::NewlyBuilt, Built::NewlyStopped, Built::BothStop].iter().position(|b| b == want).unwrap()] += 1;
         }
-        assert_eq!(counts, [VPC_SAME_COUNT, VPC_NEWLY_BUILT_COUNT, VPC_NEWLY_STOPPED_COUNT, VPC_BOTH_STOP_COUNT]);
+        assert_eq!((same, fields, built, stopped), (VPC_SAME_COUNT, VPC_FIELDS_COUNT, VPC_NEWLY_BUILT_COUNT, VPC_NEWLY_STOPPED_COUNT));
         assert_eq!(inputs.len(), VPC_INPUT_COUNT);
-        assert_eq!(VPC_SAME_COUNT + VPC_NEWLY_BUILT_COUNT + VPC_NEWLY_STOPPED_COUNT + VPC_BOTH_STOP_COUNT, VPC_INPUT_COUNT);
-        assert_eq!(NOT_SAME.len(), VPC_INPUT_COUNT - VPC_SAME_COUNT);
+        assert_eq!(
+            VPC_SAME_COUNT + VPC_FIELDS_COUNT + VPC_NEWLY_BUILT_COUNT + VPC_NEWLY_STOPPED_COUNT + VPC_ERROR_ORDER_COUNT,
+            VPC_INPUT_COUNT
+        );
+        assert_eq!(VPC_CHANGED.len(), VPC_INPUT_COUNT - VPC_SAME_COUNT);
     }
 
     /// The built-in rules data with one piece of text taken out of services.toml or links.toml.
@@ -958,14 +1342,22 @@ mod tests {
             let def = crate::def::parse(src).unwrap();
             let mut diag = Diagnostics::default();
             let checked = check(&def, rules, &mut diag).unwrap_or_else(|| panic!("{:?}", diag.errors));
-            build::vpc_model(&def, rules, &checked.settings)
+            build::vpc_model(&def, rules, &checked)
         };
         for (rules, code, at, needs, others) in &cases {
             let e = built(needs, rules).expect_err(code);
             let got: Vec<_> = e.iter().map(|p| (p.code.as_str(), p.at.as_deref())).collect();
             assert_eq!(got, [(*code, Some(*at))], "{at}");
+            // The inference stops with the same errors and nothing else.
+            let (m, d) = infer(&crate::def::parse(needs).unwrap(), rules);
+            assert!(m.is_none(), "{at}");
+            assert_eq!(d.errors, e, "{at}");
+            assert!(d.derived.is_empty() && d.holes.is_empty() && d.notes.is_empty(), "{at}");
+            assert_eq!(d.exit_code(), 1, "{at}");
             for src in *others {
                 assert_eq!(built(src, rules).unwrap(), vpc(src), "{at}: {src}");
+                let (m, d) = infer(&crate::def::parse(src).unwrap(), rules);
+                assert_eq!((m, d.to_json()), (Some(vpc(src)), run(src).1.to_json()), "{at}: {src}");
             }
             // Without a VPC no gateway or added line is needed.
             let (m, d) = infer(&crate::def::parse(API).unwrap(), rules);
@@ -1031,5 +1423,392 @@ mod tests {
         ];
         assert_eq!(lines(&m), [&front[..], &to_s3[..], &out[..]].concat());
         assert_eq!(marks(&m), [(web.clone(), false), (web.clone(), false), (None, false), (None, false)]);
+    }
+
+    /// The tests of the inference with a VPC, run on this one.
+    mod with_a_vpc {
+        use crate::diag::{DerivedKind, Diagnostics};
+        use crate::ids::copy_id;
+        use crate::model::Model;
+        use crate::rules::{Lang, Rules};
+
+        fn run(src: &str) -> (Option<Model>, Diagnostics) { crate::inference::infer(&crate::def::parse(src).unwrap(), &Rules::builtin()) }
+        fn ids(m: &Model) -> Vec<&str> { m.nodes.iter().map(|n| n.id.as_str()).collect() }
+        fn has(m: &Model, a: &str, b: &str) -> bool { m.edges.iter().any(|e| e.from == a && e.to == b) }
+
+        #[test]
+        fn two_az_web_gets_igw_and_per_az_parts() {
+            let (m, d) = run("flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n");
+            let m = m.unwrap();
+            assert_eq!(m.azs, ["ap-northeast-1a", "ap-northeast-1c"]);
+            assert_eq!(ids(&m), ["user","cloudfront","igw","alb","ecs-1a","ecs-1c","aurora-1a","aurora-1c"]);
+            assert!(has(&m,"cloudfront","igw") && has(&m,"igw","alb") && !has(&m,"cloudfront","alb"));
+            assert!(has(&m,"ecs-1c","aurora-1a") && has(&m,"aurora-1a","aurora-1c"));
+            let igw = d.derived.iter().find(|x| x.target == "igw").unwrap();
+            assert_eq!((igw.kind.clone(), igw.rule.as_str()), (DerivedKind::Constraint, "internet-facing-alb-in-vpc-with-igw"));
+            assert!(igw.source.is_some());
+            assert!(d.derived.iter().any(|x| x.rule == "default-two-azs" && x.kind == DerivedKind::Default));
+            assert_eq!(d.exit_code(), 0);
+        }
+
+        #[test]
+        fn three_azs_have_one_writer_and_two_readers() {
+            let (m, _) = run("flows:\n  - user -> alb -> ecs -> aurora\nset:\n  azs: 3\n");
+            let m = m.unwrap();
+            assert_eq!(m.azs.len(), 3);
+            let roles: Vec<_> = m.nodes.iter().filter(|n| n.service == "aurora").map(|n| n.role.clone().unwrap()).collect();
+            assert_eq!(roles, ["writer", "reader", "reader"]);
+            let n = |f: &str, t: &str| m.edges.iter().filter(|e| e.from.starts_with(f) && e.to.starts_with(t)).count();
+            assert_eq!(n("ecs-", "aurora-"), 9);
+            assert_eq!(n("aurora-", "aurora-"), 2);
+        }
+
+        #[test]
+        fn private_to_regional_main_flow_is_a_hole_until_chosen() {
+            let src = "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\n";
+            let (m, d) = run(src);
+            assert_eq!(d.holes[0].hole, "route.ecs.s3");
+            assert_eq!(d.holes[0].choices, ["endpoint", "nat"]);
+            assert_eq!(d.exit_code(), 2);
+            assert!(m.unwrap().edges.iter().any(|e| e.to == "s3" && e.hole.as_deref() == Some("route.ecs.s3")));
+            let (m, d) = run(&format!("{src}choose:\n  route.ecs.s3: nat\n"));
+            assert!(d.holes.is_empty());
+            assert!(ids(&m.unwrap()).contains(&"nat-1a"));
+        }
+
+        #[test]
+        fn hole_id_does_not_shift_when_lines_are_added() {
+            let (_, d) = run("flows:\n  - user -> alb -> ecs\n  - cloudfront -> s3\n  - user -> cloudfront\n  - ecs -> s3\n");
+            assert_eq!(d.holes[0].hole, "route.ecs.s3");
+        }
+
+        #[test]
+        fn outbound_adds_nat_per_az_or_single() {
+            let (m, d) = run("flows:\n  - user -> alb -> ecs\n  - ecs -> internet\n");
+            let m = m.unwrap();
+            assert!(has(&m,"ecs-1c","nat-1c") && has(&m,"nat-1c","igw"));
+            assert!(d.derived.iter().any(|x| x.rule == "nat-per-az"));
+            let (m, _) = run("flows:\n  - user -> alb -> ecs\n  - ecs -> internet\nset:\n  nat: single\n");
+            let m = m.unwrap();
+            assert!(has(&m,"ecs-1c","nat-1a") && !ids(&m).contains(&"nat-1c"));
+        }
+
+        #[test]
+        fn aux_flows_are_not_holes_and_leave_a_note() {
+            let (_, d) = run("flows:\n  - user -> alb -> ecs\n  - ecs ~> cloudwatch\n");
+            assert!(d.holes.is_empty());
+            assert_eq!(d.notes.len(), 1);
+        }
+
+        // Fails if a shape without a VPC is stopped as one with a VPC, or a pair outside the list is
+        // accepted or reported at another line.
+        #[test]
+        fn shapes_outside_the_pairs_stop_with_unsupported() {
+            let (m, d) = run("flows:\n  - user -> cloudfront -> s3\n");
+            assert!(m.is_some(), "{:?}", d.errors);
+            assert_eq!(d.exit_code(), 0);
+            for (src, at, got) in [("flows:\n  - user -> s3\n", "flows[0]", "user -> s3"), ("flows:\n  - user -> alb -> aurora\n", "flows[0]", "alb -> aurora")] {
+                let (m, d) = run(src);
+                assert!(m.is_none(), "{src}");
+                assert_eq!((d.errors[0].code.as_str(), d.errors[0].at.as_deref(), d.errors[0].got.as_deref()), ("UNSUPPORTED", Some(at), Some(got)), "{src}");
+                assert_eq!(d.errors[0].message, format!("`{got}` is not a supported connection"), "{src}");
+            }
+        }
+
+        #[test]
+        fn unknown_names_and_bad_settings_list_allowed_values() {
+            let (_, d) = run("flows:\n  - user -> cloudfrnt -> alb -> ecs\n");
+            assert_eq!((d.errors[0].code.as_str(), d.errors[0].at.as_deref(), d.errors[0].got.as_deref()), ("UNKNOWN_SERVICE", Some("flows[0][1]"), Some("cloudfrnt")));
+            assert!(d.errors[0].allowed.contains(&"cloudfront".to_string()) && !d.errors[0].allowed.contains(&"igw".to_string()));
+            for (k, v) in [("azs","4"), ("azs","two"), ("lang","fr"), ("region","us-east-1"), ("nat","none")] {
+                let (_, d) = run(&format!("flows:\n  - user -> alb -> ecs\nset:\n  {k}: {v}\n"));
+                assert_eq!((d.errors[0].code.as_str(), d.errors[0].at.as_deref()), ("BAD_SETTING", Some(&*format!("set.{k}"))));
+                assert!(!d.errors[0].allowed.is_empty());
+            }
+            let (_, d) = run("flows:\n  - user -> alb -> ecs\nset:\n  colour: red\n");
+            assert_eq!(d.errors[0].code, "UNKNOWN_SETTING");
+            let (_, d) = run("flows:\n  - user -> alb -> ecs\n  - ecs -> s3\nchoose:\n  route.ecs.s3: tunnel\n");
+            assert_eq!((d.errors[0].code.as_str(), d.errors[0].allowed.clone()), ("BAD_CHOICE", vec!["endpoint".to_string(), "nat".to_string()]));
+            let (_, d) = run("flows:\n  - user -> alb -> ecs\nchoose:\n  route.ecs.rds: nat\n");
+            assert_eq!(d.errors[0].code, "UNKNOWN_HOLE");
+            let (_, d) = run("flows:\n  - user -> alb -> ecs(lambda)\n");
+            assert_eq!(d.errors[0].code, "UNKNOWN_OPTION");
+        }
+        fn label(m: &Model, a: &str, b: &str) -> String { m.edges.iter().find(|e| e.from == a && e.to == b).unwrap().label.clone() }
+
+        #[test]
+        fn edge_labels_follow_the_pair() {
+            let src = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - cloudfront -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\n  - acm -- cloudfront\n";
+            let m = run(src).0.unwrap();
+            assert_eq!(label(&m, "user", "cloudfront"), "https");
+            assert_eq!(label(&m, "cloudfront", "igw"), "https");
+            assert_eq!(label(&m, "alb", "ecs-1a"), "http");
+            assert_eq!(label(&m, "ecs-1a", "aurora-1a"), "read_write");
+            assert_eq!(label(&m, "ecs-1a", "aurora-1c"), "read");
+            assert_eq!(label(&m, "aurora-1a", "aurora-1c"), "replication");
+            assert_eq!(label(&m, "cloudfront", "s3"), "static_files");
+            assert_eq!(label(&m, "ecs-1a", "nat-1a"), "outbound");
+            assert_eq!(label(&m, "nat-1a", "igw"), "outbound");
+            assert_eq!(label(&m, "ecs-1c", "cloudwatch"), "logs_metrics");
+            assert_eq!(label(&m, "waf", "cloudfront"), "web_acl");
+            assert_eq!(label(&m, "acm", "cloudfront"), "certificate");
+            assert!(!ids(&m).contains(&"internet"));
+            assert_eq!(ids(&m), ["user","cloudfront","waf","acm","igw","alb","nat-1a","nat-1c","ecs-1a","ecs-1c","aurora-1a","aurora-1c","s3","cloudwatch"]);
+        }
+
+        #[test]
+        fn an_auxiliary_flow_is_labelled_logs_and_metrics_whatever_its_target() {
+            let m = run("flows:\n  - user -> cloudfront -> alb -> ecs\n  - alb ~> s3\n  - cloudfront ~> s3\n").0.unwrap();
+            assert_eq!(label(&m, "alb", "s3"), "logs_metrics");
+            assert_eq!(label(&m, "cloudfront", "s3"), "logs_metrics");
+        }
+
+        #[test]
+        fn explicit_settings_suppress_their_defaults() {
+            let (m, d) = run("flows:\n  - user -> alb -> ecs -> aurora\n  - ecs -> internet\nset:\n  azs: 3\n  region: ap-northeast-1\n  nat: per-az\n  readers: 1\n  lang: ja\n");
+            let m = m.unwrap();
+            for rule in ["default-two-azs", "default-region", "nat-per-az"] {
+                assert!(!d.derived.iter().any(|x| x.rule == rule), "{rule}");
+            }
+            assert_eq!(ids(&m).iter().filter(|i| i.starts_with("aurora")).count(), 2);
+            assert_eq!(m.lang, Lang::Ja);
+            let igw = d.derived.iter().find(|x| x.target == "igw").unwrap();
+            assert_eq!(igw.reason, Rules::builtin().rule("internet-facing-alb-in-vpc-with-igw").reason_ja);
+            assert_eq!(d.versions.rules, Rules::builtin().version);
+            assert!(!d.versions.archwire.is_empty());
+        }
+
+        // Breaks when the Region frame of a VPC definition loses its reason, gets it twice, or moves it away from just after the AWS Cloud frame's.
+        #[test]
+        fn vpc_region_frames_have_their_reasons_once() {
+            let web = include_str!("../../../../tests/cases/web-2az-ja/def.yaml");
+            let written = web.replace("set:\n", "set:\n  region: ap-northeast-1\n");
+            assert_ne!(web, written);
+            for (src, want) in [(web.to_string(), vec!["resources-inside-region-frame", "default-region"]), (written, vec!["resources-inside-region-frame"])] {
+                let (_, d) = run(&src);
+                let region: Vec<&str> = d.derived.iter().filter(|x| x.target == "region").map(|x| x.rule.as_str()).collect();
+                assert_eq!(region, want, "{src}");
+                assert!(d.derived.iter().filter(|x| x.target == "region").all(|x| x.added), "{src}");
+                let cloud = d.derived.iter().position(|x| x.target == "aws-cloud").unwrap();
+                assert_eq!(d.derived[cloud + 1].target, "region", "{src}");
+                assert_eq!(d.derived[cloud + 1].rule, "resources-inside-region-frame", "{src}");
+            }
+        }
+
+        #[test]
+        fn every_added_part_has_one_derived() {
+            let (m, d) = run("flows:\n  - user -> alb -> ecs\n  - ecs -> internet\n");
+            for n in m.unwrap().nodes.iter().filter(|n| n.added) {
+                assert_eq!(d.derived.iter().filter(|x| x.target == n.id).count(), 1, "{}", n.id);
+            }
+        }
+
+        #[test]
+        fn endpoint_choice_adds_no_part_and_leaves_a_note() {
+            let (m, d) = run("flows:\n  - user -> alb -> ecs\n  - ecs -> s3\nchoose:\n  route.ecs.s3: endpoint\n");
+            let m = m.unwrap();
+            assert!(d.holes.is_empty() && d.notes.len() == 1);
+            assert!(!ids(&m).iter().any(|i| i.starts_with("nat")));
+            assert!(m.edges.iter().all(|e| e.hole.is_none()));
+        }
+
+        #[test]
+        fn readers_and_internet_misuse_and_several_errors_at_once() {
+            let (_, d) = run("flows:\n  - user -> alb -> ecs\nset:\n  readers: 2\n");
+            assert_eq!((d.errors[0].code.as_str(), d.errors[0].allowed.clone()), ("BAD_SETTING", vec!["1".to_string()]));
+            let (m, d) = run("flows:\n  - user -> alb -> ecs\n  - internet -> alb\n");
+            assert!(m.is_none());
+            assert_eq!((d.errors[0].code.as_str(), d.errors[0].at.as_deref(), d.errors[0].got.as_deref()), ("UNSUPPORTED", Some("flows[1]"), Some("internet -> alb")));
+            assert_eq!(d.errors[0].message, "`internet -> alb` is not a supported connection");
+            let (_, d) = run("flows:\n  - user -> alb -> ecs -> nat\nset:\n  azs: 5\n  lang: fr\n");
+            let codes: Vec<_> = d.errors.iter().map(|e| e.code.as_str()).collect();
+            assert_eq!(codes, ["UNKNOWN_SERVICE", "BAD_SETTING", "BAD_SETTING"]);
+        }
+        #[test]
+        fn links_outside_the_allowlist_stop_with_unsupported() {
+            let base = "flows:\n  - user -> alb -> ecs -> aurora\n";
+            for line in ["cloudfront -> ecs", "user -> aurora", "user ~> cloudfront", "ecs -> user", "ecs -> cloudfront", "alb -> s3", "user -> s3"] {
+                let (m, d) = run(&format!("{base}  - {line}\n"));
+                assert!(m.is_none(), "{line}");
+                assert_eq!((d.errors[0].code.as_str(), d.errors[0].at.as_deref(), d.errors[0].got.as_deref()), ("UNSUPPORTED", Some("flows[1]"), Some(line)), "{line}");
+                assert_eq!(d.errors[0].message, format!("`{line}` is not a supported connection"), "{line}");
+            }
+            assert!(run(&format!("{base}  - aurora -> ecs\n")).0.is_some());
+        }
+
+        #[test]
+        fn attachments_attach_only_to_cloudfront_and_carry_no_flows() {
+            let base = "flows:\n  - user -> cloudfront -> alb -> ecs\n";
+            for line in [
+                "waf -- alb", "acm -- alb", "waf -- acm", "acm -- waf", "cloudfront -- waf", "cloudfront -- acm", "alb -- acm",
+                "user -- alb", "alb -- cloudfront", "waf -> alb", "acm -> s3", "waf ~> cloudwatch", "user -> waf", "cloudfront -> acm",
+            ] {
+                let (m, d) = run(&format!("{base}  - {line}\n"));
+                assert!(m.is_none(), "{line}");
+                assert_eq!((d.errors[0].code.as_str(), d.errors[0].at.as_deref(), d.errors[0].got.as_deref()), ("UNSUPPORTED", Some("flows[1]"), Some(line)), "{line}");
+                assert_eq!(d.errors[0].message, format!("`{line}` is not a supported connection"), "{line}");
+            }
+        }
+
+        #[test]
+        fn waf_and_acm_on_cloudfront_compile_and_the_certificate_is_in_us_east_1() {
+            let (m, d) = run("flows:\n  - user -> cloudfront -> alb -> ecs\n  - waf -- cloudfront\n  - acm -- cloudfront\n");
+            let m = m.unwrap();
+            assert_eq!(d.exit_code(), 0);
+            let acm = m.nodes.iter().find(|n| n.id == "acm").unwrap();
+            assert_eq!(acm.region.as_deref(), Some("us-east-1"));
+            let why: Vec<_> = d.derived.iter().filter(|x| x.target == "acm").map(|x| x.rule.as_str()).collect();
+            assert_eq!(why, ["cloudfront-certificate-in-us-east-1"]);
+            let rule = Rules::builtin().rule("cloudfront-certificate-in-us-east-1").clone();
+            assert_eq!(rule.kind, DerivedKind::Constraint);
+            let why: Vec<_> = d.derived.iter().filter(|x| x.target == "waf").map(|x| x.rule.as_str()).collect();
+            assert_eq!(why, ["global-service-outside-region"]);
+            assert_eq!(m.nodes.iter().find(|n| n.id == "waf").unwrap().region, None);
+        }
+
+        #[test]
+        fn an_auxiliary_flow_from_outside_into_the_load_balancer_is_unsupported() {
+            let (m, d) = run("flows:\n  - user -> cloudfront -> alb -> ecs\n  - user ~> alb\n");
+            assert!(m.is_none());
+            assert_eq!((d.errors[0].code.as_str(), d.errors[0].at.as_deref(), d.errors[0].got.as_deref()), ("UNSUPPORTED", Some("flows[1]"), Some("user ~> alb")));
+            assert_eq!(d.errors[0].message, "`user ~> alb` is not a supported connection");
+        }
+
+        #[test]
+        fn every_allowed_combination_compiles() {
+            let src = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - user -> alb\n  - cloudfront -> s3\n  - cloudfront ~> cloudwatch\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n  - ecs -> internet\n  - waf -- cloudfront\n  - acm -- cloudfront\nchoose:\n  route.ecs.s3: endpoint\n";
+            let (m, d) = run(src);
+            assert!(d.errors.is_empty(), "{:?}", d.errors);
+            assert!(m.is_some());
+            assert_eq!(d.exit_code(), 0);
+        }
+
+        // Fails if a named part outside the VPC stops a definition with a VPC, or loses its reason.
+        #[test]
+        fn a_named_part_outside_the_vpc_infers() {
+            let (m, d) = run("flows:\n  - user -> cloudfront -> alb -> ecs\n  - cloudfront -> s3.web\n");
+            assert!(d.errors.is_empty(), "{:?}", d.errors);
+            assert!(ids(&m.unwrap()).contains(&"s3.web"));
+            let why: Vec<_> = d.derived.iter().filter(|x| x.target == "s3.web").map(|x| x.rule.as_str()).collect();
+            assert_eq!(why, ["regional-service-outside-vpc"]);
+        }
+
+        #[test]
+        fn every_node_knows_the_part_it_stands_for() {
+            let m = run("flows:\n  - user -> alb -> ecs\n  - ecs -> internet\n").0.unwrap();
+            let part = |id: &str| m.nodes.iter().find(|n| n.id == id).unwrap().part.clone();
+            assert_eq!([part("ecs-1a"), part("nat-1c"), part("alb"), part("igw")], ["ecs", "nat", "alb", "igw"]);
+            assert!(m.nodes.iter().all(|n| n.tag.is_none()));
+        }
+
+        // Breaks when a node's area is not taken from its service, or a per-AZ copy is mixed up with a part spanning the AZs.
+        #[test]
+        fn every_node_has_the_area_its_service_gives() {
+            use crate::model::{Area, Tier};
+            let src = "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\nset:\n  lang: ja\n";
+            let m = run(src).0.unwrap();
+            let at = |id: &str| {
+                let n = m.nodes.iter().find(|n| n.id == id).unwrap_or_else(|| panic!("{id}"));
+                (n.area, n.az)
+            };
+            assert_eq!(at("user"), (Area::Outside, None));
+            assert_eq!(at("cloudfront"), (Area::Cloud, None));
+            assert_eq!(at("igw"), (Area::VpcEdge, None));
+            assert_eq!(at("alb"), (Area::Subnet(Tier::Public), None));
+            assert_eq!(at("nat-1a"), (Area::Subnet(Tier::Public), Some(0)));
+            assert_eq!(at("ecs-1c"), (Area::Subnet(Tier::Private), Some(1)));
+            assert_eq!(at("aurora-1a"), (Area::Subnet(Tier::Private), Some(0)));
+            assert_eq!(at("s3"), (Area::Region, None));
+            assert_eq!(at("cloudwatch"), (Area::Region, None));
+        }
+
+        // Breaks when the VPC layout does not read `set.direction`, or takes an unknown value as a default.
+        #[test]
+        fn direction_is_read_in_both_layouts() {
+            use crate::model::Axis;
+            const B: &str = "flows:\n  - user -> alb -> ecs\n";
+            let (m, d) = run(B);
+            assert!(d.errors.is_empty(), "{:?}", d.errors);
+            assert_eq!(m.unwrap().direction, None);
+            for (v, want) in [("right", Axis::Right), ("down", Axis::Down)] {
+                let (m, d) = run(&format!("{B}set:\n  direction: {v}\n"));
+                assert!(d.errors.is_empty(), "{v}: {:?}", d.errors);
+                assert_eq!(m.unwrap().direction, Some(want), "{v}");
+            }
+            for v in ["left", "Right", "up"] {
+                let (m, d) = run(&format!("{B}set:\n  direction: {v}\n"));
+                assert!(m.is_none(), "{v}");
+                assert_eq!(d.errors.len(), 1, "{v}: {:?}", d.errors);
+                let e = &d.errors[0];
+                assert_eq!((e.code.as_str(), e.at.as_deref(), e.got.as_deref()), ("BAD_SETTING", Some("set.direction"), Some(v)));
+                assert_eq!(e.allowed, ["down", "right"]);
+                assert_eq!(d.exit_code(), 1);
+            }
+            let (m, d) = run(&format!("{B}set:\n  colour: red\n"));
+            assert!(m.is_none());
+            assert_eq!(d.errors[0].code, "UNKNOWN_SETTING");
+            assert_eq!(d.errors[0].allowed, ["azs", "direction", "lang", "nat", "readers", "region"]);
+        }
+
+        // Breaks when `direction` is checked out of its place among the other settings.
+        #[test]
+        fn a_bad_direction_is_reported_after_lang_and_before_nat() {
+            let (_, d) = run("flows:\n  - user -> alb -> ecs\n  - ecs -> internet\nset:\n  nat: none\n  direction: up\n  lang: fr\n");
+            let at: Vec<_> = d.errors.iter().map(|e| e.at.as_deref().unwrap()).collect();
+            assert_eq!(at, ["set.lang", "set.direction", "set.nat"]);
+        }
+
+        #[test]
+        fn named_parts_never_share_an_id_with_a_copy_or_make_two_lines_alike() {
+            let src = "flows:\n  - user -> lambda.1a -> lambda\n  - lambda.a-to-b -> s3\n  - lambda.a -> b\n  - lambda.a -> b.to-s3\n  - s3.x-to-y -> lambda.a-to-b\n  - lambda.a-to-s3 -> s3.x\n";
+            let d = crate::def::parse(src).unwrap();
+            let links: Vec<_> = d.links.iter().map(|l| (l.from.name.as_str(), l.to.name.as_str())).collect();
+            assert_eq!(links, [
+                ("user", "lambda.1a"), ("lambda.1a", "lambda"), ("lambda.a-to-b", "s3"), ("lambda.a", "b"),
+                ("lambda.a", "b.to-s3"), ("s3.x-to-y", "lambda.a-to-b"), ("lambda.a-to-s3", "s3.x"),
+            ]);
+            // Every written part, and a copy per Availability Zone of every part, named or not.
+            let mut ids: Vec<String> = Vec::new();
+            for r in d.links.iter().flat_map(|l| [&l.from, &l.to]) {
+                if !ids.contains(&r.name) {
+                    ids.push(r.name.clone());
+                }
+                for suffix in ["1a", "1c", "1d"] {
+                    let copy = copy_id(&r.name, suffix);
+                    if !ids.contains(&copy) {
+                        ids.push(copy);
+                    }
+                }
+            }
+            assert!(ids.contains(&"lambda.1a".to_string()) && ids.contains(&"lambda-1a".to_string()));
+            assert!(ids.contains(&"lambda.1a@1a".to_string()) && ids.contains(&"lambda.a-to-b@1d".to_string()));
+            let written = ids.iter().filter(|i| d.links.iter().any(|l| &l.from.name == *i || &l.to.name == *i)).count();
+            let copies = ids.len() - written;
+            assert_eq!((written, copies), (11, 33));
+            // A line id names exactly one ordered pair of nodes, so it points at the parts it joins.
+            for (from, to) in &links {
+                let id = crate::ids::edge_id(from, to);
+                let pairs: Vec<_> = ids.iter().flat_map(|a| ids.iter().map(move |b| (a, b)))
+                    .filter(|(a, b)| a != b && crate::ids::edge_id(a, b) == id).collect();
+                assert_eq!(pairs.len(), 1, "{id}");
+                assert_eq!((pairs[0].0.as_str(), pairs[0].1.as_str()), (*from, *to), "{id}");
+            }
+            let mut lines: Vec<String> = ids.iter().flat_map(|a| ids.iter().filter(move |b| *b != a).map(move |b| crate::ids::edge_id(a, b))).collect();
+            let n = lines.len();
+            lines.sort();
+            lines.dedup();
+            assert_eq!(lines.len(), n);
+        }
+
+        #[test]
+        fn notes_and_needs_follow_lang() {
+            let (_, d) = run("flows:\n  - user -> alb -> ecs\n  - ecs -> s3\n  - ecs ~> cloudwatch\nset:\n  lang: ja\n");
+            assert_eq!(d.holes[0].need, "ecs から s3 への経路");
+            assert_eq!(d.notes, ["補助の流れ（~>）は経路を扱わず、線だけを描く。"]);
+            let (_, d) = run("flows:\n  - user -> alb -> ecs\n  - ecs -> s3\nchoose:\n  route.ecs.s3: endpoint\nset:\n  lang: ja\n");
+            assert_eq!(d.notes, ["VPC エンドポイントのアイコンは描かない。"]);
+            let (_, d) = run("flows:\n  - user -> alb -> ecs\n  - ecs -> s3\n");
+            assert_eq!(d.holes[0].need, "Route from ecs to s3");
+        }
     }
 }

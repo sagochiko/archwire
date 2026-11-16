@@ -175,14 +175,14 @@ pub(super) fn kind_holes<'a>(rules: &Rules, parts: &[&'a Ref]) -> Vec<(String, &
 }
 
 /// A main flow from a part in a private subnet to a Regional part outside the VPC: its route is
-/// a hole, in the order the lines are written.
-pub(super) fn route_holes(def: &Definition, rules: &Rules) -> Vec<String> {
+/// a hole, in the order the lines are written, with the line it is on.
+pub(super) fn route_holes<'a>(def: &'a Definition, rules: &Rules) -> Vec<(String, &'a Link)> {
     let private = |r: &Ref| rules.service(&r.service).is_some_and(|s| s.scope == Scope::Vpc && s.subnet == Some(Subnet::Private));
     let regional = |r: &Ref| rules.service(&r.service).is_some_and(|s| s.scope == Scope::Regional);
     def.links
         .iter()
         .filter(|l| l.rel == Rel::Main && private(&l.from) && regional(&l.to))
-        .map(|l| route_hole(&l.from.name, &l.to.name))
+        .map(|l| (route_hole(&l.from.name, &l.to.name), l))
         .collect()
 }
 
@@ -191,7 +191,7 @@ pub(super) fn check_choices(
     def: &Definition,
     rules: &Rules,
     kinds: &[(String, &Ref)],
-    routes: &[String],
+    routes: &[(String, &Link)],
     errors: &mut Vec<Problem>,
 ) {
     for (key, value) in &def.choose {
@@ -202,13 +202,13 @@ pub(super) fn check_choices(
                 let allowed = options.keys().cloned().collect();
                 errors.push(problem("BAD_CHOICE", &at, value, allowed, format!("`{value}` is not a choice for `{key}`")));
             }
-        } else if routes.contains(key) {
+        } else if routes.iter().any(|(id, _)| id == key) {
             if !ROUTE_CHOICES.contains(&value.as_str()) {
                 let allowed = strings(&ROUTE_CHOICES);
                 errors.push(problem("BAD_CHOICE", &at, value, allowed, format!("`{value}` is not a choice for `{key}`")));
             }
         } else {
-            let allowed = kinds.iter().map(|(id, _)| id.clone()).chain(routes.iter().cloned()).collect();
+            let allowed = kinds.iter().map(|(id, _)| id.clone()).chain(routes.iter().map(|(id, _)| id.clone())).collect();
             errors.push(problem("UNKNOWN_HOLE", &at, key, allowed, format!("there is no hole `{key}`")));
         }
     }

@@ -2,10 +2,10 @@
 //! and every accepted connection one edge. With one, parts in a private subnet are copied per
 //! zone, and the gateways the traffic needs are added with the lines that join them.
 
-use super::{area_of, links, Settings};
+use super::{area_of, Checked, Settings};
 use crate::def::{Definition, Link, Ref, Rel};
 use crate::diag::Problem;
-use crate::ids::{copy_id, kind_hole, route_hole};
+use crate::ids::{copy_id, kind_hole};
 use crate::model::{Area, Edge, Model, Node, Tier};
 use crate::rules::{DerivedLink, DerivedRole, LinkRule, Place, Rules, Scope, Service, Subnet};
 
@@ -28,7 +28,7 @@ pub(super) fn build(
     parts: &[&Ref],
     accepted: &[(&Link, &LinkRule)],
     open: &[(String, &Ref)],
-    settings: Settings,
+    settings: &Settings,
 ) -> Model {
     let svc = |name: &str| rules.service(name).expect("names were checked");
 
@@ -65,8 +65,7 @@ pub(super) fn build(
         });
     }
 
-    let Settings { region, lang, direction, .. } = settings;
-    Model { region, azs: Vec::new(), lang, nodes, edges, direction }
+    Model { region: settings.region.clone(), azs: Vec::new(), lang: settings.lang, nodes, edges, direction: settings.direction }
 }
 
 /// The label of a written line into `to`: the label for the kind of `to` (`to_kind`) if it has
@@ -128,16 +127,9 @@ fn added(id: String, s: &Service, az: Option<usize>) -> Node {
 /// The semantic model of a definition with a VPC part that passed the checks: parts, copies, added parts and lines.
 /// A part or line the definition needs and the rules data lacks (DERIVED_ROLE_MISSING, DERIVED_LINK_MISSING)
 /// is an error; one it does not need may be missing.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn vpc_model(def: &Definition, rules: &Rules, settings: &Settings) -> Result<Model, Vec<Problem>> {
+pub(super) fn vpc_model(def: &Definition, rules: &Rules, checked: &Checked) -> Result<Model, Vec<Problem>> {
     let svc = |name: &str| rules.service(name).expect("names were checked");
-    let parts = links::parts(def);
-    let accepted: Vec<(&Link, &LinkRule)> = def
-        .links
-        .iter()
-        .map(|l| (l, rules.link(&l.from.service, &l.to.service, l.rel).expect("connections were checked")))
-        .collect();
-    let open = links::kind_holes(rules, &parts);
+    let Checked { settings, parts, accepted, kinds: open, routes, .. } = checked;
     let azs: Vec<String> = AZ_LETTERS[..settings.azs].iter().map(|l| format!("{}{l}", settings.region)).collect();
     let suffix = |i: usize| azs[i][azs[i].len() - 2..].to_string();
 
@@ -148,8 +140,8 @@ pub(crate) fn vpc_model(def: &Definition, rules: &Rules, settings: &Settings) ->
     let egress = |r: &Ref| svc(&r.service).egress;
     let private = |r: &Ref| area(r) == Area::Subnet(Tier::Private);
 
-    // A main flow from a private part to a Regional part outside the VPC: its route is a hole until answered.
-    let route = |l: &Link| (l.rel == Rel::Main && private(&l.from) && area(&l.to) == Area::Region).then(|| route_hole(&l.from.name, &l.to.name));
+    // The route hole on a line, found by the checks; it stays open until answered.
+    let route = |l: &Link| routes.iter().find(|(_, r)| std::ptr::eq(*r, l)).map(|(id, _)| id.clone());
     let answer = |l: &Link| route(l).and_then(|id| def.choose.get(&id).map(String::as_str));
 
     // Private parts whose traffic leaves the VPC: main flows to where traffic leaves, then routes answered `nat`.
@@ -193,7 +185,7 @@ pub(crate) fn vpc_model(def: &Definition, rules: &Rules, settings: &Settings) ->
         az,
         role: role.map(String::from),
         added: false,
-        region: moved(&accepted, &r.name).and_then(|rule| rule.from_region.clone()),
+        region: moved(accepted, &r.name).and_then(|rule| rule.from_region.clone()),
         part: r.name.clone(),
         tag: r.tag.clone(),
         area: area(r),
