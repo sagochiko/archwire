@@ -252,11 +252,15 @@ pub(super) fn vpc_model(def: &Definition, rules: &Rules, checked: &Checked) -> R
         if entry_line(l) {
             // An entry line asks for the gateway above, and a missing one has returned.
             let g = find(&gateway.expect("an entry adds the gateway").key);
+            // Both halves carry the label of the written line, read for the part it goes to. An
+            // entry goes to a public part, whose copies share its kind and never have a role.
+            let tos = copies(&l.to.name);
+            let label = line_label(rule, tos[0]);
             for from in copies(&l.from.name) {
-                add(&mut edges, from, g, Rel::Main, &rule.label, None, false);
+                add(&mut edges, from, g, Rel::Main, &label, None, false);
             }
-            for to in copies(&l.to.name) {
-                add(&mut edges, g, to, Rel::Main, &rule.label, None, false);
+            for to in tos {
+                add(&mut edges, g, to, Rel::Main, &label, None, false);
             }
             continue;
         }

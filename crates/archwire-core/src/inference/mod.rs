@@ -355,14 +355,29 @@ mod tests {
         files.sort();
         assert_eq!(files, SOURCES.iter().map(|(n, _)| n.to_string()).collect::<Vec<_>>());
         let r = Rules::builtin();
+        // The rules the code uses: every string the rules data knows as a rule, outside the tests
+        // and outside the declaration of RULES itself.
+        let mut used: Vec<String> = Vec::new();
         for (name, src) in SOURCES {
-            let code = src.find("#[cfg(test)]").map_or(src, |i| &src[..i]);
+            let mut code = src.find("#[cfg(test)]").map_or(src, |i| &src[..i]).to_string();
+            if let Some(start) = code.find("pub(crate) const RULES") {
+                let end = start + code[start..].find("];").expect("the list ends") + 2;
+                assert!(name == "mod.rs" && code[end..].find("const RULES").is_none(), "RULES is declared once, in mod.rs");
+                code.replace_range(start..end, "");
+            }
             for lit in code.split('"').skip(1).step_by(2) {
-                if r.require(&[lit]).is_empty() {
-                    assert!(RULES.contains(&lit), "`{lit}` is named in {name} but missing from RULES");
+                if r.require(&[lit]).is_empty() && !used.iter().any(|u| u == lit) {
+                    used.push(lit.to_string());
                 }
             }
         }
+        let mut listed: Vec<String> = RULES.iter().map(|s| s.to_string()).collect();
+        listed.sort();
+        let n = listed.len();
+        listed.dedup();
+        assert_eq!(listed.len(), n, "a rule is listed twice in RULES");
+        used.sort();
+        assert_eq!(used, listed, "RULES must hold exactly the rules the code names");
         assert!(r.require(&RULES).is_empty());
     }
 
@@ -1212,13 +1227,13 @@ mod tests {
         // `alb -> aurora` is not a pair.
         ("VPC_TEST_DEFINITIONS#25", VpcExpect::NewlyStopped(&[("UNSUPPORTED", "flows[1]", "alb -> aurora", "`alb -> aurora` is not a supported connection")])),
     ];
-    const VPC_SAME_COUNT: usize = 1096;
+    const VPC_SAME_COUNT: usize = 1099;
     const VPC_FIELDS_COUNT: usize = 28;
     const VPC_NEWLY_BUILT_COUNT: usize = 4;
     const VPC_NEWLY_STOPPED_COUNT: usize = 1;
     /// No input stops in both with the same errors in another order.
     const VPC_ERROR_ORDER_COUNT: usize = 0;
-    const VPC_INPUT_COUNT: usize = 1129;
+    const VPC_INPUT_COUNT: usize = 1132;
 
     // Fails if the model, labels, reasons, holes, notes or errors of a definition with a VPC
     // differ from the inference with a VPC outside the listed inputs and the listed changes, or an
@@ -1246,6 +1261,9 @@ mod tests {
             ("TWO_WEBS", TWO_WEBS),
             ("LOAD_BALANCER_ALONE", LOAD_BALANCER_ALONE),
             ("tests/cases/err-unknown-service", include_str!("../../../../tests/cases/err-unknown-service/def.yaml")),
+            ("tests/cases/endpoint-ja-right", include_str!("../../../../tests/cases/endpoint-ja-right/def.yaml")),
+            ("tests/cases/web-2az-ja-right", include_str!("../../../../tests/cases/web-2az-ja-right/def.yaml")),
+            ("tests/cases/web-3az-en-right", include_str!("../../../../tests/cases/web-3az-en-right/def.yaml")),
             ("UNSUPPORTED_AND_UNKNOWN_HOLE", UNSUPPORTED_AND_UNKNOWN_HOLE),
             ("NAMED_PART_AND_BAD_LANG", NAMED_PART_AND_BAD_LANG),
             ("UNREACHED_AND_BAD_CHOICE", UNREACHED_AND_BAD_CHOICE),
@@ -1377,6 +1395,32 @@ mod tests {
         }
     }
 
+    // Fails if the two lines through the entry gateway do not take the label a connection gives
+    // for the kind of the part it goes to, or lose the connection's label without a kind.
+    #[test]
+    fn lines_through_the_entry_gateway_take_the_label_for_the_kind() {
+        let services = include_str!("../../../../rules/aws/services.toml");
+        let links = include_str!("../../../../rules/aws/links.toml");
+        let alb = "default_azs = \"default-two-azs\" }\n";
+        let user_to_alb = "from = \"user\"\nto = \"alb\"\nrel = \"main\"\nlabel = \"https\"\n";
+        assert_eq!((services.matches(alb).count(), links.matches(user_to_alb).count()), (1, 1));
+        let rules = Rules::load(
+            &services.replace(alb, &format!("{alb}\n[service.options.variant]\nshape = \"elastic_load_balancing\"\nlabel = \"Application Load Balancer\"\n")),
+            include_str!("../../../../rules/aws/rules.toml"),
+            include_str!("../../../../rules/aws/labels.toml"),
+            &links.replace(user_to_alb, &format!("{user_to_alb}to_kind.variant = {{ label = \"http\", rule = \"load-balancer-in-vpc\" }}\n")),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let entry = |src: &str| {
+            let (m, d) = infer(&crate::def::parse(src).unwrap(), &rules);
+            let m = m.unwrap_or_else(|| panic!("{:?}", d.errors));
+            lines(&m).into_iter().filter(|(f, t, _, _)| *t == "igw" || *f == "igw").map(|(f, t, r, l)| (f.to_string(), t.to_string(), r, l.to_string())).collect::<Vec<_>>()
+        };
+        let want = |label: &str| vec![("user".to_string(), "igw".to_string(), Main, label.to_string()), ("igw".into(), "alb".into(), Main, label.to_string())];
+        assert_eq!(entry("flows:\n  - user -> alb(variant) -> ecs\n"), want("http"));
+        assert_eq!(entry("flows:\n  - user -> alb -> ecs\n"), want("https"));
+    }
+
     // Fails if a route hole is named by service instead of by part, or an answer for one part's
     // route reaches the lines of another part.
     #[test]
@@ -1423,6 +1467,29 @@ mod tests {
         ];
         assert_eq!(lines(&m), [&front[..], &to_s3[..], &out[..]].concat());
         assert_eq!(marks(&m), [(web.clone(), false), (web.clone(), false), (None, false), (None, false)]);
+
+        // The holes the diagnostics give: each at the line it is on, in the order written.
+        let hole = |id: &str, at: &str, from: &str, to: &str| crate::diag::Hole {
+            hole: id.into(),
+            at: at.into(),
+            need: format!("Route from {from} to {to}"),
+            choices: strings(&["endpoint", "nat"]),
+        };
+        let web_hole = hole(WEB, "flows[2]", "ecs.web", "s3.web");
+        let admin_hole = hole(ADMIN, "flows[3]", "ecs.admin", "s3.admin");
+        let endpoint_note = Rules::builtin().text("note.endpoint_not_drawn", Lang::En);
+        for (src, holes, notes) in [
+            (SRC.to_string(), vec![web_hole.clone(), admin_hole.clone()], vec![]),
+            (format!("{SRC}choose:\n  {WEB}: endpoint\n"), vec![admin_hole.clone()], vec![endpoint_note]),
+            (format!("{SRC}choose:\n  {ADMIN}: nat\n"), vec![web_hole.clone()], vec![]),
+        ] {
+            let (m, d) = run(&src);
+            assert_eq!(m, Some(vpc(&src)), "{src}");
+            assert!(d.errors.is_empty(), "{src}: {:?}", d.errors);
+            assert_eq!(d.holes, holes, "{src}");
+            assert_eq!(d.notes, notes, "{src}");
+            assert_eq!(d.exit_code(), 2, "{src}");
+        }
     }
 
     /// The tests of the inference with a VPC, run on this one.
