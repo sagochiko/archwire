@@ -568,3 +568,167 @@ fn mixed_diagrams_for_the_checker() {
     }
     assert_eq!(yamls, 2 * MIXED_FOR_THE_CHECKER);
 }
+
+/// The corners of a drawn path: its inner points where the way turns, after dropping repeated
+/// points and points a straight run passes through.
+fn corners(path: &[(i32, i32)]) -> Vec<((i32, i32), [(i32, i32); 2])> {
+    let mut p: Vec<(i32, i32)> = Vec::new();
+    for &q in path {
+        if p.last() != Some(&q) {
+            p.push(q);
+        }
+    }
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for k in 1..p.len().saturating_sub(1) {
+            let (a, b, c) = (p[k - 1], p[k], p[k + 1]);
+            if (a.0 == b.0 && b.0 == c.0) || (a.1 == b.1 && b.1 == c.1) {
+                p.remove(k);
+                changed = true;
+                break;
+            }
+        }
+    }
+    let dir = |from: (i32, i32), to: (i32, i32)| ((to.0 - from.0).signum(), (to.1 - from.1).signum());
+    (1..p.len().saturating_sub(1)).map(|k| (p[k], [dir(p[k], p[k - 1]), dir(p[k], p[k + 1])])).collect()
+}
+
+/// The straight runs of a drawn path, without repeated points.
+fn runs_of(path: &[(i32, i32)]) -> Vec<((i32, i32), (i32, i32))> {
+    path.windows(2).filter(|s| s[0] != s[1]).map(|s| (s[0], s[1])).collect()
+}
+
+/// Two kinds of meeting between two drawn lines, each as rows "a | b | point | look | shared ends":
+/// both lines turning at one point, and a line turning on the inside of another's straight run.
+fn meetings(m: &Model, layout: &Layout, wires: &[Wire]) -> (Vec<String>, Vec<String>) {
+    let paths: Vec<Vec<(i32, i32)>> = wires.iter().map(|w| crate::audit::drawn_path(w, layout)).collect();
+    let cs: Vec<_> = paths.iter().map(|p| corners(p)).collect();
+    let _ = m;
+    let (mut same, mut tee) = (Vec::new(), Vec::new());
+    for a in 0..wires.len() {
+        for b in 0..wires.len() {
+            if a == b {
+                continue;
+            }
+            let (wa, wb) = (&wires[a], &wires[b]);
+            let shared = [&wa.from, &wa.to].iter().any(|e| *e == &wb.from || *e == &wb.to);
+            if a < b {
+                for (pa, arms_a) in &cs[a] {
+                    for (pb, arms_b) in &cs[b] {
+                        if pa != pb {
+                            continue;
+                        }
+                        let same_arm = arms_a.iter().filter(|x| arms_b.contains(x)).count();
+                        let opposite = arms_a.iter().filter(|x| arms_b.contains(&(-x.0, -x.1))).count();
+                        let look = match (same_arm, opposite) {
+                            (0, 2) => "cross",
+                            (1, 1) => "one_arm_along",
+                            (2, 0) => "same_corner",
+                            _ => "other",
+                        };
+                        same.push(format!("{}\t{}\t{:?}\t{look}\t{shared}", wa.id, wb.id, pa));
+                    }
+                }
+            }
+            if shared {
+                continue;
+            }
+            let bends_b: Vec<(i32, i32)> = cs[b].iter().map(|c| c.0).collect();
+            for (pa, arms_a) in &cs[a] {
+                for (s, e) in runs_of(&paths[b]) {
+                    let inside = if s.0 == e.0 && pa.0 == s.0 {
+                        pa.1 > s.1.min(e.1) && pa.1 < s.1.max(e.1)
+                    } else if s.1 == e.1 && pa.1 == s.1 {
+                        pa.0 > s.0.min(e.0) && pa.0 < s.0.max(e.0)
+                    } else {
+                        false
+                    };
+                    if inside && !bends_b.contains(pa) {
+                        let along = arms_a.iter().any(|x| if s.0 == e.0 { x.0 == 0 } else { x.1 == 0 });
+                        tee.push(format!("{}\t{}\t{:?}\t{}\tfalse", wa.id, wb.id, pa, if along { "arm_along_run" } else { "other" }));
+                    }
+                }
+            }
+        }
+    }
+    (same, tee)
+}
+
+/// Lays out and routes a model the way `compile` does along `axis`.
+fn routed(m: &Model, axis: Axis) -> Option<(Layout, Vec<Wire>)> {
+    let r = Rules::builtin();
+    let p = super::arrange(m, &r, axis).ok()?;
+    let (wires, _) = crate::route::route_planned(m, &p.layout, &r, &p.lines);
+    Some((p.layout, wires))
+}
+
+fn model_of(src: &str) -> Option<Model> {
+    let r = Rules::builtin();
+    let (m, d) = crate::inference::infer(&crate::def::parse(src).ok()?, &r);
+    if d.errors.is_empty() { m } else { None }
+}
+
+// Counts two meetings of drawn lines over every set of inputs and writes them to the file named
+// by ARCHWIRE_MEET_OUT. It runs only when named.
+#[test]
+#[ignore]
+fn count_lines_meeting_at_corners() {
+    let Some(path) = folder_from("ARCHWIRE_MEET_OUT") else { return };
+    let mut sets: Vec<(&str, String, Model, Axis)> = Vec::new();
+    for (name, src) in all_inputs() {
+        for (axis, way) in AXES {
+            if let Some(m) = model_of(&src) {
+                sets.push(("mixed", format!("{name} {way} azs={}", m.azs.len()), m, axis));
+            }
+        }
+    }
+    for (k, src) in crate::test_inputs::generated_with_a_vpc().into_iter().enumerate() {
+        for (axis, way) in AXES {
+            if let Some(m) = model_of(&src) {
+                sets.push(("vpc2016", format!("generated_with_a_vpc#{k} {way} azs={}", m.azs.len()), m, axis));
+            }
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let hand: Vec<(String, Model)> = super::azgrid::tests::inputs().into_iter().filter(|(n, _, _)| n.starts_with("mix-")).map(|(n, m, _)| (n, m)).collect();
+    let mut eighty: Vec<std::path::PathBuf> = std::fs::read_dir(root.join("out/view/m2b/gen-before")).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|e| e == "yaml")).collect();
+    eighty.sort();
+    for f in eighty {
+        let src = std::fs::read_to_string(&f).unwrap();
+        let stem = f.file_stem().unwrap().to_str().unwrap().to_string();
+        let axis = if stem.ends_with("-down") { Axis::Down } else { Axis::Right };
+        let m = match src.strip_prefix("# hand-built model: ") {
+            Some(n) => hand.iter().find(|(h, _)| h == n.trim()).expect("a hand-built model").1.clone(),
+            None => model_of(&src).expect("a model"),
+        };
+        sets.push(("eighty", format!("{stem} azs={}", m.azs.len()), m, axis));
+    }
+    let mut cases: Vec<std::path::PathBuf> = std::fs::read_dir(root.join("tests/cases")).unwrap().map(|e| e.unwrap().path()).filter(|p| !p.file_name().unwrap().to_str().unwrap().starts_with("err-")).collect();
+    cases.sort();
+    for c in cases {
+        let src = std::fs::read_to_string(c.join("def.yaml")).unwrap();
+        let m = model_of(&src).expect("a case gives a model");
+        let axis = m.direction.unwrap_or_else(|| super::default_axis(&m));
+        sets.push(("cases", format!("{} azs={}", c.file_name().unwrap().to_str().unwrap(), m.azs.len()), m, axis));
+    }
+    let mut out = String::from("set\tdrawing\tkind\ta\tb\tpoint\tlook\tshared_ends\n");
+    let mut drawn: Vec<(&str, usize)> = Vec::new();
+    for (set, name, m, axis) in &sets {
+        let Some((layout, wires)) = routed(m, *axis) else { continue };
+        match drawn.iter_mut().find(|d| d.0 == *set) {
+            Some(d) => d.1 += 1,
+            None => drawn.push((set, 1)),
+        }
+        let (same, tee) = meetings(m, &layout, &wires);
+        for r in same {
+            out.push_str(&format!("{set}\t{name}\tsame_corner_point\t{r}\n"));
+        }
+        for r in tee {
+            out.push_str(&format!("{set}\t{name}\tcorner_on_run\t{r}\n"));
+        }
+    }
+    std::fs::write(&path, out).unwrap();
+    std::fs::write(path.with_file_name("meet-drawn.tsv"), drawn.iter().map(|(s, n)| format!("{s}\t{n}\n")).collect::<String>()).unwrap();
+}
+

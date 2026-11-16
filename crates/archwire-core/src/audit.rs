@@ -120,6 +120,12 @@ fn audit_path(w: &Wire, layout: &Layout) -> Vec<(i32, i32)> {
     out
 }
 
+/// The drawn line as the checks here see it, for tests that look at the drawn paths.
+#[cfg(test)]
+pub(crate) fn drawn_path(w: &Wire, layout: &Layout) -> Vec<(i32, i32)> {
+    audit_path(w, layout)
+}
+
 /// The box a line's label takes, from where draw.io anchors it on the drawn line.
 pub(crate) fn audit_wire_label(w: &Wire, path: &[(i32, i32)]) -> Option<Rect> {
     if w.label.is_empty() {
