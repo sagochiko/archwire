@@ -457,13 +457,13 @@ fn lay_region(model: &Model, rules: &Rules, axis: Axis, piece: Option<&Piece>) -
         None => Vec::new(),
     };
     let gap = out_gap(model, rules, &lone).max(r - ICON);
-    let f = flow_of(model, piece, axis, gap);
-    let vs = rows(&f, r, true);
-
-    // Main ranks: their lengths come from the main parts alone, so side parts never move them.
     let named = |i: usize| icon_of(model, rules, i, icon_at(0, 0), None);
     // The parts only the VPC's parts are joined to sit right of it: they widen its block, never heighten it.
     let lone_right = lone.iter().map(|&i| spans(&named(i)).0 .1).max().map_or(0, |end| gap + end);
+    let f = flow_of(model, piece, axis, lone_right, gap);
+    let vs = rows(&f, r, true);
+
+    // Main ranks: their lengths come from the main parts alone, so side parts never move them.
     let block_main = piece.map_or((0, 0), |p| (0, uv(axis, (p.placed.w + lone_right, p.placed.h)).0));
     let main = |i: usize| if i == vpc_id { block_main } else { uv(axis, spans(&named(i))).0 };
     let on_line = |i: usize| if i == vpc_id { block_main } else { uv(axis, on_lines(&named(i))).0 };
@@ -577,8 +577,16 @@ fn lay_region(model: &Model, rules: &Rules, axis: Axis, piece: Option<&Piece>) -
             let sender = joined.iter().copied().find(|&j| matches!(model.nodes[j].area, Area::Subnet(crate::model::Tier::Private))).or(joined.first().copied());
             let mut y = sender.and_then(|j| icons.iter().find(|ic| ic.id == model.nodes[j].id)).map_or(oy, |ic| ic.rect.y);
             let mut ic = icon_of(model, rules, i, icon_at(x, y), Some(REGION_FRAME.into()));
-            while icons.iter().any(|o| boxes_meet(o, &ic)) {
-                y += ROW_STEP;
+            // Lower each time the place is taken: past a part of its column a row's step apart,
+            // else a row lower.
+            loop {
+                if let Some(o) = icons.iter().find(|o| rows_too_close(o, &ic)) {
+                    y = o.rect.y + ROW_STEP;
+                } else if icons.iter().any(|o| boxes_meet(o, &ic)) {
+                    y += ROW_STEP;
+                } else {
+                    break;
+                }
                 ic = icon_of(model, rules, i, icon_at(x, y), Some(REGION_FRAME.into()));
             }
             icons.push(ic);
@@ -600,6 +608,11 @@ fn lay_region(model: &Model, rules: &Rules, axis: Axis, piece: Option<&Piece>) -
     centres.sort_unstable();
     centres.dedup();
     Block { w: bw, h: bh, icons, ranks: centres, across, vpc }
+}
+
+/// Whether two parts of one column in one frame have their tops less than a row's step apart.
+fn rows_too_close(a: &Icon, b: &Icon) -> bool {
+    a.rect.x == b.rect.x && a.parent == b.parent && (a.rect.y - b.rect.y).abs() < ROW_STEP
 }
 
 /// Whether two parts' icons and names come within room of each other.
@@ -680,13 +693,13 @@ pub(super) fn cross_step(model: &Model, rules: &Rules, axis: Axis) -> i32 {
 /// predecessors in the Region. Lines from outside the Region do not count.
 #[cfg(test)]
 pub(super) fn flow(model: &Model) -> Flow {
-    flow_of(model, None, Axis::Right, 0)
+    flow_of(model, None, Axis::Right, 0, 0)
 }
 
 /// Like `flow`, with the VPC as one part, standing at the index one past the model's nodes, for
 /// every part inside it, and `room` across after it. Parts only the VPC's parts are joined to are
-/// left out: they sit right of the VPC.
-fn flow_of(model: &Model, piece: Option<&Piece>, axis: Axis, room: i32) -> Flow {
+/// left out: they sit right of the VPC, taking `lone_right` past its right side.
+fn flow_of(model: &Model, piece: Option<&Piece>, axis: Axis, lone_right: i32, room: i32) -> Flow {
     let vpc_id = model.nodes.len();
     let mut parts: Vec<usize> = (0..model.nodes.len())
         .filter(|&i| model.nodes[i].area == Area::Region && on_main(model, &model.nodes[i].id) && !(piece.is_some() && only_inside(model, i)))
@@ -723,7 +736,14 @@ fn flow_of(model: &Model, piece: Option<&Piece>, axis: Axis, room: i32) -> Flow 
             col[i] = preds[i].iter().map(|&(p, _)| col[p] + 1).max().unwrap_or(1);
         }
     }
-    let block = parts.iter().position(|&i| i == vpc_id).zip(piece).map(|(k, p)| (k, uv(axis, (p.placed.w, p.placed.h)).1, room));
+    // A part after the VPC across in its rank whose main lines go on along the main axis would run
+    // them through the parts right of the VPC if it shared their place across, so the VPC's size
+    // across then takes them in. Across the main axis running right, that size is the VPC's height
+    // and they never change it.
+    let block = parts.iter().position(|&i| i == vpc_id).zip(piece).map(|(k, p)| {
+        let onward = (0..n).any(|i| i != k && col[i] == col[k] && !succs[i].is_empty());
+        (k, uv(axis, (p.placed.w + if onward { lone_right } else { 0 }, p.placed.h)).1, room)
+    });
     Flow { parts, col, preds, succs, block }
 }
 
@@ -806,7 +826,7 @@ fn plans(model: &Model, layout: &Layout, col_u: &[i32], axis: Axis) -> Vec<LineP
         let (exit, entry, bend) = if let Some(points) = way_around {
             (cross_start, cross_start, Bend::Points(points))
         } else if e.rel == Rel::Main {
-            let bend = if av == bv { Bend::Straight } else { bend_at(axis, true, turn) };
+            let bend = if av == bv { Bend::Straight } else { bend_at(axis, true, past_the_vpc(layout, a, b, axis, turn)) };
             (main_end, main_start, bend)
         } else {
             let first = av <= bv;
@@ -865,6 +885,28 @@ fn around_the_vpc(layout: &Layout, a: &Icon, b: &Icon, axis: Axis, turn: i32) ->
     let low = |r: Rect| uv(axis, (r.x, r.y)).1;
     let w = (low(cloud) + low(region)).div_euclid(2);
     Some(vec![uv(axis, (au, w)), uv(axis, (bu, w))])
+}
+
+/// Where a main line between two parts of the Region outside the VPC turns across: at `turn`,
+/// unless its draft would then run through the VPC and turning halfway between the VPC's end
+/// along the main axis and the start of `b` keeps it clear.
+fn past_the_vpc(layout: &Layout, a: &Icon, b: &Icon, axis: Axis, turn: i32) -> i32 {
+    let Some(vpc) = layout.frames.iter().find(|f| f.id == super::azgrid::VPC_FRAME).map(|f| f.rect) else { return turn };
+    let centre = |r: Rect| uv(axis, (r.x + r.w / 2, r.y + r.h / 2));
+    let ((_, av), (_, bv)) = (centre(a.rect), centre(b.rect));
+    let end = |r: Rect| uv(axis, (right(r), bottom(r))).0;
+    let start = |r: Rect| uv(axis, (r.x, r.y)).0;
+    let draft = |t: i32| [(end(a.rect), av), (t, av), (t, bv), (start(b.rect), bv)].map(|p| uv(axis, p));
+    let through = |t: i32| draft(t).windows(2).any(|s| crate::path::hits(s[0], s[1], vpc));
+    if !through(turn) || start(b.rect) <= end(vpc) {
+        return turn;
+    }
+    let past = (end(vpc) + start(b.rect)).div_euclid(2);
+    if through(past) {
+        turn
+    } else {
+        past
+    }
 }
 
 /// A bend at `at`, a coordinate along the main axis (`main`) or across it.
@@ -1678,6 +1720,121 @@ set:
             for s in shapes {
                 assert!(s.contains("verticalLabelPosition=bottom;verticalAlign=top"), "{name}: {s}");
             }
+        }
+    }
+
+    /// The drawing of a mixed definition along `axis`, failing on anything but a clean diagram.
+    fn drawn_mixed(src: &str, axis: Axis) -> String {
+        use super::super::generated::{draw_counted, Drawn};
+        match draw_counted(src, axis) {
+            Drawn::Drawn { xml, notes, lines_broken } => {
+                let broken: Vec<&String> = notes.iter().filter(|n| n.contains("edge-")).collect();
+                assert!(broken.is_empty() && lines_broken.is_empty(), "{axis:?} {broken:?} {lines_broken:?}\n{src}");
+                xml
+            }
+            Drawn::LayoutFailed(e) => panic!("{axis:?} layout failed {e:?}\n{src}"),
+            Drawn::Errors(e) => panic!("{axis:?} errors {e:?}\n{src}"),
+            Drawn::Panicked(p) => panic!("{axis:?} panicked {p}\n{src}"),
+        }
+    }
+
+    /// The layout of a definition with a VPC along `axis`.
+    fn arranged_mixed(src: &str, axis: Axis) -> (Model, Placement) {
+        let r = Rules::builtin();
+        let (m, d) = crate::inference::infer(&crate::def::parse(src).unwrap(), &r);
+        let m = m.unwrap_or_else(|| panic!("{:?}", d.errors));
+        let p = arrange(&m, &r, axis).unwrap_or_else(|e| panic!("{e:?}\n{src}"));
+        (m, p)
+    }
+
+    const ONWARD_BESIDE_THE_VPC: &str = "flows:\n  - user -> apigateway(http) -> lambda -> aurora\n  - lambda -> s3\n  - apigateway -> lambda.report -> dynamodb\nset:\n  azs: 2\n  lang: en\n";
+    const ONWARD_BESIDE_THE_VPC_WEB: &str = "flows:\n  - user -> alb -> ecs\n  - ecs -> dynamodb\n  - user -> apigateway(http) -> lambda -> aurora\n  - lambda -> s3\n  - apigateway -> lambda.report -> dynamodb\n  - lambda ~> cloudwatch\nset:\n  azs: 2\n  lang: ja\nchoose:\n  route.ecs.dynamodb: endpoint\n  route.lambda.s3: endpoint\n";
+    const LEAF_BESIDE_THE_VPC: &str = "flows:\n  - user -> apigateway(http) -> lambda -> aurora\n  - lambda -> s3\n  - apigateway -> lambda.report\nset:\n  azs: 2\n  lang: en\n";
+    const LEAF_BESIDE_THE_VPC_LOGS: &str = "flows:\n  - user -> apigateway(http) -> lambda -> aurora\n  - apigateway -> lambda.report\n  - lambda ~> cloudwatch\n";
+
+    // Fails if a part beside the VPC in its rank whose main lines go on shares its place across
+    // with the parts only the VPC's parts are joined to, running its lines through them.
+    #[test]
+    fn a_part_beside_the_vpc_with_lines_going_on_clears_the_parts_right_of_it() {
+        for src in [ONWARD_BESIDE_THE_VPC, ONWARD_BESIDE_THE_VPC_WEB] {
+            for axis in [Axis::Right, Axis::Down] {
+                drawn_mixed(src, axis);
+            }
+            let (m, p) = arranged_mixed(src, Axis::Down);
+            let report = at(&p, "lambda.report");
+            let lone: Vec<&Icon> = p.layout.icons.iter().filter(|i| m.nodes.iter().position(|n| n.id == i.id).is_some_and(|k| m.nodes[k].area == Area::Region && only_inside(&m, k))).collect();
+            assert!(!lone.is_empty(), "{src}");
+            for i in lone {
+                assert!(report.x >= extent(i).0, "{} at {:?} reaches past lambda.report at {report:?}\n{src}", i.id, i.rect);
+            }
+        }
+    }
+
+    // Fails if a part only the VPC's parts are joined to is moved down only until its icon and
+    // name clear the part above it, closer than a row's step in their column.
+    #[test]
+    fn parts_right_of_the_vpc_keep_a_row_apart_in_their_column() {
+        for src in [LEAF_BESIDE_THE_VPC, LEAF_BESIDE_THE_VPC_LOGS] {
+            for axis in [Axis::Right, Axis::Down] {
+                drawn_mixed(src, axis);
+            }
+            let (_, p) = arranged_mixed(src, Axis::Down);
+            let column: Vec<&Icon> = p.layout.icons.iter().filter(|i| i.rect.x == at(&p, "lambda.report").x && i.parent == at_icon(&p, "lambda.report").parent).collect();
+            assert!(column.len() >= 2, "{column:?}\n{src}");
+            for (k, a) in column.iter().enumerate() {
+                for b in &column[k + 1..] {
+                    assert!((a.rect.y - b.rect.y).abs() >= ROW_STEP, "{} and {}\n{src}", a.id, b.id);
+                }
+            }
+        }
+    }
+
+    fn at_icon<'a>(p: &'a Placement, id: &str) -> &'a Icon {
+        p.layout.icons.iter().find(|i| i.id == id).unwrap_or_else(|| panic!("{id} is placed"))
+    }
+
+    /// The generated mixed definitions that once failed to lay out, or broke a line, with a part
+    /// only the VPC's parts are joined to and a function outside the VPC beside it.
+    const ONCE_FAILED_OUTSIDE: [usize; 60] = [
+        6, 7, 14, 15, 16, 17, 18, 19, 24, 25, 26, 27, 28, 29, 56, 57, 64, 65, 66, 67, 68, 69, 74, 75, 76, 77, 78, 79, 227, 277, 426, 427, 434, 435, 436, 437, 438, 439,
+        444, 445, 446, 447, 448, 449, 476, 477, 484, 485, 486, 487, 488, 489, 494, 495, 496, 497, 498, 499, 647, 697,
+    ];
+
+    // Fails if any of these definitions fails to lay out or breaks a line along either axis.
+    #[test]
+    fn mixed_definitions_with_parts_beside_and_right_of_the_vpc_draw_cleanly() {
+        let defs = super::super::generated::generated_mixed();
+        for k in ONCE_FAILED_OUTSIDE {
+            for axis in [Axis::Right, Axis::Down] {
+                drawn_mixed(&defs[k], axis);
+            }
+        }
+    }
+
+    // Fails if a main line between two parts of the Region outside the VPC, whose plain draft
+    // turns across before the VPC's end, is drafted or drawn through the VPC.
+    #[test]
+    fn a_line_between_parts_outside_the_vpc_turns_past_it() {
+        let r = Rules::builtin();
+        for axis in [Axis::Right, Axis::Down] {
+            let (m, p) = arranged_mixed(ONWARD_BESIDE_THE_VPC_WEB, axis);
+            let vpc = p.layout.rect(super::super::azgrid::VPC_FRAME);
+            let k = m.edges.iter().position(|e| e.from == "lambda.report" && e.to == "dynamodb").expect("the line is in the model");
+            let draft = p.lines.iter().find(|l| l.edge == k).expect("the line has a draft");
+            let (a, b) = (at(&p, "lambda.report"), at(&p, "dynamodb"));
+            let ((_, av), (_, bv)) = (uv(axis, (a.x + ICON / 2, a.y + ICON / 2)), uv(axis, (b.x + ICON / 2, b.y + ICON / 2)));
+            let t = match (axis, &draft.bend) {
+                (Axis::Right, Bend::AtX(t)) | (Axis::Down, Bend::AtY(t)) => *t,
+                other => panic!("{other:?}"),
+            };
+            let pts = [(uv(axis, (right(a), bottom(a))).0, av), (t, av), (t, bv), (uv(axis, (b.x, b.y)).0, bv)].map(|q| uv(axis, q));
+            assert!(!pts.windows(2).any(|s| crate::path::hits(s[0], s[1], vpc)), "{axis:?} draft {pts:?} runs through the VPC {vpc:?}");
+            let (wires, _) = route_planned(&m, &p.layout, &r, &p.lines);
+            let w = wires.iter().find(|w| w.id == "edge-lambda.report-to-dynamodb").expect("drawn");
+            let mut path = vec![port_point(p.layout.rect(&w.from), w.exit)];
+            path.extend(w.points.iter().copied());
+            path.push(port_point(p.layout.rect(&w.to), w.entry));
+            assert!(!path.windows(2).any(|s| crate::path::hits(s[0], s[1], vpc)), "{axis:?} drawn {path:?} runs through the VPC {vpc:?}");
         }
     }
 }
