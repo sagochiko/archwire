@@ -421,11 +421,20 @@ mod tests {
     #[test]
     fn every_constraint_rule_has_an_https_source() {
         let r = Rules::builtin();
-        for id in ["global-service-outside-region","cloudfront-certificate-in-us-east-1","load-balancer-in-vpc","alb-spans-two-azs","internet-facing-alb-in-vpc-with-igw","private-egress-through-nat","cognito-user-pool-in-one-region","one-web-acl-per-resource"] {
+        for id in ["cloudfront-certificate-in-us-east-1","load-balancer-in-vpc","alb-spans-two-azs","internet-facing-alb-in-vpc-with-igw","private-egress-through-nat","cognito-user-pool-in-one-region","one-web-acl-per-resource"] {
             let rule = r.rule(id);
             assert_eq!(rule.kind, DerivedKind::Constraint);
             assert!(rule.source.as_deref().unwrap().starts_with("https://docs.aws.amazon.com/"), "{id}");
         }
+    }
+
+    // Fails if the global placement is made a constraint again or loses its source.
+    #[test]
+    fn global_placement_is_a_default_with_its_source() {
+        let r = Rules::builtin();
+        let rule = r.rule("global-service-outside-region");
+        assert_eq!(rule.kind, DerivedKind::Default);
+        assert_eq!(rule.source.as_deref(), Some("https://docs.aws.amazon.com/whitepapers/latest/aws-fault-isolation-boundaries/global-services.html"));
     }
 
     #[test]

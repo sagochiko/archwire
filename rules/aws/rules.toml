@@ -1,4 +1,4 @@
-version = "2026.11.2"
+version = "2026.11.3"
 
 # kind = "constraint": states an AWS constraint; `source` (AWS documentation URL) is required.
 # kind = "default": a choice archwire makes when the definition is silent; `source` is optional.
@@ -11,7 +11,7 @@ reason_ja = "AWS のリソースは AWS Cloud の枠の中に描く。"
 
 [[rule]]
 id = "global-service-outside-region"
-kind = "constraint"
+kind = "default"
 source = "https://docs.aws.amazon.com/whitepapers/latest/aws-fault-isolation-boundaries/global-services.html"
 reason_en = "AWS lists Amazon CloudFront and AWS WAF for CloudFront among the global services, whose resources are not Region-specific. archwire draws global services inside the AWS Cloud frame and outside the Region frame."
 reason_ja = "AWS は Amazon CloudFront と AWS WAF for CloudFront を、リソースがリージョンに属さないグローバルサービスに挙げている。archwire はグローバルサービスを AWS Cloud の枠の中、リージョンの枠の外に描く。"
