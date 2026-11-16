@@ -476,7 +476,9 @@ mod tests {
         assert_eq!((user.service.as_str(), user.tag.as_deref()), ("user", None));
         assert!(one("s3.abcdefghijklmnopqrstuvwx").is_ok());
 
-        for bad in ["s3.", "s3.-web", "s3.web-", "s3.Web", "s3.my_web", "s3.a.b", ".web", "S3.web", "s3.web-->x"] {
+        for bad in ["s3.", "s3.-web", "s3.web-", "s3.Web", "s3.my_web", "s3.a.b", ".web", "S3.web", "s3.web-->x",
+            // Fails if `@`, `[` or `]` is let into a name: copies and holes are made with them.
+            "lambda.api@1a", "lambda.[api]", "lambda.api[", "lambda.api]", "lambda@x.api"] {
             let e = one(bad).unwrap_err();
             assert_eq!((e[0].code.as_str(), e[0].at.as_deref()), ("BAD_SYNTAX", Some("flows[0]")), "{bad}");
             assert!(e[0].message.contains("[a-z0-9-]"), "{bad}");

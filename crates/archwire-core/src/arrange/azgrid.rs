@@ -1484,12 +1484,12 @@ pub(in crate::arrange) mod tests {
         let pri = Area::Subnet(Tier::Private);
         let at = m.nodes.iter().position(|n| n.part == "ecs").unwrap();
         for (k, zone) in ["1a", "1c", "1d"].iter().enumerate() {
-            m.nodes.insert(at + k, node(&format!("lambda.api@{zone}"), "lambda", "lambda.api", pri, Some(k), None));
+            m.nodes.insert(at + k, node(&crate::ids::copy_id("lambda.api", zone), "lambda", "lambda.api", pri, Some(k), None));
         }
         m.nodes.push(http_api());
         m.edges.push(edge("user", "apigateway", Rel::Main, "https", None));
         for zone in ["1a", "1c", "1d"] {
-            m.edges.push(edge("apigateway", &format!("lambda.api@{zone}"), Rel::Main, "invoke", None));
+            m.edges.push(edge("apigateway", &crate::ids::copy_id("lambda.api", zone), Rel::Main, "invoke", None));
         }
         m
     }
@@ -2058,7 +2058,7 @@ pub(in crate::arrange) mod tests {
         for axis in [Axis::Right, Axis::Down] {
             let p = arrange(&m, &r, axis).unwrap();
             for zone in ["1a", "1c"] {
-                let name = name_area(icon(&p, &format!("{LONG}@{zone}")));
+                let name = name_area(icon(&p, &crate::ids::copy_id(LONG, zone)));
                 for pl in &p.lines {
                     let pts = kept_points(&p, pl);
                     for s in pts.windows(2) {
@@ -2152,8 +2152,8 @@ pub(in crate::arrange) mod tests {
         let pri = Area::Subnet(Tier::Private);
         let at = m.nodes.iter().position(|n| n.part == "ecs").unwrap();
         for (k, zone) in ["1a", "1c"].iter().enumerate() {
-            m.nodes.insert(at + k, node(&format!("lambda.api@{zone}"), "lambda", "lambda.api", pri, Some(k), None));
-            m.edges.push(edge("alb", &format!("lambda.api@{zone}"), Rel::Main, "http", None));
+            m.nodes.insert(at + k, node(&crate::ids::copy_id("lambda.api", zone), "lambda", "lambda.api", pri, Some(k), None));
+            m.edges.push(edge("alb", &crate::ids::copy_id("lambda.api", zone), Rel::Main, "http", None));
         }
         let across = m.edges.iter().position(|e| e.from == "ecs-1c" && e.to == "nat-1a").unwrap();
         for axis in [Axis::Right, Axis::Down] {
