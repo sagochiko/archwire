@@ -53,19 +53,20 @@ const REGION_BOTTOM: i32 = 40;
 const FRAME_NAME_INDENT: i32 = 30;
 /// A name stays at least this far inside its frame's sides; a frame's name this far from its right side.
 const FRAME_ROOM: i32 = 20;
-/// From the AWS Cloud frame's left side to the global rank's icons, and from its top to them.
+/// From the AWS Cloud frame's left side to the global rank's icons.
 const CLOUD_LEFT: i32 = 80;
-const CLOUD_TOP: i32 = 50;
-/// From the end of the global rank's icons and names to the Region frame, along the main axis.
+/// From the end of the global rank's icons and names to the Region frame, along the main axis
+/// across the page; down the page, the gap holds the labels of the lines across it.
 const GLOBAL_TO_REGION: i32 = 80;
 /// The Region inside the AWS Cloud frame on the right, at the bottom, and on the left when it comes first along the main axis.
 const CLOUD_INSET: i32 = 30;
-/// From the diagram's top to the AWS Cloud frame, or to the users when they come first.
+/// From the diagram's top to the AWS Cloud frame.
 const CLOUD_Y: i32 = 60;
 /// From the AWS Cloud frame's top to the Region frame's top.
 const REGION_BELOW_CLOUD: i32 = 50;
-/// From the diagram's left to the users' icons and names, or to the AWS Cloud frame when it comes
-/// first; from the end of the users to the AWS Cloud frame along the main axis.
+/// From the diagram's edge to the users' icons and names, or from its left to the AWS Cloud frame
+/// when it comes first; from the end of the users to the AWS Cloud frame along the main axis
+/// across the page (down the page, the gap holds the labels of the lines across it).
 const USER_LEFT: i32 = 40;
 const USER_TO_CLOUD: i32 = 60;
 
@@ -207,10 +208,25 @@ pub(super) fn layered(model: &Model, rules: &Rules, axis: Axis, piece: Option<&P
     let named = |i: usize| icon_of(model, rules, i, icon_at(0, 0), None);
     let main = |i: usize| uv(axis, spans(&named(i))).0;
     let users_span = users.iter().map(|&i| main(i)).fold((0, ICON), widen);
-    let user_u = diagram_main - users_span.0;
-    let cloud_u = if users.is_empty() { diagram_main } else { user_u + users_span.1 + USER_TO_CLOUD };
+    // The users come first from the diagram's edge the same distance whichever side they are on.
+    let user_u = USER_LEFT - users_span.0;
+    // Down the page, a gap holds the labels of the lines across it, as between two ranks; across
+    // the page, it keeps its least width.
+    let across_gap = |least: i32, from: &[usize]| {
+        let label = model
+            .edges
+            .iter()
+            .filter(|e| e.rel == Rel::Main && from.iter().any(|&i| nodes[i].id == e.from))
+            .map(|e| wire_text_size(&rules.text(&e.label, model.lang)).1)
+            .max()
+            .unwrap_or(0);
+        uv(axis, (least, label + WIRE_ROOM)).0
+    };
+    let cloud_u = if users.is_empty() { diagram_main } else { user_u + users_span.1 + across_gap(USER_TO_CLOUD, &users) };
     let first_from = g_main.iter().copied().chain(side_rows.iter().map(|row| row.1[0])).map(|i| main(i).0).min().unwrap_or(0);
-    let global_u = cloud_u + uv(axis, (CLOUD_LEFT, CLOUD_TOP)).0.max(FRAME_ROOM - first_from);
+    // Down the page, the global rank starts past the AWS Cloud frame's name, with room.
+    let cloud_name = frame_name_box(&Frame { id: CLOUD_FRAME.into(), kind: FrameKind::Cloud, label: CLOUD_NAME.into(), rect: icon_at(0, 0), parent: None }).h;
+    let global_u = cloud_u + uv(axis, (CLOUD_LEFT, cloud_name + FRAME_ROOM)).0.max(FRAME_ROOM - first_from);
     let mut u: Vec<Option<i32>> = vec![None; nodes.len()];
     for &i in &g_main {
         u[i] = Some(global_u);
@@ -239,7 +255,7 @@ pub(super) fn layered(model: &Model, rules: &Rules, axis: Axis, piece: Option<&P
     let global_icons: Vec<Icon> =
         global.iter().filter_map(|&i| at(i).map(|r| icon_of(model, rules, i, r, Some(CLOUD_FRAME.into())))).collect();
     let region_u = match global_icons.iter().map(|i| uv(axis, extent(i)).0).max() {
-        Some(end) => end + GLOBAL_TO_REGION,
+        Some(end) => end + across_gap(GLOBAL_TO_REGION, &g_main),
         None => cloud_u + region_main,
     };
     let (region_x, region_y) = uv(axis, (region_u, diagram_cross + region_cross));
@@ -472,9 +488,17 @@ fn lay_region(model: &Model, rules: &Rules, axis: Axis, piece: Option<&Piece>) -
         let u = if piece.is_some() && inside(model, i) { vpc_id } else { i };
         f.parts.iter().position(|&p| p == u).map(|k| (k, i))
     };
+    // A frame inside the Region keeps the inset of a frame in a frame from the Region's sides,
+    // and clears the Region's name below it; parts keep the Region's own margins. The first rank
+    // starts where all of its members can.
+    let region_probe = Frame { id: REGION_FRAME.into(), kind: FrameKind::Region, label: region_name(model, rules), rect: icon_at(0, 0), parent: None };
+    let (frame_main, frame_cross) = uv(axis, (CLOUD_INSET, frame_name_box(&region_probe).h + FRAME_ROOM));
     let mut u = vec![0; ranks + 1];
     if ranks > 0 {
-        u[1] = start_main.max(FRAME_ROOM - span[1].0);
+        let first: Vec<usize> = f.parts.iter().enumerate().filter(|&(k, _)| f.col[k] == 1).map(|(_, &i)| i).collect();
+        let parts_start = if first.iter().any(|&i| i != vpc_id) { start_main } else { frame_main };
+        let block_start = if first.contains(&vpc_id) { frame_main } else { parts_start };
+        u[1] = parts_start.max(block_start).max(FRAME_ROOM - span[1].0);
     }
     for c in 1..ranks {
         // The main lines from this rank into the next, and how many of them bend on the way.
@@ -534,8 +558,8 @@ fn lay_region(model: &Model, rules: &Rules, axis: Axis, piece: Option<&Piece>) -
         // The VPC is entered through its gates, deep inside it, so only the parts keep clear of the name.
         Some((_, bv)) => spots
             .iter()
-            .map(|&(i, _, at)| (FRAME_ROOM - uv(axis, spans(&named(i))).1 .0).max(named_rule) - at)
-            .chain([start_cross, FRAME_ROOM - bv])
+            .map(|&(i, _, at)| (FRAME_ROOM - uv(axis, spans(&named(i))).1 .0).max(named_rule).max(start_cross) - at)
+            .chain([frame_cross - bv])
             .max()
             .expect("not empty"),
     };

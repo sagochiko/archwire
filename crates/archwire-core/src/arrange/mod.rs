@@ -159,37 +159,40 @@ fn parts(items: &[Item]) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::azgrid::tests::inputs;
-    use super::layered::tests::{API_CASES, CHOICES};
+    use super::layered::tests::API_CASES;
     use super::*;
     use crate::diag::Diagnostics;
 
-    const SPAN_ROW_ON_BOUNDARY: Choices = Choices { span_row: SpanRow::OnBoundaryWithTwoZones, ..CHOICES };
-    const BLOCK_LAST: Choices = Choices { block_order: BlockOrder::Last, ..CHOICES };
+    /// The forms the diagrams are drawn in: spanning parts on the boundary between two zones, the
+    /// VPC first in its rank. The other two forms are each written once, to compare.
+    const DRAWN: Choices = Choices { span_row: SpanRow::OnBoundaryWithTwoZones, block_order: BlockOrder::First };
+    const SPAN_ROW_ABOVE: Choices = Choices { span_row: SpanRow::AboveZones, ..DRAWN };
+    const BLOCK_LAST: Choices = Choices { block_order: BlockOrder::Last, ..DRAWN };
 
     /// The diagrams written for viewing: (file name stem, input name, choices). Each is written
     /// with lines running right and with lines running down.
     const SAMPLES: [(&str, &str, Choices); 21] = [
-        ("web-2az-ja", "web-2az-ja", CHOICES),
-        ("web-3az-ja", "web-3az-ja", CHOICES),
-        ("mix", "mix-min", CHOICES),
-        ("api-http-ja", "api-http-ja", CHOICES),
-        ("alb-above", "web-2az-ja", CHOICES),
-        ("alb-boundary", "web-2az-ja", SPAN_ROW_ON_BOUNDARY),
-        ("s3-after", "web-2az-ja", CHOICES),
+        ("web-2az-ja", "web-2az-ja", DRAWN),
+        ("web-3az-ja", "web-3az-ja", DRAWN),
+        ("mix", "mix-min", DRAWN),
+        ("api-http-ja", "api-http-ja", DRAWN),
+        ("alb-above", "web-2az-ja", SPAN_ROW_ABOVE),
+        ("alb-boundary", "web-2az-ja", DRAWN),
+        ("s3-after", "web-2az-ja", DRAWN),
         ("s3-before", "web-2az-ja", BLOCK_LAST),
-        ("aux-to-side", "aux-to-side", CHOICES),
-        ("endpoint-3az-en", "endpoint-3az-en", CHOICES),
-        ("endpoint-3az-ja", "endpoint-3az-ja", CHOICES),
-        ("endpoint-ja", "endpoint-ja", CHOICES),
-        ("hole-s3", "hole-s3", CHOICES),
-        ("web-2az-en", "web-2az-en", CHOICES),
-        ("web-3az-en", "web-3az-en", CHOICES),
-        ("web-attach-en", "web-attach-en", CHOICES),
-        ("readers", "fewer-readers", CHOICES),
-        ("natsingle", "web-3az-ja-single", CHOICES),
-        ("samerow", "mix-same-row", CHOICES),
-        ("shared", "mix-shared", CHOICES),
-        ("longnames", "mix-long", CHOICES),
+        ("aux-to-side", "aux-to-side", DRAWN),
+        ("endpoint-3az-en", "endpoint-3az-en", DRAWN),
+        ("endpoint-3az-ja", "endpoint-3az-ja", DRAWN),
+        ("endpoint-ja", "endpoint-ja", DRAWN),
+        ("hole-s3", "hole-s3", DRAWN),
+        ("web-2az-en", "web-2az-en", DRAWN),
+        ("web-3az-en", "web-3az-en", DRAWN),
+        ("web-attach-en", "web-attach-en", DRAWN),
+        ("readers", "fewer-readers", DRAWN),
+        ("natsingle", "web-3az-ja-single", DRAWN),
+        ("samerow", "mix-same-row", DRAWN),
+        ("shared", "mix-shared", DRAWN),
+        ("longnames", "mix-long", DRAWN),
     ];
 
     // With the folder given, fails if a sample cannot be laid out or a line breaks or leaves its draft.

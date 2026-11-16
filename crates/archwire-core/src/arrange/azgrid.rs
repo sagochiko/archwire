@@ -30,8 +30,6 @@ type Pt = (i32, i32);
 const ICON: i32 = 60;
 pub(super) const VPC_FRAME: &str = "vpc";
 const VPC_NAME: &str = "VPC";
-/// From the VPC frame's top to the first thing in it, past the frame's name.
-const VPC_HEAD: i32 = 50;
 /// From the VPC frame's sides to the zones, and from the zones to its bottom.
 const VPC_SIDE: i32 = 30;
 const VPC_TAIL: i32 = 20;
@@ -54,6 +52,9 @@ pub(super) const PAD: i32 = 20;
 const ROOM: i32 = 8;
 /// The distance between two tracks in a band: a line's label and some room.
 pub(super) const TRACK_STEP: i32 = 25;
+/// The distance between two tracks, and from a track to the band's sides, in a band no label sits
+/// in: room, and the line's own width.
+pub(super) const TRACK_EDGE: i32 = ROOM + 2;
 /// The least distance between the tops of two rows in a subnet, and from a band's last track to the row below.
 const ROW_MIN: i32 = 210;
 const ENTRY_ROOM: i32 = 50;
@@ -207,13 +208,14 @@ struct Down {
     h: i32,
 }
 
-/// A line that does not keep clear across: the semantic edge, what it passes (a part's or a
-/// frame's id), and how much further from it the line has to be.
+/// Something that does not keep clear across: a line (its id) or a part, what it comes too near
+/// (a part's or a frame's id), how much further from it it has to be, and what for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Clash {
-    edge: usize,
+    what: String,
     against: String,
     short: i32,
+    room: &'static str,
 }
 
 /// What has to change for the lines to keep clear: wider zones, a wider gap between them, or the
@@ -255,11 +257,9 @@ pub(crate) fn lay_vpc(model: &Model, rules: &Rules, parts: &[usize], axis: Axis,
     let mut last: Option<Clash> = None;
     let mut tries = 0;
     while let Some((fix, clash)) = g.conflict(&across, &runs) {
-        let stuck = last.as_ref().is_some_and(|l| l.edge == clash.edge && l.against == clash.against && clash.short == l.short);
+        let stuck = last.as_ref().is_some_and(|l| l.what == clash.what && l.against == clash.against && clash.short == l.short);
         if stuck || tries == TRIES {
-            let e = &model.edges[clash.edge];
-            let line = edge_id(&e.from, &e.to);
-            return Err(vec![failed(&line, format!("{line} and {}", clash.against), "the line passing over it")]);
+            return Err(vec![failed(&clash.what, format!("{} and {}", clash.what, clash.against), clash.room)]);
         }
         match fix {
             Fix::Wider => extra += 2,
@@ -604,6 +604,14 @@ impl<'a> Grid<'a> {
         out
     }
 
+    /// Whether the parts spanning the zones sit in the public tier's row of copies: on the
+    /// boundary between the zones, unless the entry gateway's line comes into them from the side,
+    /// where it would run along that row.
+    fn shares_row(&self, runs: &[Run]) -> bool {
+        let from_side = runs.iter().any(|r| self.place(r.from) == Some(Place::Entry) && self.place(r.to) == Some(Place::Span) && matches!(r.entry, Side::Left | Side::Right));
+        self.spans().next().is_some() && !self.above() && self.groups.iter().any(|g| g.place == Place::Public) && !from_side
+    }
+
     /// Whether a part sits in the column of two copies of one zone, in a row between theirs.
     fn in_column_between(&self, f: usize, t: usize) -> bool {
         let (gf, gt) = (self.group(f), self.group(t));
@@ -797,7 +805,19 @@ impl<'a> Grid<'a> {
         }
         // How much further a line at x has to be from a part centred at c, half as wide as h.
         let short = |x: i32, c: i32, h: i32| h + ROOM - (x - c).abs();
-        let clash = |r: &Run, against: String, by: i32| Clash { edge: r.edge, against, short: by };
+        let line = |r: &Run| edge_id(&self.model.edges[r.edge].from, &self.model.edges[r.edge].to);
+        let clash = |r: &Run, against: String, by: i32| Clash { what: line(r), against, short: by, room: "the line passing over it" };
+        // Parts spanning the zones and public copies sharing their row keep their names apart.
+        if self.shares_row(runs) {
+            let spans: Vec<(i32, i32, String)> = self.spans().zip(&a.spans).map(|(g, &x)| (x, g.half, id(g.nodes[0]))).collect();
+            let copies = self.groups.iter().filter(|g| g.place == Place::Public).flat_map(|g| g.nodes.iter().map(move |&i| (a.az_x(self.az(i)) + a.pubs[g.col], g.half, i)));
+            for (x, h, i) in copies {
+                if let Some((c, sh, s)) = spans.iter().find(|&&(c, sh, _)| (x - c).abs() < h + sh + NAME_ROOM) {
+                    let by = h + sh + NAME_ROOM - (x - c).abs();
+                    return Some((Fix::Wider, Clash { what: s.clone(), against: id(i), short: by, room: "its name apart from the part beside it" }));
+                }
+            }
+        }
         for r in runs.iter().filter(|r| r.drawn) {
             let pass = match (r.kind, self.place(r.to)) {
                 (Kind::NatOut, _) => Some(self.cx(a, r.from)),
@@ -857,10 +877,10 @@ impl<'a> Grid<'a> {
     /// the entry gateway's row when they run down, the row above the zones, then in every zone the
     /// public tier, the band above the private tier and the private rows, each with its band below.
     fn down(&self, runs: &[Run]) -> Down {
-        let count = |b: Band| runs.iter().filter(|r| r.band == Some(b) && r.track.is_some()).count() as i32;
+        let count = |b: Band| tracks_in(runs, b);
         let names = |p: Place| self.groups.iter().filter(|g| g.place == p).map(|g| g.name).max().unwrap_or(ICON);
         let mut d = Down::default();
-        let mut y = VPC_HEAD;
+        let mut y = self.head();
         let nats = count(Band::Nat);
         if nats > 0 {
             d.nat_top = y;
@@ -890,8 +910,14 @@ impl<'a> Grid<'a> {
                 last = d.span_y + names(Place::Span);
             }
             if pub_parts {
-                d.pub_row = if last == top { top + SUB_HEAD } else { last + ROW_GAP };
-                last = d.pub_row + names(Place::Public);
+                d.pub_row = if self.shares_row(runs) {
+                    d.span_y
+                } else if last == top {
+                    top + SUB_HEAD
+                } else {
+                    last + ROW_GAP
+                };
+                last = last.max(d.pub_row + names(Place::Public));
             }
             let bottom = if last == top { top + EMPTY_SUB } else { last + SUB_TAIL };
             d.public = Some((top, bottom));
@@ -899,7 +925,8 @@ impl<'a> Grid<'a> {
         }
         if self.private {
             let fans = count(Band::Fan);
-            d.fan = (cur, cur + SUB_GAP.max((fans + 1) * TRACK_STEP));
+            let pitch = self.fan_pitch(runs);
+            d.fan = (cur, cur + SUB_GAP.max(2 * pitch + (fans - 1).max(0) * pitch));
             let top = d.fan.1;
             let mut y = top + SUB_HEAD;
             let mut end = y;
@@ -932,11 +959,14 @@ impl<'a> Grid<'a> {
         d
     }
 
-    fn track_y(&self, d: &Down, r: &Run) -> Option<i32> {
+    fn track_y(&self, d: &Down, runs: &[Run], r: &Run) -> Option<i32> {
         let k = r.track? as i32;
         Some(match r.band? {
             Band::Nat => d.nat_top + k * TRACK_STEP,
-            Band::Fan => d.fan.0 + (k + 1) * TRACK_STEP,
+            Band::Fan => {
+                let pitch = self.fan_pitch(runs);
+                d.fan.0 + (d.fan.1 - d.fan.0 - (tracks_in(runs, Band::Fan) - 1) * pitch) / 2 + k * pitch
+            }
             Band::Below(row) => d.below[row] + (k + 1) * TRACK_STEP,
         })
     }
@@ -993,7 +1023,7 @@ impl<'a> Grid<'a> {
         }
         let mut drawn: Vec<Vec<Drawn>> = Vec::new();
         for r in &runs {
-            let ty = self.track_y(d, r);
+            let ty = self.track_y(d, &runs, r);
             let base = |points: Vec<Pt>, gate: Option<Pt>| Drawn { exit: r.exit, entry: r.entry, exit_pos: r.exit_pos, entry_pos: r.entry_pos, points, gate, track: ty };
             let inner_end = |i: usize| self.place(i).is_some();
             let (e, n) = (inner_end(r.from).then(|| port(r.from, r.exit, r.exit_pos)), inner_end(r.to).then(|| port(r.to, r.entry, r.entry_pos)));
@@ -1143,14 +1173,29 @@ impl<'a> Grid<'a> {
             .into_iter()
             .map(|(b, tracks)| {
                 let (lo, hi) = match b {
-                    Band::Nat => (d.nat_top, d.nat_top + (tracks.len() as i32 - 1) * TRACK_STEP),
+                    Band::Nat => (d.nat_top, d.nat_top + (tracks_in(&runs, b) - 1) * TRACK_STEP),
                     Band::Fan => d.fan,
-                    Band::Below(row) => (d.below[row], d.below[row] + (tracks.len() as i32 + 1) * TRACK_STEP),
+                    Band::Below(row) => (d.below[row], d.below[row] + (tracks_in(&runs, b) + 1) * TRACK_STEP),
                 };
                 Lane { frame: VPC_FRAME.into(), horizontal: true, from: 0, to: a.vpc_w, lo, hi, tracks }
             })
             .collect();
         Placed { w: a.vpc_w, h: d.h, icons, frames, inside, crossing, lanes }
+    }
+
+    /// From the VPC frame's top to the first thing in it: past the frame's name, with room.
+    fn head(&self) -> i32 {
+        let name = frame_name_box(&Frame { id: String::new(), kind: FrameKind::Vpc, label: VPC_NAME.into(), rect: Rect { x: 0, y: 0, w: 0, h: 0 }, parent: None });
+        name.h + ROOM
+    }
+
+    /// How far apart the tracks of the band above the private tier are, and how far they keep
+    /// from its sides (the subnet frames and the private subnet's name): room and the line's own
+    /// width, or a label's height when a line in it, coming from outside along the outside axis,
+    /// may carry its label on its track.
+    fn fan_pitch(&self, runs: &[Run]) -> i32 {
+        let labelled = runs.iter().any(|r| r.band == Some(Band::Fan) && r.track.is_some() && r.kind == Kind::InTrack);
+        if labelled { TRACK_STEP } else { TRACK_EDGE }
     }
 
     /// The middle of the band a line not drawn would use.
@@ -1214,6 +1259,11 @@ fn reach_order(model: &Model) -> Vec<usize> {
         }
     }
     order
+}
+
+/// How many tracks the drawn lines of a band take.
+fn tracks_in(runs: &[Run], band: Band) -> i32 {
+    runs.iter().filter(|r| r.band == Some(band)).filter_map(|r| r.track).map(|t| t as i32 + 1).max().unwrap_or(0)
 }
 
 /// Positions along one side for `n` lines, as the router spreads them.
@@ -1413,6 +1463,66 @@ pub(in crate::arrange) mod tests {
         m.nodes.insert(at + 1, Node { id: "alb.b".into(), part: "alb.b".into(), tag: Some("b".into()), ..alb });
         m.edges.push(edge("igw", "alb.b", Rel::Main, "https", None));
         m
+    }
+
+    /// The web example with two zones, laid out with the load balancer on the zones' boundary.
+    fn on_the_boundary(axis: Axis) -> Placement {
+        arrange(&grid(WEB_CASES[0].1).0, &Rules::builtin(), axis, CHOICES[2]).unwrap()
+    }
+
+    // Fails if the load balancer on the boundary takes a row of its own when the entry gateway's
+    // line comes into it from above, or shares the NAT gateways' row when that line runs along it.
+    #[test]
+    fn the_boundary_row_holds_the_public_copies_when_entered_from_above() {
+        let down = on_the_boundary(Axis::Down);
+        let y = |p: &Placement, id: &str| icon(p, id).rect.y;
+        assert_eq!((y(&down, "alb"), y(&down, "nat-1c")), (y(&down, "nat-1a"), y(&down, "nat-1a")));
+        let right = on_the_boundary(Axis::Right);
+        assert!(y(&right, "alb") < y(&right, "nat-1a"), "{} {}", y(&right, "alb"), y(&right, "nat-1a"));
+        assert_eq!(y(&right, "igw"), y(&right, "alb"));
+    }
+
+    // Fails if the band above the private tier keeps a label's height for lines whose labels sit beside them.
+    #[test]
+    fn a_band_without_labels_is_as_tall_as_its_tracks() {
+        let p = on_the_boundary(Axis::Down);
+        let (pubf, pri) = (frame(&p, "pub-1a"), frame(&p, "pri-1a"));
+        let fan = p.lanes.iter().find(|l| l.lo == pubf.y + pubf.h).expect("the band above the private tier");
+        // Two fan lines, one track each: 10 (room 8 and the line's width 2) above, between and below.
+        assert_eq!(fan.tracks.len(), 2, "{fan:?}");
+        assert_eq!((fan.hi - fan.lo, pri.y - fan.lo), (30, 30));
+        let mut at: Vec<i32> = fan.tracks.iter().map(|t| t.1).collect();
+        at.sort();
+        assert_eq!(at, [fan.lo + 10, fan.lo + 20]);
+    }
+
+    // Fails if the first thing in the VPC is not set just past the frame's name, or if the VPC
+    // keeps the Region's margin for parts instead of the inset of a frame in a frame.
+    #[test]
+    fn the_vpc_sits_close_in_its_frames() {
+        let p = on_the_boundary(Axis::Down);
+        let (region, vpc, igw) = (frame(&p, "region"), frame(&p, "vpc"), icon(&p, "igw").rect);
+        // The name box is 25 high; 8 of room below it.
+        assert_eq!(igw.y - vpc.y, 33);
+        // Across: the inset of a frame in a frame. Down: the rank also holds S3, so the Region's 60.
+        assert_eq!((vpc.x - region.x, vpc.y - region.y), (30, 60));
+    }
+
+    // Fails if a gap down the page keeps its width across the page instead of the labels' height.
+    #[test]
+    fn gaps_down_the_page_hold_their_labels() {
+        let p = on_the_boundary(Axis::Down);
+        let (user, cloud, cf, region) = (icon(&p, "user"), frame(&p, "aws-cloud"), icon(&p, "cloudfront"), frame(&p, "region"));
+        // The users start 40 from the top. The lines out of the users and out of CloudFront carry
+        // one-line labels, 13 high, and 40 more of room.
+        assert_eq!(user.rect.y, 40);
+        let below = |i: &Icon| {
+            let n = name_area(i);
+            n.y + n.h
+        };
+        assert_eq!((cloud.y - below(user), region.y - below(cf)), (53, 53));
+        // The global rank starts past the AWS Cloud frame's name (25) and 20 of room.
+        assert_eq!(cf.rect.y - cloud.y, 45);
     }
 
     // Fails if a line the widening cannot clear is left through a part and the layout returned anyway.
