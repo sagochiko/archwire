@@ -1968,6 +1968,77 @@ pub(in crate::arrange) mod tests {
         }
     }
 
+    /// Lays `m` out along `axis` and draws its lines from the drafts: the layout must hold, no
+    /// line may come out broken, and every semantic edge must be in exactly one drawn line.
+    fn lays_out_cleanly(name: &str, m: &Model, d: &Diagnostics, axis: Axis) -> Placement {
+        let r = Rules::builtin();
+        let p = arrange(m, &r, axis).unwrap_or_else(|e| panic!("{name} {axis:?}: {e:?}"));
+        let (_, notes) = crate::arranged_drawio(m, d, &r, axis).unwrap();
+        let broken: Vec<&String> = notes.iter().filter(|n| n.contains("edge-")).collect();
+        assert!(broken.is_empty(), "{name} {axis:?}: {broken:?}");
+        let mut edges: Vec<usize> = crate::lines::gather(m, &p.layout, &r).0.iter().flat_map(|l| l.edges.clone()).collect();
+        edges.sort_unstable();
+        assert_eq!(edges, (0..m.edges.len()).collect::<Vec<_>>(), "{name} {axis:?}");
+        p
+    }
+
+    // Fails if three zones with Aurora copies in only two of them overlap, break, leave a draft or drop a line.
+    #[test]
+    fn three_zones_with_one_reader_lay_out_cleanly() {
+        let (m, d) = grid(FEWER_READERS);
+        for axis in [Axis::Right, Axis::Down] {
+            lays_out_cleanly("fewer readers", &m, &d, axis);
+        }
+    }
+
+    // Fails if three zones with one NAT gateway overlap, break, leave a draft or drop a line.
+    #[test]
+    fn three_zones_with_one_nat_lay_out_cleanly() {
+        let (m, d) = grid(&WEB_CASES[2].1.replace("  azs: 3\n", "  azs: 3\n  nat: single\n"));
+        assert_eq!(m.nodes.iter().filter(|n| n.part == "nat").count(), 1);
+        for axis in [Axis::Right, Axis::Down] {
+            lays_out_cleanly("one NAT gateway", &m, &d, axis);
+        }
+    }
+
+    // Fails if the web example with WAF and ACM overlaps, breaks, leaves a draft or drops a line.
+    #[test]
+    fn web_with_waf_and_acm_lays_out_cleanly() {
+        let (m, d) = grid(WEB_CASES[9].1);
+        for axis in [Axis::Right, Axis::Down] {
+            lays_out_cleanly("web-attach-en", &m, &d, axis);
+        }
+    }
+
+    // Fails if four Lambda functions with long names and two CloudWatch parts, running down,
+    // overlap, break, leave a draft or drop a line.
+    #[test]
+    fn many_long_named_functions_lay_out_cleanly_down() {
+        let src = "flows:\n  - user -> apigateway(http) -> lambda.resize-images-fast -> dynamodb.images\n  - apigateway -> lambda.thumbnails-generator -> dynamodb.images\n  - apigateway -> lambda.metadata-extractor -> dynamodb.meta\n  - apigateway -> lambda.notification-sender -> dynamodb.meta\n  - lambda.resize-images-fast ~> cloudwatch.app\n  - lambda.thumbnails-generator ~> cloudwatch.app\n  - lambda.metadata-extractor ~> cloudwatch.app\n  - lambda.metadata-extractor ~> cloudwatch.audit\n  - lambda.notification-sender ~> cloudwatch.audit\nset:\n  direction: down\n";
+        let r = Rules::builtin();
+        let (m, d) = crate::flow_infer::infer(&crate::def::parse(src).unwrap(), &r);
+        let m = m.unwrap_or_else(|| panic!("{:?}", d.errors));
+        assert_eq!(m.nodes.iter().filter(|n| n.service == "lambda").count(), 4);
+        lays_out_cleanly("long names", &m, &d, Axis::Down);
+    }
+
+    // Fails if writing a side line before the main lines moves a part on the main lines.
+    #[test]
+    fn side_line_order_moves_no_main_part() {
+        let src = WEB_CASES[0].1;
+        let moved = src.replace("  - ecs ~> cloudwatch\n", "").replace("flows:\n", "flows:\n  - ecs ~> cloudwatch\n");
+        assert_ne!(src, moved);
+        let ((a, da), (b, db)) = (grid(src), grid(&moved));
+        for axis in [Axis::Right, Axis::Down] {
+            let (pa, pb) = (lays_out_cleanly("web-2az-ja", &a, &da, axis), lays_out_cleanly("side line first", &b, &db, axis));
+            let main: Vec<&str> = a.edges.iter().filter(|e| e.rel == Rel::Main).flat_map(|e| [e.from.as_str(), e.to.as_str()]).collect();
+            assert!(main.contains(&"alb") && main.contains(&"ecs-1a"));
+            for id in main {
+                assert_eq!(icon(&pa, id).rect, icon(&pb, id).rect, "{axis:?} {id}");
+            }
+        }
+    }
+
     // Fails if a line the router draws from the new layout's drafts comes out broken: through a
     // part, a name or another line, or off its draft or its track.
     #[test]
