@@ -556,4 +556,82 @@ mod tests {
         }
         assert!(bent >= 4, "{bent}");
     }
+
+    /// The errors of a definition that stops: no diagram, exit code 1, and each error's code, `at` and `got`.
+    fn stops(src: &str) -> Vec<(String, Option<String>, Option<String>)> {
+        let out = compile(src);
+        assert!(out.drawio.is_none(), "{src}");
+        assert_eq!(out.diagnostics.exit_code(), 1, "{src}");
+        out.diagnostics.errors.iter().map(|e| (e.code.clone(), e.at.clone(), e.got.clone())).collect()
+    }
+
+    fn unsupported(at: &str, got: Option<&str>) -> (String, Option<String>, Option<String>) {
+        ("UNSUPPORTED".to_string(), Some(at.to_string()), got.map(str::to_string))
+    }
+
+    const ID_CLASH: &str = "flows:\n  - user -> apigateway(http) -> lambda.api -> aurora\n  - apigateway -> lambda.api-1a -> dynamodb\n";
+    const TWO_WEBS: &str = "flows:\n  - user -> cloudfront -> alb.web -> ecs.web -> aurora.web\n  - user -> alb.admin -> ecs.admin -> aurora.admin\n";
+    const TWIN_APPS: &str = "flows:\n  - user -> cloudfront -> alb -> ecs.web -> aurora.web\n  - alb -> ecs.admin -> aurora.admin\n";
+    const ONE_FUNCTION_THREE_WAYS: [&str; 3] = [
+        "flows:\n  - user -> apigateway(http) -> lambda -> aurora\n  - lambda -> dynamodb\n  - lambda -> s3\n",
+        "flows:\n  - user -> apigateway(http) -> lambda -> aurora\n  - lambda -> s3\n  - lambda -> dynamodb\n",
+        "flows:\n  - lambda -> s3\n  - lambda -> dynamodb\n  - user -> apigateway(http) -> lambda -> aurora\n",
+    ];
+    const LOAD_BALANCER_ALONE: &str = "flows:\n  - user -> alb\n";
+
+    // Today a named function next to a part named like its zone copy stops, because the definition mixes VPC parts with separate services.
+    // Fails if a mixed definition is let through without an error.
+    #[test]
+    fn a_named_function_and_a_part_named_like_its_copy_stop() {
+        assert_eq!(stops(ID_CLASH), [unsupported("flows[0][1]", Some("apigateway"))]);
+    }
+
+    // Today VPC parts with a name after the dot stop, once for each place such a part is written.
+    // Fails if named VPC parts are let through without an error.
+    #[test]
+    fn named_vpc_parts_stop() {
+        let want = [
+            ("flows[0][2]", "alb.web"),
+            ("flows[0][3]", "ecs.web"),
+            ("flows[0][4]", "aurora.web"),
+            ("flows[1][1]", "alb.admin"),
+            ("flows[1][2]", "ecs.admin"),
+            ("flows[1][3]", "aurora.admin"),
+        ]
+        .map(|(at, got)| unsupported(at, Some(got)));
+        assert_eq!(stops(TWO_WEBS), want);
+    }
+
+    // Today named services behind one unnamed load balancer stop, once for each place a named part is written.
+    // Fails if named VPC parts are let through without an error.
+    #[test]
+    fn named_parts_under_one_balancer_stop() {
+        let want = [
+            ("flows[0][3]", "ecs.web"),
+            ("flows[0][4]", "aurora.web"),
+            ("flows[1][1]", "ecs.admin"),
+            ("flows[1][2]", "aurora.admin"),
+        ]
+        .map(|(at, got)| unsupported(at, Some(got)));
+        assert_eq!(stops(TWIN_APPS), want);
+    }
+
+    // Today a function reaching a database in a VPC stops in every line order, at the first separate service written.
+    // Fails if a mixed definition is let through for some order of its lines.
+    #[test]
+    fn a_function_reaching_a_database_stops_whatever_the_line_order() {
+        let want = [("flows[0][1]", "apigateway"), ("flows[0][1]", "apigateway"), ("flows[0][0]", "lambda")];
+        for (src, (at, got)) in ONE_FUNCTION_THREE_WAYS.iter().zip(want) {
+            assert_eq!(stops(src), [unsupported(at, Some(got))], "{src}");
+        }
+    }
+
+    // Today a load balancer with nothing behind it stops, because the main line from it to the containers is missing.
+    // Fails if a definition with only a load balancer is let through without an error.
+    #[test]
+    fn a_load_balancer_alone_stops() {
+        let errors = stops(LOAD_BALANCER_ALONE);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!((errors[0].0.as_str(), errors[0].1.as_deref()), ("UNSUPPORTED", Some("flows")));
+    }
 }
