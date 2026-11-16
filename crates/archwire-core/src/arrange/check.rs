@@ -175,8 +175,7 @@ mod tests {
         let r = crate::rules::Rules::builtin();
         let src = include_str!("../../../../tests/cases/web-2az-ja/def.yaml");
         let m = crate::infer::infer(&crate::def::parse(src).unwrap(), &r).0.unwrap();
-        let choices = super::super::Choices { span_row: super::super::SpanRow::AboveZones, block_order: super::super::BlockOrder::First };
-        let p = super::super::arrange(&m, &r, crate::model::Axis::Down, choices).unwrap();
+        let p = super::super::arrange(&m, &r, crate::model::Axis::Down).unwrap();
         let reps = crate::lines::gather(&m, &p.layout, &r).0.iter().map(|l| l.rep).collect();
         (m, p, reps)
     }

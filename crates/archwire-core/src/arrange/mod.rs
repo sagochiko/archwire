@@ -81,27 +81,9 @@ pub struct Placement {
     pub lanes: Vec<Lane>,
 }
 
-/// Layout choices that still have two forms each; a choice goes away once one form is settled on.
-#[derive(Debug, Clone, Copy)]
-pub struct Choices {
-    pub span_row: SpanRow,
-    pub block_order: BlockOrder,
-}
-
-/// Where a part spanning the Availability Zones goes.
-#[derive(Debug, Clone, Copy)]
-pub enum SpanRow {
-    /// In a row of its own above the zones.
-    AboveZones,
-    /// On the boundary between the zones when there are two.
-    OnBoundaryWithTwoZones,
-}
-
-/// Where the VPC goes among the outside parts of its rank.
-#[derive(Debug, Clone, Copy)]
-pub enum BlockOrder {
-    First,
-    Last,
+/// The axis a model is drawn along when its definition writes no direction: down, for every model.
+pub fn default_axis(_model: &Model) -> Axis {
+    Axis::Down
 }
 
 /// The layout, or LAYOUT_FAILED problems when a must-hold condition fails after laying out.
@@ -109,7 +91,10 @@ pub enum BlockOrder {
 /// The inside of a VPC is laid out on its own and then placed as one piece among the parts
 /// outside it. Once every part has its place, the lines are gathered as the router gathers them,
 /// and each band keeps the tracks of the lines that are drawn; a line that is not drawn keeps no track.
-pub fn arrange(model: &Model, rules: &Rules, axis: Axis, choices: Choices) -> Result<Placement, Vec<Problem>> {
+///
+/// A part spanning the zones sits on the boundary between them when there are two, else in a row
+/// of its own above them; the VPC comes first among the parts of its rank.
+pub fn arrange(model: &Model, rules: &Rules, axis: Axis) -> Result<Placement, Vec<Problem>> {
     let mut inside: Vec<usize> = Vec::new();
     for item in tree::tree(model) {
         if let Item::Frame(f) = item {
@@ -120,9 +105,9 @@ pub fn arrange(model: &Model, rules: &Rules, axis: Axis, choices: Choices) -> Re
     }
     let placed = match inside.is_empty() {
         true => None,
-        false => Some(azgrid::lay_vpc(model, rules, &inside, axis, choices)?),
+        false => Some(azgrid::lay_vpc(model, rules, &inside, axis)?),
     };
-    let piece = placed.as_ref().map(|p| layered::Piece { placed: p, first: matches!(choices.block_order, BlockOrder::First) });
+    let piece = placed.as_ref().map(|p| layered::Piece { placed: p });
     let mut placement = layered::layered(model, rules, axis, piece.as_ref());
     let mut problems = Vec::new();
     if placed.is_some() {
@@ -163,45 +148,48 @@ mod tests {
     use super::*;
     use crate::diag::Diagnostics;
 
-    /// The forms the diagrams are drawn in: spanning parts on the boundary between two zones, the
-    /// VPC first in its rank. The other two forms are each written once, to compare.
-    const DRAWN: Choices = Choices { span_row: SpanRow::OnBoundaryWithTwoZones, block_order: BlockOrder::First };
-    const SPAN_ROW_ABOVE: Choices = Choices { span_row: SpanRow::AboveZones, ..DRAWN };
-    const BLOCK_LAST: Choices = Choices { block_order: BlockOrder::Last, ..DRAWN };
-
-    /// The diagrams written for viewing: (file name stem, input name, choices). Each is written
-    /// with lines running right and with lines running down.
-    const SAMPLES: [(&str, &str, Choices); 21] = [
-        ("web-2az-ja", "web-2az-ja", DRAWN),
-        ("web-3az-ja", "web-3az-ja", DRAWN),
-        ("mix", "mix-min", DRAWN),
-        ("api-http-ja", "api-http-ja", DRAWN),
-        ("alb-above", "web-2az-ja", SPAN_ROW_ABOVE),
-        ("alb-boundary", "web-2az-ja", DRAWN),
-        ("s3-after", "web-2az-ja", DRAWN),
-        ("s3-before", "web-2az-ja", BLOCK_LAST),
-        ("aux-to-side", "aux-to-side", DRAWN),
-        ("endpoint-3az-en", "endpoint-3az-en", DRAWN),
-        ("endpoint-3az-ja", "endpoint-3az-ja", DRAWN),
-        ("endpoint-ja", "endpoint-ja", DRAWN),
-        ("hole-s3", "hole-s3", DRAWN),
-        ("web-2az-en", "web-2az-en", DRAWN),
-        ("web-3az-en", "web-3az-en", DRAWN),
-        ("web-attach-en", "web-attach-en", DRAWN),
-        ("readers", "fewer-readers", DRAWN),
-        ("natsingle", "web-3az-ja-single", DRAWN),
-        ("samerow", "mix-same-row", DRAWN),
-        ("shared", "mix-shared", DRAWN),
-        ("longnames", "mix-long", DRAWN),
+    /// The diagrams written for viewing: (file name stem, input name). Each is written with lines
+    /// running right and with lines running down.
+    const SAMPLES: [(&str, &str); 17] = [
+        ("web-2az-ja", "web-2az-ja"),
+        ("web-3az-ja", "web-3az-ja"),
+        ("mix", "mix-min"),
+        ("api-http-ja", "api-http-ja"),
+        ("aux-to-side", "aux-to-side"),
+        ("endpoint-3az-en", "endpoint-3az-en"),
+        ("endpoint-3az-ja", "endpoint-3az-ja"),
+        ("endpoint-ja", "endpoint-ja"),
+        ("hole-s3", "hole-s3"),
+        ("web-2az-en", "web-2az-en"),
+        ("web-3az-en", "web-3az-en"),
+        ("web-attach-en", "web-attach-en"),
+        ("readers", "fewer-readers"),
+        ("natsingle", "web-3az-ja-single"),
+        ("samerow", "mix-same-row"),
+        ("shared", "mix-shared"),
+        ("longnames", "mix-long"),
     ];
 
+    // Fails if a model that writes no direction is drawn along any axis but down, with a VPC or without.
+    #[test]
+    fn models_run_down_unless_written_otherwise() {
+        let r = Rules::builtin();
+        let mut models: Vec<Model> = inputs().into_iter().map(|(_, m, _)| m).collect();
+        for (_, src) in API_CASES {
+            models.push(crate::flow_infer::infer(&crate::def::parse(src).unwrap(), &r).0.unwrap());
+        }
+        for m in &models {
+            assert_eq!(default_axis(m), Axis::Down);
+        }
+    }
+
     // With the folder given, fails if a sample cannot be laid out or a line breaks or leaves its draft.
-    /// With `ARCHWIRE_PROTO_OUT=<dir>`, writes each sample as `<dir>/<name>-right.drawio` and
+    /// With `ARCHWIRE_SAMPLE_OUT=<dir>`, writes each sample as `<dir>/<name>-right.drawio` and
     /// `<dir>/<name>-down.drawio`, for the diagram checker, and `<dir>/notes.tsv` with the router's
     /// notes of each diagram. Without it, does nothing.
     #[test]
-    fn prototype_samples() {
-        let Some(dir) = std::env::var_os("ARCHWIRE_PROTO_OUT") else { return };
+    fn sample_diagrams() {
+        let Some(dir) = std::env::var_os("ARCHWIRE_SAMPLE_OUT") else { return };
         // A relative folder is taken from the workspace root, where the command is typed.
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -213,11 +201,11 @@ mod tests {
         }
         let mut report = String::from("diagram\tnotes\tbroken\tall notes\n");
         let mut broken_files = Vec::new();
-        for (stem, input, choices) in SAMPLES {
+        for (stem, input) in SAMPLES {
             let (_, m, d) = models.iter().find(|(n, _, _)| n == input).unwrap_or_else(|| panic!("no input {input}"));
             for (axis, way) in [(Axis::Right, "right"), (Axis::Down, "down")] {
                 let file = format!("{stem}-{way}");
-                let (x, notes) = crate::arranged_drawio(m, d, &r, axis, choices).unwrap_or_else(|e| panic!("{file}: {e:?}"));
+                let (x, notes) = crate::arranged_drawio(m, d, &r, axis).unwrap_or_else(|e| panic!("{file}: {e:?}"));
                 let broken: Vec<&String> = notes.iter().filter(|n| n.contains("edge-")).collect();
                 report.push_str(&format!("{file}\t{}\t{}\t{notes:?}\n", notes.len(), broken.len()));
                 if !broken.is_empty() {

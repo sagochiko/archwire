@@ -99,9 +99,8 @@ pub(crate) fn arranged_drawio(
     diagnostics: &Diagnostics,
     rules: &Rules,
     axis: model::Axis,
-    choices: arrange::Choices,
 ) -> Result<(String, Vec<String>), Vec<Problem>> {
-    let p = arrange::arrange(model, rules, axis, choices)?;
+    let p = arrange::arrange(model, rules, axis)?;
     let (wires, notes) = route::route_planned(model, &p.layout, rules, &p.lines);
     Ok((drawio::write(model, &p.layout, &wires, diagnostics, rules, false), notes))
 }

@@ -94,11 +94,9 @@ struct Block {
     vpc: Option<(i32, i32)>,
 }
 
-/// The inside of a VPC laid out as one piece, and where it goes among the parts of its rank.
+/// The inside of a VPC laid out as one piece. It comes first among the parts of its rank.
 pub(super) struct Piece<'a> {
     pub(super) placed: &'a Placed,
-    /// The VPC comes first among the parts of its rank, else last.
-    pub(super) first: bool,
 }
 
 /// The Region's parts on a main flow and the main lines between them.
@@ -700,17 +698,13 @@ fn flow_of(model: &Model, piece: Option<&Piece>, axis: Axis, room: i32) -> Flow 
         .filter(|&i| model.nodes[i].area == Area::Region && on_main(model, &model.nodes[i].id) && !(piece.is_some() && only_inside(model, i)))
         .collect();
     let index = |id: &str| model.nodes.iter().position(|n| n.id == id);
-    if let Some(p) = piece {
+    if piece.is_some() {
         let crosses = model.edges.iter().any(|e| {
             let (Some(a), Some(b)) = (index(&e.from), index(&e.to)) else { return false };
             e.rel == Rel::Main && inside(model, a) != inside(model, b)
         });
         if crosses {
-            if p.first {
-                parts.insert(0, vpc_id);
-            } else {
-                parts.push(vpc_id);
-            }
+            parts.insert(0, vpc_id);
         }
     }
     let unit = |i: usize| if piece.is_some() && inside(model, i) { vpc_id } else { i };
@@ -967,18 +961,16 @@ fn bottom(r: Rect) -> i32 {
 pub(super) mod tests {
     use super::*;
     use super::super::check::{check, overlaps};
-    use super::super::{arrange, BlockOrder, Choices, SpanRow};
+    use super::super::arrange;
     use crate::measure::{NAME_CHARS, NAME_DRAWN, NAME_WIDE_CHARS, NAME_WIDE_DRAWN};
     use crate::route::{port_point, route_planned, Wire};
-
-    pub(in crate::arrange) const CHOICES: Choices = Choices { span_row: SpanRow::AboveZones, block_order: BlockOrder::First };
 
     /// The model of a definition without a VPC, and its layout with lines running along `axis`.
     pub(in crate::arrange) fn arranged(src: &str, axis: Axis) -> (Model, Placement) {
         let r = Rules::builtin();
         let (m, d) = crate::flow_infer::infer(&crate::def::parse(src).unwrap(), &r);
         let m = m.unwrap_or_else(|| panic!("{:?}", d.errors));
-        let p = arrange(&m, &r, axis, CHOICES).unwrap_or_else(|e| panic!("{e:?}\n{src}"));
+        let p = arrange(&m, &r, axis).unwrap_or_else(|e| panic!("{e:?}\n{src}"));
         (m, p)
     }
     pub(in crate::arrange) fn placed(src: &str) -> (Model, Placement) {
@@ -1633,7 +1625,7 @@ set:
                 failed.push(format!("inference: {:?} {:?}\n{src}", d.errors, d.holes));
                 continue;
             };
-            let p = match arrange(&m, &r, Axis::Right, CHOICES) {
+            let p = match arrange(&m, &r, Axis::Right) {
                 Ok(p) => p,
                 Err(e) => {
                     failed.push(format!("place: {e:?}\n{src}"));
@@ -1747,7 +1739,7 @@ set:
         let r = Rules::builtin();
         let (mut ok, mut failed) = (Vec::new(), Vec::new());
         for (src, m) in down_inputs() {
-            match arrange(&m, &r, Axis::Down, CHOICES) {
+            match arrange(&m, &r, Axis::Down) {
                 Ok(p) => ok.push((src, m, p)),
                 Err(e) => failed.push(format!("{e:?}\n{src}")),
             }
@@ -1814,7 +1806,7 @@ set:
         let r = Rules::builtin();
         for (name, src) in API_CASES {
             let (m, d) = crate::flow_infer::infer(&crate::def::parse(src).unwrap(), &r);
-            let (x, _) = crate::arranged_drawio(&m.unwrap(), &d, &r, Axis::Down, CHOICES).unwrap();
+            let (x, _) = crate::arranged_drawio(&m.unwrap(), &d, &r, Axis::Down).unwrap();
             let shapes: Vec<&str> = x.lines().filter(|l| l.contains("mxgraph.aws4.") && l.contains("vertex=\"1\"") && !l.contains("mxgraph.aws4.group")).collect();
             assert!(!shapes.is_empty(), "{name}");
             for s in shapes {
