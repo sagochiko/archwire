@@ -206,7 +206,15 @@ fn gates_kept(model: &Model, placement: &Placement) -> Vec<Problem> {
             (None, Some(i)) => port_of(i, c.inner_side, c.inner_pos),
             (None, None) => continue,
         };
+        // Straight away from the side, and into the frame.
         let square = if on_x { next.1 == gy && next.0 != gx } else { next.0 == gx && next.1 != gy };
+        let inward = match (on_x, gx == f.x, gy == f.y) {
+            (true, true, _) => next.0 > gx,
+            (true, false, _) => next.0 < gx,
+            (false, _, true) => next.1 > gy,
+            (false, _, false) => next.1 < gy,
+        };
+        let square = square && inward;
         if !square {
             out.push(failed(&line, line.clone(), &format!("crossing the side at its gate on {}", c.frame)));
         }
@@ -214,22 +222,29 @@ fn gates_kept(model: &Model, placement: &Placement) -> Vec<Problem> {
     out
 }
 
-/// A main line between two parts outside every VPC runs along its axis: from left to right when
-/// lines run right, from top to bottom when they run down. Lines with an end inside a VPC are
-/// laid out by the VPC's own arrangement.
+/// A main line runs along its axis: from left to right when lines run right, from top to bottom
+/// when they run down. The VPC stands as one part among the parts outside it, so an end inside
+/// it is taken where the VPC's frame starts. Lines with both ends inside are laid out by the
+/// VPC's own arrangement and left out. A part joined to the VPC's parts alone sits right of the
+/// VPC, level with a row inside it, so it starts past the VPC's frame along either axis and its
+/// lines need no exception.
 fn along_the_axis(model: &Model, placement: &Placement) -> Vec<Problem> {
     let layout = &placement.layout;
-    let inside = |id: &str| model.nodes.iter().find(|n| n.id == id).is_none_or(|n| matches!(n.area, Area::VpcEdge | Area::Subnet(_)));
+    let index = |id: &str| model.nodes.iter().position(|n| n.id == id);
+    let inside = |i: usize| matches!(model.nodes[i].area, Area::VpcEdge | Area::Subnet(_));
+    let vpc = layout.frames.iter().find(|f| f.id == VPC_FRAME).map(|f| f.rect);
     let mut out = Vec::new();
     for pl in &placement.lines {
         let e = &model.edges[pl.edge];
-        if e.rel != Rel::Main || inside(&e.from) || inside(&e.to) {
+        let (Some(f), Some(t)) = (index(&e.from), index(&e.to)) else { continue };
+        if e.rel != Rel::Main || (inside(f) && inside(t)) {
             continue;
         }
-        let (Some(a), Some(b)) = (layout.icons.iter().find(|i| i.id == e.from), layout.icons.iter().find(|i| i.id == e.to)) else { continue };
+        let place = |i: usize| if inside(i) { vpc } else { layout.icons.iter().find(|ic| ic.id == model.nodes[i].id).map(|ic| ic.rect) };
+        let (Some(a), Some(b)) = (place(f), place(t)) else { continue };
         let ahead = match pl.axis {
-            Axis::Right => a.rect.x < b.rect.x,
-            Axis::Down => a.rect.y < b.rect.y,
+            Axis::Right => a.x < b.x,
+            Axis::Down => a.y < b.y,
         };
         if !ahead {
             let line = edge_id(&e.from, &e.to);
@@ -271,8 +286,8 @@ pub(crate) fn fixed_ends_apart(model: &Model, placement: &Placement, drawn: &[us
 pub(crate) fn bands_kept(model: &Model, placement: &Placement, bands: &[Lane], drawn: &[usize], needs: &[usize]) -> Vec<Problem> {
     let mut out = Vec::new();
     for &e in needs.iter().filter(|e| drawn.contains(e)) {
-        let Some(pl) = placement.lines.iter().find(|pl| pl.edge == e) else { continue };
-        let kept = !pl.tracks.is_empty() && pl.tracks.iter().all(|t| placement.lanes.iter().any(|l| l.tracks.contains(&(e, t.at))));
+        let pl = placement.lines.iter().find(|pl| pl.edge == e);
+        let kept = pl.is_some_and(|pl| !pl.tracks.is_empty() && pl.tracks.iter().all(|t| placement.lanes.iter().any(|l| l.tracks.contains(&(e, t.at)))));
         if !kept {
             let line = edge_id(&model.edges[e].from, &model.edges[e].to);
             out.push(failed(&line, line.clone(), "a band to run along"));
@@ -505,6 +520,62 @@ mod tests {
         icon_mut(&mut p.layout, "cloudfront").rect.x = u;
         let got = check(&m, &p);
         assert!(says(&got, "edge-user-to-cloudfront", "running along the axis"), "{got:?}");
+    }
+
+    // Fails if a main line crossing into the VPC is passed over when its outside end comes after
+    // the VPC along the axis: the VPC stands as one part there.
+    #[test]
+    fn check_finds_a_line_into_the_vpc_against_the_axis() {
+        let m = super::super::azgrid::tests::smallest_mix("lambda");
+        let mut p = super::super::arrange(&m, &crate::rules::Rules::builtin(), Axis::Right).unwrap();
+        assert_eq!(check(&m, &p), Vec::new());
+        // API Gateway moved past the VPC's far side, so the VPC comes first along the axis.
+        let v = frame_rect(&p, "vpc");
+        icon_mut(&mut p.layout, "apigateway").rect.x = v.x + v.w + 10;
+        let got = check(&m, &p);
+        assert!(says(&got, "edge-apigateway-to-lambda-1a", "running along the axis"), "{got:?}");
+    }
+
+    // Fails if a band the layout needs goes unnoticed when the drawn line's draft is gone too.
+    #[test]
+    fn check_finds_a_band_left_out_with_its_draft() {
+        let (m, p, reps) = with_a_vpc();
+        let needs = needs_of(&m);
+        let gone = p.lanes[0].clone();
+        let (e, _) = gone.tracks[0];
+        let mut left = p.clone();
+        left.lanes.retain(|l| *l != gone);
+        left.lines.retain(|pl| pl.edge != e);
+        let got = bands_kept(&m, &left, &left.lanes, &reps, &needs);
+        let id = edge_id(&m.edges[e].from, &m.edges[e].to);
+        assert!(got.iter().any(|x| x.at.as_deref() == Some(id.as_str()) && x.message.contains("a band to run along")), "{got:?}");
+    }
+
+    // Fails if a gate is taken as crossed at a right angle when the point next to it lies
+    // outside the frame, on the line through the gate.
+    #[test]
+    fn check_finds_a_line_coming_back_through_its_gate() {
+        let got = web_broken(|p| {
+            let v = frame_rect(p, "vpc");
+            let t = &mut p.crossings[0].through;
+            let (gx, gy) = t.gate;
+            // Straight out from the side the gate is on, 20 beyond the frame.
+            let outward = if gx == v.x {
+                (gx - 20, gy)
+            } else if gx == v.x + v.w {
+                (gx + 20, gy)
+            } else if gy == v.y {
+                (gx, gy - 20)
+            } else {
+                (gx, gy + 20)
+            };
+            if t.inner_is_start {
+                t.inner.push(outward);
+            } else {
+                t.inner.insert(0, outward);
+            }
+        });
+        assert!(got.iter().any(|e| e.code == "LAYOUT_FAILED" && e.message.contains("crossing the side at its gate")), "{got:?}");
     }
 
     // Fails if a drawn line that runs along a band is not found when its draft or its band has lost its track.

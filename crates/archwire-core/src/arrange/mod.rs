@@ -192,6 +192,52 @@ mod tests {
         }
     }
 
+    /// Lays out every generated definition among `defs` along each of `axes` and draws its
+    /// lines, without writing a diagram; returns, for each that fails, the definition, the axis
+    /// and the problems or the notes on lines that broke.
+    fn generated_failures(defs: &[String], axes: &[Axis]) -> Vec<String> {
+        let r = Rules::builtin();
+        let mut failed = Vec::new();
+        for src in defs {
+            for &axis in axes {
+                let (m, d) = grid(src);
+                match crate::arranged_drawio(&m, &d, &r, axis) {
+                    Ok((_, notes)) => {
+                        let broken: Vec<&String> = notes.iter().filter(|n| n.contains("edge-")).collect();
+                        if !broken.is_empty() {
+                            failed.push(format!("{axis:?}: {broken:?}\n{src}"));
+                        }
+                    }
+                    Err(e) => failed.push(format!("{axis:?}: {e:?}\n{src}")),
+                }
+            }
+        }
+        failed
+    }
+
+    // Fails if a generated definition with two zones fails to lay out or breaks a line, along either axis.
+    #[test]
+    fn generated_two_zone_definitions_draw_cleanly() {
+        let defs: Vec<String> = generated_with_a_vpc().into_iter().filter(|s| s.contains("  azs: 2\n")).collect();
+        assert_eq!(defs.len(), TWO_ZONE_DEFINITIONS);
+        let failed = generated_failures(&defs, &[Axis::Right, Axis::Down]);
+        assert!(failed.is_empty(), "{} of {} diagrams failed:\n{}", failed.len(), 2 * defs.len(), failed.join("\n"));
+    }
+
+    /// How many generated definitions have two zones.
+    const TWO_ZONE_DEFINITIONS: usize = 336;
+
+    // Fails if any generated definition fails to lay out or breaks a line, along either axis.
+    // It takes minutes, so it runs only when named:
+    //     cargo test -p archwire-core generated_definitions_all_draw_cleanly -- --ignored
+    #[test]
+    #[ignore]
+    fn generated_definitions_all_draw_cleanly() {
+        let defs = generated_with_a_vpc();
+        let failed = generated_failures(&defs, &[Axis::Right, Axis::Down]);
+        assert!(failed.is_empty(), "{} of {} diagrams failed:\n{}", failed.len(), 2 * defs.len(), failed.join("\n"));
+    }
+
     /// How many diagrams of the new layout `arranged_diagrams_for_the_checker` writes: twenty
     /// inputs, each along both axes.
     const ARRANGED: usize = 40;
