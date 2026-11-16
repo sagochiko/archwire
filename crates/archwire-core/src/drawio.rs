@@ -351,9 +351,39 @@ mod tests {
         assert!(!cell("s3.web").contains("rule="));
     }
 
+    // Fails if the writer leaves out a part that has no lines.
     #[test]
     fn a_part_with_no_wires_is_still_drawn() {
-        let x = crate::compile("flows:\n  - user -> alb -> ecs\n  - waf -- cloudfront\n").drawio.unwrap();
-        assert!(x.contains("id=\"waf\"") && x.contains("id=\"cloudfront\""));
+        use crate::diag::Diagnostics;
+        use crate::layout::{Icon, Layout, Rect};
+        use crate::model::{Model, Node};
+        use crate::rules::{Lang, Rules};
+        let rules = Rules::builtin();
+        let node = |id: &str| Node {
+            id: id.into(),
+            service: id.into(),
+            option: None,
+            az: None,
+            role: None,
+            added: false,
+            region: None,
+            part: id.into(),
+            tag: None,
+            area: crate::model::Area::Cloud,
+            undecided: false,
+        };
+        let model = Model {
+            region: "ap-northeast-1".into(),
+            azs: Vec::new(),
+            lang: Lang::En,
+            nodes: vec![node("waf"), node("cloudfront")],
+            edges: Vec::new(),
+            direction: None,
+        };
+        let icon = |id: &str, x: i32| Icon { id: id.into(), label: id.into(), lines: 1, rect: Rect { x, y: 0, w: 60, h: 60 }, parent: None };
+        let layout = Layout { frames: Vec::new(), icons: vec![icon("waf", 0), icon("cloudfront", 200)] };
+        let x = super::write(&model, &layout, &[], &Diagnostics::default(), &rules, false);
+        let has = |id: &str| x.split("<object ").any(|s| s.starts_with(&format!("id=\"{id}\"")));
+        assert!(has("waf") && has("cloudfront"), "{x}");
     }
 }

@@ -394,6 +394,16 @@ mod tests {
         assert_eq!(rules_of(&d, "region"), ["resources-inside-region-frame"]);
     }
 
+    // Fails if an association to a part off the main flows is accepted.
+    #[test]
+    fn a_web_acl_on_an_unreached_distribution_stops() {
+        let (m, d) = run("flows:\n  - user -> alb -> ecs\n  - waf -- cloudfront\n");
+        assert!(m.is_none());
+        assert_eq!(d.errors.len(), 1, "{:?}", d.errors);
+        assert_eq!(first(&d), ("UNSUPPORTED", Some("flows[1]"), Some("waf -- cloudfront")));
+        assert_eq!(d.errors[0].message, "`waf -- cloudfront` needs `cloudfront` on a main flow (->) from `user`");
+    }
+
     #[test]
     fn pairs_outside_the_list_stop() {
         for line in ["user -> s3", "cloudfront -> lambda", "dynamodb -> lambda", "lambda -> internet", "apigateway -- cognito", "waf -- apigateway"] {

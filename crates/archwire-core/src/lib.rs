@@ -50,14 +50,19 @@ pub fn compile(def_text: &str) -> Output {
         Ok(d) => d,
         Err(errors) => return stop(errors),
     };
-    // Which inference the definition goes through is decided here, once: the one for a VPC
-    // (Grid) or the one without (Flow). Both models are then laid out, routed and written the
-    // same way. A definition mixing VPC parts with services kept apart from them stops here.
-    let (model, diagnostics) = match engine::pick(&def, &rules) {
+    // Two shapes are not drawn yet and stop before the inference: a definition mixing VPC parts
+    // with services kept apart from them, and one with a VPC part that names any part after the
+    // dot. Every other definition, with a VPC or without, goes through the one inference.
+    match engine::pick(&def, &rules) {
         Err(errors) => return stop(errors),
-        Ok(Engine::Grid) => infer::infer(&def, &rules),
-        Ok(Engine::Flow) => flow_infer::infer(&def, &rules),
-    };
+        Ok(Engine::Grid) => {
+            if let Err(errors) = engine::named_vpc_parts(&def, &rules) {
+                return stop(errors);
+            }
+        }
+        Ok(Engine::Flow) => {}
+    }
+    let (model, diagnostics) = inference::infer(&def, &rules);
     let Some(model) = model else {
         return Output { drawio: None, diagnostics };
     };
@@ -560,12 +565,47 @@ mod tests {
         }
     }
 
-    // Today a load balancer with nothing behind it stops, because the main line from it to the containers is missing.
-    // Fails if a definition with only a load balancer is let through without an error.
+    // Fails if a definition whose VPC holds only public parts is stopped, or is drawn with a private subnet.
     #[test]
-    fn a_load_balancer_alone_stops() {
-        let errors = stops(LOAD_BALANCER_ALONE);
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        assert_eq!((errors[0].0.as_str(), errors[0].1.as_deref()), ("UNSUPPORTED", Some("flows")));
+    fn a_load_balancer_alone_is_drawn() {
+        let out = compile(LOAD_BALANCER_ALONE);
+        assert_eq!(out.diagnostics.exit_code(), 0, "{:?}", out.diagnostics.errors);
+        let x = out.drawio.unwrap();
+        assert!(x.contains("id=\"pub-1a\"") && x.contains("id=\"pub-1c\""), "{x}");
+        assert!(!x.contains("id=\"pri-"), "{x}");
+    }
+
+    // Fails if a connection left out of the list is let through.
+    #[test]
+    fn pairs_left_out_stop() {
+        let cases = [
+            ("flows:\n  - user -> alb -> ecs -> aurora\n  - alb -> aurora\n", "flows[1]", "alb -> aurora"),
+            ("flows:\n  - user -> cloudfront -> alb -> ecs\n  - cloudfront -> cloudwatch\n", "flows[1]", "cloudfront -> cloudwatch"),
+            (VPC_TEST_DEFINITIONS[25], "flows[1]", "alb -> aurora"),
+        ];
+        for (src, at, got) in cases {
+            assert_eq!(stops(src), [unsupported(at, Some(got))], "{src}");
+        }
+    }
+
+    // Fails if a line is drawn from a part the main flows from the user do not reach, or to such a part.
+    #[test]
+    fn parts_off_the_main_flow_stop() {
+        let cases = [
+            ("flows:\n  - user -> alb -> ecs\n  - aurora -> s3\n", "flows[1]", "aurora -> s3"),
+            ("flows:\n  - user -> alb -> ecs\n  - aurora ~> cloudwatch\n", "flows[1]", "aurora ~> cloudwatch"),
+            ("flows:\n  - user -> alb -> ecs\n  - waf -- cloudfront\n", "flows[1]", "waf -- cloudfront"),
+            ("flows:\n  - cloudfront -> alb -> ecs\n", "flows[0]", "cloudfront -> alb"),
+        ];
+        for (src, at, got) in cases {
+            assert_eq!(stops(src), [unsupported(at, Some(got))], "{src}");
+            assert!(compile(src).diagnostics.holes.is_empty(), "{src}");
+        }
+    }
+
+    // Fails if the check on named parts runs after the other checks, so their errors come with it.
+    #[test]
+    fn named_parts_in_a_vpc_definition_report_only_their_own_errors() {
+        assert_eq!(stops("flows:\n  - user -> cloudfrnt -> alb -> ecs.web\n"), [unsupported("flows[0][3]", Some("ecs.web"))]);
     }
 }
