@@ -1,7 +1,7 @@
 //! The must-hold conditions on a finished placement.
 
 use super::azgrid::{ROOM, VPC_FRAME};
-use super::layered::{CLOUD_FRAME, REGION_FRAME, ROW_STEP};
+use super::layered::{rows_too_close, CLOUD_FRAME, REGION_FRAME};
 use super::{Lane, Placement};
 use crate::def::Rel;
 use crate::ids::edge_id;
@@ -69,7 +69,7 @@ pub(crate) fn check(model: &Model, placement: &Placement) -> Vec<Problem> {
     for a in 0..icons.len() {
         for b in a + 1..icons.len() {
             let (ia, ib) = (&icons[a], &icons[b]);
-            if ia.rect.x == ib.rect.x && ia.parent == ib.parent && (ia.rect.y - ib.rect.y).abs() < ROW_STEP {
+            if rows_too_close(ia, ib) {
                 out.push(failed(&ia.id, format!("{} and {}", ia.id, ib.id), "keeping rows apart"));
             }
         }

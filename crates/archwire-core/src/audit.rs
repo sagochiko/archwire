@@ -2,7 +2,7 @@
 
 use crate::layout::{FrameKind, Layout, Rect};
 use crate::measure::{frame_name_box, name_area, Measure};
-use crate::model::Model;
+use crate::model::{Area, Model};
 use crate::path::grow;
 use crate::route::{Bend, Keep, LinePlan, Port, Side, Track, Wire};
 
@@ -270,10 +270,12 @@ fn audit_keeps_draft(w: &Wire, p: &LinePlan, layout: &Layout) -> bool {
 /// Lines that run over text (an icon's label, a frame's name, another line's label), over an
 /// icon they do not attach to, or on top of another line, or that break their drafts in `plans`
 /// (a kept part moved, a gate missed, a track left); a line is matched to the draft of the
-/// semantic edge it stands for. Ids in line order, each once.
+/// semantic edge it stands for. A line between two parts outside the VPC (neither in a subnet
+/// nor on the VPC's edge) that passes through the inside of a VPC frame is named too: it reads
+/// as a line to the parts in the VPC. Ids in line order, each once.
 /// The VPC layout is checked with its own measure of names, written apart from the router's; the
 /// layout without a VPC with the measure it is laid out by, which is never narrower than draw.io draws.
-pub(crate) fn audit(_model: &Model, layout: &Layout, wires: &[Wire], plans: &[LinePlan], measure: Measure) -> Vec<String> {
+pub(crate) fn audit(model: &Model, layout: &Layout, wires: &[Wire], plans: &[LinePlan], measure: Measure) -> Vec<String> {
     let icon_labels: Vec<(&str, Rect)> = layout
         .icons
         .iter()
@@ -319,6 +321,13 @@ pub(crate) fn audit(_model: &Model, layout: &Layout, wires: &[Wire], plans: &[Li
                     bad[m] = true;
                 }
             }
+        }
+    }
+    let vpcs: Vec<Rect> = layout.frames.iter().filter(|f| f.kind == FrameKind::Vpc).map(|f| f.rect).collect();
+    let outside = |id: &str| model.nodes.iter().find(|n| n.id == id).is_some_and(|n| !matches!(n.area, Area::Subnet(_) | Area::VpcEdge));
+    for (n, (w, p)) in wires.iter().zip(&paths).enumerate() {
+        if outside(&w.from) && outside(&w.to) && p.windows(2).any(|s| vpcs.iter().any(|&r| audit_enters((s[0], s[1]), r))) {
+            bad[n] = true;
         }
     }
     for (n, w) in wires.iter().enumerate() {

@@ -19,7 +19,7 @@ use crate::layout::{Icon, Layout, Rect};
 use crate::lines::{gather, label_parts, Line};
 use crate::measure::Measure;
 use crate::model::{Axis, Model, Node};
-use crate::path::{outward, reverse, Draft, Pt, Scene};
+use crate::path::{outward, reverse, Draft, Fence, Pt, Scene};
 use crate::rules::{DerivedRole, Rules, Scope};
 
 pub use crate::grid::route;
@@ -186,7 +186,9 @@ impl Ctx<'_> {
 /// Like `route`, with every line's first try taken from `plans`. A line with no plan gets the
 /// usual `candidates`; `plan()` is never called. Reads only frames and icons the layout has.
 pub fn route_planned(model: &Model, layout: &Layout, rules: &Rules, plans: &[LinePlan]) -> (Vec<Wire>, Vec<String>) {
-    let ctx = Ctx { model, layout, rules, scene: Scene::new(layout, Measure::Flow), measure: Measure::Flow };
+    let mut scene = Scene::new(layout, Measure::Flow);
+    scene.fence = Fence::of(model, layout);
+    let ctx = Ctx { model, layout, rules, scene, measure: Measure::Flow };
     let (specs, notes) = gather(model, layout, rules);
     // A line takes the draft of the semantic edge it stands for.
     let mut drafts: Vec<Option<Draft>> = specs
@@ -1395,7 +1397,8 @@ mod tests {
 
     /// `b` inside the frame `f`, whose left side is at x = 200; `a` outside it.
     fn crossing() -> (Model, Layout, Vec<LinePlan>) {
-        let (m, mut l) = scene(&[("a", 0, 100, S3), ("b", 400, 100, S3)], &[("a", "b", Rel::Main, HTTPS)]);
+        let (mut m, mut l) = scene(&[("a", 0, 100, S3), ("b", 400, 100, S3)], &[("a", "b", Rel::Main, HTTPS)]);
+        m.nodes[1].area = crate::model::Area::Subnet(crate::model::Tier::Private);
         l.frames.push(Frame { id: "f".to_string(), kind: FrameKind::Vpc, label: "F".to_string(), rect: Rect { x: 200, y: -100, w: 400, h: 400 }, parent: Some("region".to_string()) });
         l.icons[1].parent = Some("f".to_string());
         let through = Through { gate: (200, 130), inner: vec![(300, 130)], inner_is_start: false };
@@ -1500,6 +1503,39 @@ mod tests {
         let (m, l, plans) = blocked_left(Keep::Free);
         let (w, _) = route_planned(&m, &l, &Rules::builtin(), &plans);
         assert_ne!(wire(&w, "a", "b").entry.side, Side::Left);
+    }
+
+    /// `a` and `b` outside the VPC frame `f`, which lies between them across their straight line.
+    fn vpc_between(keep: Keep) -> (Model, Layout, Vec<LinePlan>) {
+        let (m, mut l) = scene(&[("a", 0, 100, S3), ("b", 600, 100, S3)], &[("a", "b", Rel::Main, HTTPS)]);
+        l.frames.push(Frame { id: "f".to_string(), kind: FrameKind::Vpc, label: "F".to_string(), rect: Rect { x: 200, y: 0, w: 200, h: 300 }, parent: Some("region".to_string()) });
+        let p = keep_draft(&m, 0, Side::Right, Side::Left, Bend::Straight, keep);
+        (m, l, vec![p])
+    }
+
+    // Fails if a free line between two parts outside the VPC is drawn through the VPC's inside, or named.
+    #[test]
+    fn a_line_between_parts_outside_the_vpc_goes_round_it() {
+        let (m, l, plans) = vpc_between(Keep::Free);
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        let path = drawn(wire(&w, "a", "b"), &l);
+        let vpc = Rect { x: 200, y: 0, w: 200, h: 300 };
+        assert!(!path.windows(2).any(|s| hits(s[0], s[1], vpc)), "{path:?}");
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    // Fails if the final check lets a line between two parts outside the VPC pass through its
+    // inside unnamed, or names a line with an end inside the VPC that crosses the frame.
+    #[test]
+    fn the_final_check_names_a_line_between_parts_outside_the_vpc_through_it() {
+        let (m, l, plans) = vpc_between(Keep::Whole);
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        assert!(drawn(wire(&w, "a", "b"), &l).windows(2).any(|s| hits(s[0], s[1], Rect { x: 200, y: 0, w: 200, h: 300 })));
+        assert!(notes.iter().any(|n| n.contains("edge-a-to-b")), "{notes:?}");
+        assert_eq!(audit(&m, &l, &w, &[], Measure::Flow), vec!["edge-a-to-b".to_string()]);
+        let mut inside = m.clone();
+        inside.nodes[1].area = crate::model::Area::Subnet(crate::model::Tier::Private);
+        assert_eq!(audit(&inside, &l, &w, &[], Measure::Flow), Vec::<String>::new());
     }
 
     // Fails if a line crosses the frame's side away from its gate, or the inner points are searched again.
@@ -1734,7 +1770,8 @@ mod tests {
     fn leaving(icons: &[IconSpec]) -> (Model, Layout, Vec<LinePlan>) {
         let mut all = vec![("a", 0, 100, S3), ("b", 450, 100, S3)];
         all.extend_from_slice(icons);
-        let (m, mut l) = scene(&all, &[("a", "b", Rel::Main, HTTPS)]);
+        let (mut m, mut l) = scene(&all, &[("a", "b", Rel::Main, HTTPS)]);
+        m.nodes[0].area = crate::model::Area::Subnet(crate::model::Tier::Private);
         l.frames.push(Frame { id: "f".to_string(), kind: FrameKind::Vpc, label: "F".to_string(), rect: Rect { x: -50, y: -50, w: 300, h: 300 }, parent: Some("region".to_string()) });
         l.icons[0].parent = Some("f".to_string());
         let through = Through { gate: (250, 130), inner: vec![(150, 130)], inner_is_start: true };

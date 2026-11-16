@@ -4,10 +4,10 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 
-use crate::layout::{Icon, Layout, Rect};
+use crate::layout::{FrameKind, Icon, Layout, Rect};
 use crate::lines::Line;
 use crate::measure::Measure;
-use crate::model::Axis;
+use crate::model::{Area, Axis, Model};
 use crate::route::{port_point, Bend, Ctx, Keep, LinePlan, Port, Side, Through, LEVEL, RANK_AUTO, RANK_MAIN};
 
 /// Two lines may run together for at most this long.
@@ -200,6 +200,38 @@ pub(crate) struct Scene<'a> {
     /// them, so a line goes round a side part and its partner instead of between them. Only in
     /// the layout without a VPC.
     pub(crate) barriers: Vec<(String, String, Vec<Pt>)>,
+    /// The VPC frames, and the parts outside every VPC: a line between two such parts may not
+    /// pass through the inside of a VPC frame, where it would read as a line to the parts in it.
+    /// Lines with an end in a VPC are not held by it.
+    pub(crate) fence: Fence,
+}
+
+/// The VPC frames, and the ids of the parts outside them.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Fence {
+    pub(crate) frames: Vec<Rect>,
+    pub(crate) outside: Vec<String>,
+}
+
+impl Fence {
+    /// The VPC frames of the layout, and the parts the model places outside a VPC (neither in a
+    /// subnet nor on the VPC's edge).
+    pub(crate) fn of(model: &Model, layout: &Layout) -> Fence {
+        Fence {
+            frames: layout.frames.iter().filter(|f| f.kind == FrameKind::Vpc).map(|f| f.rect).collect(),
+            outside: model.nodes.iter().filter(|n| !matches!(n.area, Area::Subnet(_) | Area::VpcEdge)).map(|n| n.id.clone()).collect(),
+        }
+    }
+
+    /// Whether a line between these two parts is held out of the VPC frames.
+    pub(crate) fn holds(&self, from: &str, to: &str) -> bool {
+        !self.frames.is_empty() && [from, to].iter().all(|id| self.outside.iter().any(|o| o == id))
+    }
+
+    /// Whether the segment of a line between these parts keeps out of the VPC frames, or the line is not held.
+    fn lets(&self, a: Pt, b: Pt, (from, to): (&str, &str)) -> bool {
+        !self.holds(from, to) || self.frames.iter().all(|&r| !hits(a, b, r))
+    }
 }
 
 impl<'a> Scene<'a> {
@@ -226,7 +258,7 @@ impl<'a> Scene<'a> {
                 [((l, t), (rt, t)), ((l, b), (rt, b)), ((l, t), (l, b)), ((rt, t), (rt, b))]
             })
             .collect();
-        Scene { icons: &layout.icons, labels, frame_names, borders, xs: channels(ex), ys: channels(ey), barriers: Vec::new() }
+        Scene { icons: &layout.icons, labels, frame_names, borders, xs: channels(ex), ys: channels(ey), barriers: Vec::new(), fence: Fence::default() }
     }
 
     /// Whether one segment of the line from `from` to `to` stays clear of icons, labels and frame
@@ -254,7 +286,7 @@ impl<'a> Scene<'a> {
             .iter()
             .filter(|(p, q, _)| ![p, q].iter().any(|x| *x == from || *x == to))
             .all(|(_, _, path)| path.windows(2).all(|s| !hits(a, b, grow(span(s[0], s[1]), margin.max(1)))));
-        icons && labels && barriers && self.frame_names.iter().all(|&r| !hits(a, b, grow(r, margin)))
+        icons && labels && barriers && self.frame_names.iter().all(|&r| !hits(a, b, grow(r, margin))) && self.fence.lets(a, b, (from, to))
     }
 
     /// Whether the label of line `me` taking `area` stays `margin` off every frame side, icon, icon

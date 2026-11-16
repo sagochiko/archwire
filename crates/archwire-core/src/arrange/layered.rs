@@ -611,7 +611,8 @@ fn lay_region(model: &Model, rules: &Rules, axis: Axis, piece: Option<&Piece>) -
 }
 
 /// Whether two parts of one column in one frame have their tops less than a row's step apart.
-fn rows_too_close(a: &Icon, b: &Icon) -> bool {
+/// The layout lowers a part past such a neighbour, and the layout's check stops on a pair left so.
+pub(super) fn rows_too_close(a: &Icon, b: &Icon) -> bool {
     a.rect.x == b.rect.x && a.parent == b.parent && (a.rect.y - b.rect.y).abs() < ROW_STEP
 }
 
@@ -1793,21 +1794,64 @@ set:
         p.layout.icons.iter().find(|i| i.id == id).unwrap_or_else(|| panic!("{id} is placed"))
     }
 
-    /// The generated mixed definitions that once failed to lay out, or broke a line, with a part
-    /// only the VPC's parts are joined to and a function outside the VPC beside it.
-    const ONCE_FAILED_OUTSIDE: [usize; 60] = [
+    /// Generated mixed definitions with a function outside the VPC in the VPC's rank whose main
+    /// line goes on to another part outside the VPC, and a part right of the VPC only the VPC's
+    /// parts are joined to.
+    const BESIDE_AND_RIGHT_OF_THE_VPC: [usize; 60] = [
         6, 7, 14, 15, 16, 17, 18, 19, 24, 25, 26, 27, 28, 29, 56, 57, 64, 65, 66, 67, 68, 69, 74, 75, 76, 77, 78, 79, 227, 277, 426, 427, 434, 435, 436, 437, 438, 439,
         444, 445, 446, 447, 448, 449, 476, 477, 484, 485, 486, 487, 488, 489, 494, 495, 496, 497, 498, 499, 647, 697,
     ];
 
-    // Fails if any of these definitions fails to lay out or breaks a line along either axis.
+    // Fails if a picked definition lacks the shape it is picked for (a part outside the VPC
+    // reached by a main line from outside and sending one on outside, and a part right of the VPC
+    // joined only to the VPC's parts), or fails to lay out or breaks a line along either axis.
     #[test]
     fn mixed_definitions_with_parts_beside_and_right_of_the_vpc_draw_cleanly() {
         let defs = super::super::generated::generated_mixed();
-        for k in ONCE_FAILED_OUTSIDE {
+        let out = |a: &Area| !matches!(a, Area::Subnet(_) | Area::VpcEdge);
+        for k in BESIDE_AND_RIGHT_OF_THE_VPC {
+            let src = &defs[k];
+            let (m, p) = arranged_mixed(src, Axis::Down);
+            let area = |id: &str| &m.nodes.iter().find(|n| n.id == id).expect("an edge's end is a part").area;
+            let main = |e: &&crate::model::Edge| e.rel == Rel::Main && out(area(&e.from)) && out(area(&e.to));
+            let onward = m.nodes.iter().filter(|n| n.area == Area::Region).any(|n| {
+                m.edges.iter().filter(main).any(|e| e.to == n.id) && m.edges.iter().filter(main).any(|e| e.from == n.id)
+            });
+            assert!(onward, "#{k} has no part outside the VPC whose main line goes on\n{src}");
+            let vpc = p.layout.rect(super::super::azgrid::VPC_FRAME);
+            let right_of_the_vpc = m.nodes.iter().filter(|n| n.area == Area::Region).any(|n| {
+                let ends: Vec<&crate::model::Edge> = m.edges.iter().filter(|e| e.from == n.id || e.to == n.id).collect();
+                !ends.is_empty()
+                    && ends.iter().all(|e| !out(area(if e.from == n.id { &e.to } else { &e.from })))
+                    && at(&p, &n.id).x >= vpc.x + vpc.w
+            });
+            assert!(right_of_the_vpc, "#{k} has no part right of the VPC joined only to the VPC's parts\n{src}");
             for axis in [Axis::Right, Axis::Down] {
-                drawn_mixed(&defs[k], axis);
+                drawn_mixed(src, axis);
             }
+        }
+    }
+
+    fn icon_at_y(id: &str, x: i32, y: i32, parent: &str) -> Icon {
+        Icon { id: id.to_string(), label: id.to_string(), lines: 1, rect: Rect { x, y, w: 60, h: 60 }, parent: Some(parent.to_string()) }
+    }
+
+    // Fails if parts of one column in one frame count as a row apart when their tops are closer
+    // than 160, or as too close when 160 or more apart, in another column or in another frame.
+    #[test]
+    fn parts_closer_than_a_row_in_one_column_and_frame_are_too_close() {
+        let a = icon_at_y("a", 700, 400, "region");
+        for (b, close) in [
+            (icon_at_y("b", 700, 559, "region"), true),
+            (icon_at_y("b", 700, 560, "region"), false),
+            (icon_at_y("b", 700, 561, "region"), false),
+            (icon_at_y("b", 700, 241, "region"), true),
+            (icon_at_y("b", 700, 240, "region"), false),
+            (icon_at_y("b", 701, 459, "region"), false),
+            (icon_at_y("b", 700, 459, "cloud"), false),
+        ] {
+            assert_eq!(rows_too_close(&a, &b), close, "{b:?}");
+            assert_eq!(rows_too_close(&b, &a), close, "{b:?}");
         }
     }
 
