@@ -22,7 +22,7 @@ archwire compile web.yaml -o web.drawio
 
 The command writes `web.drawio` and prints a JSON report. The exit code is 0. This is what the diagram looks like:
 
-![The diagram archwire writes for web.yaml: users, CloudFront, an Internet Gateway, an Application Load Balancer, ECS and Aurora in two Availability Zones, NAT gateways, S3 and CloudWatch](assets/web-2az.png)
+![The diagram archwire writes for web.yaml, from top to bottom: users, CloudFront, and inside the Tokyo Region frame a VPC with the Internet Gateway at its top, two Availability Zones side by side with a NAT gateway in each public subnet, the Application Load Balancer on the border between the zones, ECS and Aurora in the private subnets, and S3 and CloudWatch to the right of the VPC](assets/web-2az.png)
 
 Four lines of definition produced the VPC, the Internet Gateway, the public and private subnets, the second Availability Zone, the NAT gateways, and the Aurora writer and reader. None of them were written in the definition. Each has a reason in the report, and the same reason is stored on the part inside the `.drawio` file (see [Reading the report](#reading-the-report)).
 
@@ -30,7 +30,7 @@ In this example these elements carry a reason: the AWS Cloud frame, the Region f
 
 ### An API without a VPC
 
-A definition that writes no VPC service is drawn without a VPC, from left to right. Save this as `api.yaml`:
+A definition that writes no VPC service is drawn without a VPC. Save this as `api.yaml`:
 
 ```yaml
 flows:
@@ -50,9 +50,13 @@ archwire compile api.yaml -o api.drawio
 
 The exit code is 0. This is the diagram:
 
-![The diagram archwire writes for api.yaml: users, CloudFront with AWS WAF and Certificate Manager under it, and inside the Tokyo Region frame S3, API Gateway (REST API) with Cognito under it, Lambda with CloudWatch under it, and DynamoDB](assets/api-rest-en.png)
+![The diagram archwire writes for api.yaml, from top to bottom: users, CloudFront with AWS WAF and Certificate Manager to its right, and inside the Tokyo Region frame S3 under CloudFront, and API Gateway (REST API) with Cognito to its right, Lambda with CloudWatch to its right, and DynamoDB](assets/api.png)
 
-The line from Cognito is labelled "Cognito authorizer" because the API is a REST API; with `apigateway(http)` it reads "JWT authorizer". Certificate Manager carries `us-east-1` under its name. The report gives the reasons for the AWS Cloud and Region frames, the Region, the place of each part, and the authorizer. This definition and its expected output are the acceptance case `tests/cases/api-rest-en`.
+The line from Cognito is labelled "Cognito authorizer" because the API is a REST API; with `apigateway(http)` it reads "JWT authorizer". Certificate Manager carries `us-east-1` under its name. The report gives the reasons for the AWS Cloud and Region frames, the Region, the place of each part, and the authorizer.
+
+### Direction
+
+Both diagrams above run from top to bottom, which is what you get when the definition says nothing about direction. To draw the main flows from left to right instead, add `direction: right` under `set`. The inside of a VPC stays the same either way: the Availability Zones side by side, the public subnets above the private ones. `api.yaml` with `direction: right` is the acceptance case `tests/cases/api-rest-en`, and `tests/cases/web-2az-ja-right` shows a VPC drawn from left to right. Where each part goes is described in [docs/definition.md](docs/definition.md#how-the-parts-are-laid-out-with-a-vpc).
 
 ## Install
 
@@ -156,15 +160,15 @@ The first is a Web architecture with one VPC with two or three Availability Zone
 
 Such a definition must have a main flow from `user` or `cloudfront` into `alb`, and from `alb` into `ecs`. Which other connections are accepted is listed in [docs/definition.md](docs/definition.md#which-connections-are-accepted-with-a-vpc).
 
-The second is an API without a VPC: users, CloudFront with WAF and Certificate Manager attached, S3, API Gateway as an HTTP API or a REST API, Lambda, DynamoDB, Cognito attached to API Gateway, and CloudWatch, drawn from left to right. Parts of one service can be told apart with a name after a dot, such as `s3.web` and `s3.uploads`. The accepted connections are listed pair by pair in `rules/aws/links.toml` and in [docs/definition.md](docs/definition.md#which-connections-are-accepted-without-a-vpc).
+The second is an API without a VPC: users, CloudFront with WAF and Certificate Manager attached, S3, API Gateway as an HTTP API or a REST API, Lambda, DynamoDB, Cognito attached to API Gateway, and CloudWatch. Parts of one service can be told apart with a name after a dot, such as `s3.web` and `s3.uploads`. The accepted connections are listed pair by pair in `rules/aws/links.toml` and in [docs/definition.md](docs/definition.md#which-connections-are-accepted-without-a-vpc).
 
-In both shapes the only Region is `ap-northeast-1`, and labels are in English, or in Japanese with `set.lang`. A connection or shape not described here stops with the error `UNSUPPORTED` instead of producing a diagram that is wrong.
+In both shapes the diagram runs from top to bottom, or from left to right with `set.direction`. The only Region is `ap-northeast-1`, and labels are in English, or in Japanese with `set.lang`. A connection or shape not described here stops with the error `UNSUPPORTED` instead of producing a diagram that is wrong.
 
 ## What this version does not do
 
 It cannot yet draw a definition that mixes VPC services (`alb`, `ecs`, `aurora`) with `apigateway`, `lambda`, `dynamodb` or `cognito`; such a definition stops with `UNSUPPORTED`. Names after a dot are accepted only in definitions without a VPC.
 
-It does not draw the endpoint types of API Gateway (edge-optimized, Regional, private) or WebSocket APIs. It does not attach WAF to API Gateway; `waf` attaches only to `cloudfront`. Which API types support AWS WAF is in the AWS comparison [Choose between REST APIs and HTTP APIs](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-vs-rest.html). It does not draw a sign-in line from users to Cognito; Cognito is drawn only attached to API Gateway. A definition cannot choose the direction of the diagram.
+It does not draw the endpoint types of API Gateway (edge-optimized, Regional, private) or WebSocket APIs. It does not attach WAF to API Gateway; `waf` attaches only to `cloudfront`. Which API types support AWS WAF is in the AWS comparison [Choose between REST APIs and HTTP APIs](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-vs-rest.html). It does not draw a sign-in line from users to Cognito; Cognito is drawn only attached to API Gateway.
 
 It does not draw queues, topics, event buses, workflows or AI services, more than one VPC, Transit Gateway, on-premises networks, several accounts, or other clouds. It does not simulate failures, show migration stages, compare a diagram with Terraform, or read a `.drawio` file back into a definition.
 

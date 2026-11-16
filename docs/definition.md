@@ -25,7 +25,7 @@ A part is a service name made of `a-z`, `0-9` and `_`, optionally followed by a 
 
 There are three connection symbols.
 
-`->` is a main flow, the path traffic takes. `~>` is an auxiliary flow, such as logs going to CloudWatch. It is drawn as a dashed line, and archwire does not work out a network route for it. `--` is an association, for something attached to something else. Write the thing being attached first. Which associations are accepted depends on the layout, see below. `waf` and `acm` are attachments: they may not be the source or the target of `->` or `~>`.
+`->` is a main flow, the path traffic takes. `~>` is an auxiliary flow, such as logs going to CloudWatch. It is drawn as a dashed line, and archwire does not work out a network route for it. `--` is an association, for something attached to something else. Write the thing being attached first. An association is drawn as a dashed line without an arrowhead, because nothing flows along it. Which associations are accepted depends on the layout, see below. `waf` and `acm` are attachments: they may not be the source or the target of `->` or `~>`.
 
 One pair of parts can be connected with one relation only. `ecs -> s3` together with `ecs ~> s3` is the error `CONFLICTING_RELATION`. Direction matters. `ecs -> aurora` and `aurora -> ecs` are two different pairs.
 
@@ -73,7 +73,7 @@ set:
   lang: ja
 ```
 
-`s3.web` and `s3.uploads` are two buckets. The diagram shows the name on the line under the service's name, so the first bucket reads Amazon S3 and then web. The part's id in the report and in the `.drawio` file is the name as written, such as `s3.web`. This definition and its expected output are the acceptance case `tests/cases/api-names-ja`.
+`s3.web` and `s3.uploads` are two buckets. The diagram shows the name on the line under the service's name, so the first bucket reads Amazon S3 and then web. The part's id in the report and in the `.drawio` file is the name as written, such as `s3.web`. With `direction: right` added under `set`, this definition and its expected output are the acceptance case `tests/cases/api-names-ja`.
 
 The name after the dot is made of `a-z`, `0-9` and `-`. It may not start or end with `-`, and a part has at most one dot. It is at most 24 characters long; a longer one is the error `NAME_TOO_LONG`, for example `lambda.resize-images-for-the-web` in `- user -> apigateway(http) -> lambda.resize-images-for-the-web` gives `at` `flows[0][2]` and `got` `resize-images-for-the-web`. `--` is always read as the association symbol, even inside a name, so `s3.foo--bar` is read as `s3.foo -- bar`; in `- user -> cloudfront -> s3.foo--bar` that gives `UNKNOWN_SERVICE` for `bar` at `flows[0][3]`. Write the kind after the name: `apigateway.public(http)`.
 
@@ -81,7 +81,7 @@ Named parts are accepted only in definitions without a VPC. `- user -> alb -> ec
 
 ## Definitions with a VPC
 
-archwire places the parts so the main flow reads from top to bottom inside the VPC, and adds what the path needs, such as the Internet Gateway between CloudFront and the load balancer. A note in the report says that auxiliary flows are not given a network route.
+archwire adds what the path needs, such as the Internet Gateway between CloudFront and the load balancer, and lays the parts out as described under [How the parts are laid out with a VPC](#how-the-parts-are-laid-out-with-a-vpc). A note in the report says that auxiliary flows are not given a network route.
 
 In this layout exactly two associations are accepted, `waf -- cloudfront` (a web ACL on the distribution) and `acm -- cloudfront` (its certificate). Every other `--` is `UNSUPPORTED`, including `waf -- alb`, `acm -- alb`, `waf -- acm` and the reversed `cloudfront -- waf` and `cloudfront -- acm`. Which service may attach to which is data, the `attach_to` field in `rules/aws/services.toml`.
 
@@ -111,6 +111,20 @@ For example, these are all `UNSUPPORTED` in a definition with a VPC: `cloudfront
 An auxiliary flow is labelled "Logs and metrics" whatever its target, because it does not carry the target's main traffic.
 
 `ecs -> s3` is accepted but leaves a hole, see `choose`.
+
+### How the parts are laid out with a VPC
+
+Outside the VPC, the parts are laid out as in a definition without a VPC (see [How the parts are laid out](#how-the-parts-are-laid-out)), in the direction `set.direction` gives: from top to bottom, or from left to right with `direction: right`. Users and CloudFront come first, then the Region frame, which holds the VPC and the Regional services. The VPC takes a place in its rank like one large part, and comes first in that rank. So S3 in `cloudfront -> s3` goes to the right of the VPC in a top-to-bottom diagram, and below it in a left-to-right one. A part that only parts inside the VPC connect to, such as CloudWatch in `ecs ~> cloudwatch`, goes to the right of the VPC in both directions.
+
+The inside of the VPC is the same in both directions. The Availability Zones stand side by side, and in each zone the public subnet is above the private one. Inside the subnets the main flows run from top to bottom, so in `alb -> ecs -> aurora` ECS is above Aurora. ECS gets a copy in each zone. Aurora's writer is in the first zone and its readers in the zones after it.
+
+The Internet Gateway sits inside the VPC on the side where the traffic comes in: the top side in a top-to-bottom diagram, the left side in a left-to-right one. A part that sends a main flow to the Internet Gateway, such as CloudFront, is lined up with it, so CloudFront, the Internet Gateway and the load balancer stand on one straight line, and a line from CloudFront to S3 bends on its way.
+
+The load balancer spans the zones. With two zones it sits in the public tier on the border between them, level with the NAT gateways in a top-to-bottom diagram. With three zones it sits above the zone frames.
+
+A line's label says which zones it stands for. With two zones, archwire draws the lines between parts in different zones. With three zones it draws no line between zones: each line inside a zone stands for the lines from every zone into the same part, and a note in the report says so. A label ends with "(all AZs)" when the sender has a copy in every zone, and names the zones otherwise. For example, with `azs: 3` and `readers: 1`, Aurora has a copy in two zones only, and `aurora ~> cloudwatch` is labelled "Logs and metrics (from 1a, 1c)". When a target in one zone has no sender in the same zone, the line comes from a sender in another zone, and a note names it. With the same settings, `aurora -> ecs` gives the note "In ap-northeast-1d, ecs-1d has no aurora in its own zone, so the line from aurora-1a in another zone is drawn."
+
+Some diagrams are correct but harder to read than they could be. In a top-to-bottom diagram, WAF and Certificate Manager attached to CloudFront stand one under the other to its right, which makes the row of global services tall. An auxiliary line from the load balancer to a part right of the VPC, such as `alb ~> s3`, can go round the far side of that part and enter it from the right. In a left-to-right diagram, S3 fed by CloudFront sits below the VPC, so the line to it is long.
 
 ## Definitions without a VPC
 
@@ -177,7 +191,7 @@ The report contains:
 ]
 ```
 
-In the diagram the API Gateway reads Amazon API Gateway with "type undecided" (「種類未定」 in Japanese) on the next line, and the line from Cognito is labelled "Verify tokens". This definition and its expected output are the acceptance case `tests/cases/hole-apigateway`. A named part has its own hole: `apigateway.public` gives `kind.apigateway.public`.
+In the diagram the API Gateway reads Amazon API Gateway with "type undecided" (「種類未定」 in Japanese) on the next line, and the line from Cognito is labelled "Verify tokens". With `set:` and `direction: right` added, this definition and its expected output are the acceptance case `tests/cases/hole-apigateway`. A named part has its own hole: `apigateway.public` gives `kind.apigateway.public`.
 
 Answer the hole in one of two ways. Write the kind in the definition, as in `apigateway(http)`, or answer in `choose`:
 
@@ -189,23 +203,23 @@ Compile again and the exit code is 0. Do not do both: when the definition alread
 
 ### Settings without a VPC
 
-Only `lang` and `region` can be set. Any other key, including `azs`, `nat` and `readers`, is `UNKNOWN_SETTING` with `allowed` `lang` and `region`.
+Only `direction`, `lang` and `region` can be set. Any other key, including `azs`, `nat` and `readers`, is `UNKNOWN_SETTING` with `allowed` `direction`, `lang` and `region`.
 
 ### How the parts are laid out
 
-The diagram reads from left to right. Users are on the left, then a column for global services (CloudFront, WAF and Certificate Manager) inside the AWS Cloud frame, then the Region frame. archwire works out the layout from the definition alone; the definition cannot move a part.
+The main flows run from top to bottom, or from left to right with `direction: right` (see [set](#set)). Below, a rank is a row in a top-to-bottom diagram and a column in a left-to-right one, and across means along the rank: from left to right along a row, or from top to bottom down a column. Users come first, then a rank for global services (CloudFront, WAF and Certificate Manager) inside the AWS Cloud frame, then the Region frame. archwire works out the layout from the definition alone; the definition cannot move a part.
 
-Inside the Region, each part on a main flow goes in a column one to the right of the furthest part that flows into it within the Region; a part with nothing flowing into it within the Region goes in the first column. Within a column, parts are stacked top to bottom in the order they first appear in the definition. A part is centred on the parts that flow into it: its height is halfway between the highest and the lowest of them, rounded down to a whole pixel, unless that would bring it too close to the part above. A part that sends main flows to two or more parts is then moved, where there is room, to halfway between the highest and the lowest of them. Columns move apart when the names or line labels between them are wide.
+Inside the Region, each part on a main flow goes in the rank one past the furthest part that flows into it within the Region; a part with nothing flowing into it within the Region goes in the first rank. Within a rank, parts are placed across in the order they first appear in the definition. A part is centred on the parts that flow into it: its place across is halfway between the first and the last of them, rounded down to a whole pixel, unless that would bring it too close to the part before it. A part that sends main flows to two or more parts is then moved, where there is room, to halfway between the first and the last of them. Ranks move apart when the names or line labels between them are wide.
 
-Parts that carry no main flow, such as Cognito and CloudWatch, go on a row below the main flows, in the column of the part they are attached to (for an association) or of the first part that sends to them (for an auxiliary flow). That column is tried first; when another such part or its name is already there, the part moves to the next free column to the right. WAF and Certificate Manager go under the CloudFront they are attached to; one attached to two distributions goes at the bottom of the global column. Adding or removing such a part does not move the parts on main flows within the Region.
+Parts that carry no main flow, such as Cognito and CloudWatch, go one step across past the parts on main flows (to their right in a top-to-bottom diagram, below them in a left-to-right one), in the rank of the part they are attached to (for an association) or of the first part that sends to them (for an auxiliary flow). That rank is tried first; when another such part or its name is already there, the part moves to the next free rank. WAF and Certificate Manager go one step across from the CloudFront they are attached to, one after another in the direction of the main flows; one attached to two distributions goes past everything else in the global rank. Adding or removing such a part does not move the parts on main flows within the Region.
 
 When several parts of the same service send the same auxiliary flow (`~>`) or association (`--`), with the same label, to the same part, the diagram draws one line for them. Main flows (`->`) are never merged; each is drawn. The merged line is labelled with the count, such as "Logs and metrics (3 sources)" or 「ログ・メトリクス（3か所から）」. The report's `notes` names the parts, such as `"The line from lambda.search to cloudwatch stands for the lines from lambda.orders, lambda.users, lambda.search."`. The acceptance case `tests/cases/api-merged-ja` shows this with three Lambda functions sending logs to one CloudWatch.
 
-When no part belongs to a Region, as in `- user -> cloudfront` with `- waf -- cloudfront` (the acceptance case `tests/cases/edge-waf-en`), no Region frame is drawn, and the report gives no reason for one.
+When no part belongs to a Region, as in `- user -> cloudfront` with `- waf -- cloudfront` (the acceptance case `tests/cases/edge-waf-en`, drawn with `direction: right`), no Region frame is drawn, and the report gives no reason for one.
 
 A diagram without a VPC gets these reasons: the AWS Cloud frame, the Region frame and the Region chosen when `set.region` is left out, and the place of each part the definition wrote (global services outside the Region frame, Regional services inside it, Cognito inside it because a user pool is created in one Region, and Certificate Manager outside it because a certificate used with CloudFront is in us-east-1). With `apigateway(http)` or `apigateway(rest)` and a `cognito -- apigateway` line, the API Gateway also gets the reason why the association is drawn as that authorizer.
 
-If archwire cannot lay out a definition without parts or names overlapping or leaving their frame, it writes no diagram and reports `LAYOUT_FAILED`. That is a bug in archwire, not in the definition.
+If archwire cannot lay out a definition, with or without a VPC, without parts or names overlapping or leaving their frame, it writes no diagram and reports `LAYOUT_FAILED`. That is a bug in archwire, not in the definition.
 
 ## set
 
@@ -214,7 +228,7 @@ set:
   azs: 3
 ```
 
-The table is for definitions with a VPC. A definition without a VPC accepts only `lang` and `region`, see [Settings without a VPC](#settings-without-a-vpc).
+The table is for definitions with a VPC. A definition without a VPC accepts only `direction`, `lang` and `region`, see [Settings without a VPC](#settings-without-a-vpc).
 
 | Key | Values | Default |
 |---|---|---|
@@ -223,8 +237,9 @@ The table is for definitions with a VPC. A definition without a VPC accepts only
 | `readers` | the number of Aurora readers, from `1` up to `azs` minus 1 | `azs` minus 1 |
 | `nat` | `per-az` (a NAT gateway in each zone) or `single` (one, in the first zone) | `per-az` |
 | `lang` | `en` or `ja`, the language of labels, reasons and notes. Service names stay in English | `en` |
+| `direction` | `down` (the main flows run from top to bottom) or `right` (from left to right) | `down` |
 
-When a key is left out, archwire uses the default and records it in the report as a `default` reason. A value outside the list is `BAD_SETTING`, and a key that is not in the table is `UNKNOWN_SETTING`.
+When `azs`, `region`, `readers` or `nat` is left out, archwire uses the default and records it in the report as a `default` reason. `direction` and `lang` change only how the diagram is drawn and get no reason. A value outside the list is `BAD_SETTING`; `direction: left` gives `allowed` `down` and `right`. A key that is not in the table is `UNKNOWN_SETTING`.
 
 ## choose
 
@@ -307,12 +322,12 @@ When a definition has errors, `compile` writes no diagram, removes a diagram lef
 | `UNKNOWN_SERVICE` | a name that is not a writable service | `- user -> cloudfrnt -> alb -> ecs` gives `at` `flows[0][1]`, `allowed` lists the writable names | Yes, with a name from `allowed` |
 | `UNKNOWN_OPTION` | a kind the service does not have | `ecs(lambda)` gives `allowed` `fargate` | Yes, with the part and a kind from `allowed`, or the bare name |
 | `BAD_SETTING` | a value outside the list | `azs: 4` gives `at` `set.azs`, `allowed` is `2` and `3` | Yes, with a value from `allowed` |
-| `UNKNOWN_SETTING` | a key that is not a setting | `colour: red` gives `at` `set.colour`, `allowed` lists the five keys; without a VPC, `azs: 3` gives `at` `set.azs`, `allowed` `lang` and `region` | No. `set` can change only the value; delete the line in the file |
+| `UNKNOWN_SETTING` | a key that is not a setting | `colour: red` gives `at` `set.colour`, `allowed` lists the six keys; without a VPC, `azs: 3` gives `at` `set.azs`, `allowed` `direction`, `lang` and `region` | No. `set` can change only the value; delete the line in the file |
 | `BAD_CHOICE` | an answer that is not one of the hole's choices | `route.ecs.s3: tunnel` gives `at` `choose.route.ecs.s3`, `allowed` `endpoint` and `nat`; `kind.apigateway: websocket` gives `allowed` `http` and `rest` | Yes, with a value from `allowed` |
 | `UNKNOWN_HOLE` | an answer for a hole that does not exist | `route.ecs.rds: nat` gives `at` `choose.route.ecs.rds`; so does `kind.apigateway: http` when the definition already says `apigateway(http)` | No. `set` can change only the value; delete the line in the file, and answer a hole from `allowed` with `archwire set <definition> choose.<hole> <value>` |
 | `UNSUPPORTED` | a connection or shape this version does not draw | `- user -> cloudfront -> ecs` gives `at` `flows` and `at` `flows[0]`; `- user -> s3` gives `at` `flows[0]`; `- user -> apigateway(http) -> lambda -> aurora` gives `at` `flows[0][1]` | Sometimes. `at` is a flow line (`flows[i]`), a part (`flows[i][j]`) or `flows`; change a part with `flows[i][j]`, or edit or remove the line in the file |
 | `TOO_MANY_ATTACHED` | more parts attached to one part than AWS allows | `- user -> cloudfront -> s3`, `- waf.front -- cloudfront` and `- waf.extra -- cloudfront` give `at` `flows[2]`, `got` `waf.extra`, `rule` `one-web-acl-per-resource` | No. Remove the extra line in the file |
-| `LAYOUT_FAILED` | archwire could not lay out a definition without a VPC without overlaps; a bug in archwire | no known definition; the message names the parts involved | No. Please report the definition |
+| `LAYOUT_FAILED` | archwire could not lay out a definition without overlaps; a bug in archwire | no known definition; the message names the parts involved | No. Please report the definition |
 | `BAD_PATH` | the place given to `set` does not exist | `archwire set web.yaml 'flows[9][0]' x`, on a file with fewer flow lines | Run `set` again with an existing place |
 | `BAD_VALUE` | the value given to `set` is empty or has a line break or `#`, or a value for `flows[i][j]` does not read as one part | `archwire set web.yaml set.azs ""`; `archwire set api.yaml 'flows[0][2]' 's3.foo--bar'` | Run `set` again with one non-empty line, or one part |
 | `CANNOT_READ` | `compile` or `set` could not read the definition file | `archwire compile missing.yaml -o out.drawio` | No. Check the path and the file's permissions |
@@ -326,7 +341,7 @@ Here is a full report for a misspelled name, from `- user -> cloudfrnt -> alb ->
 {
   "versions": {
     "archwire": "0.1.0",
-    "rules": "2026.11.2"
+    "rules": "2026.11.3"
   },
   "derived": [],
   "holes": [],
