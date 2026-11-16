@@ -1802,8 +1802,8 @@ set:
         444, 445, 446, 447, 448, 449, 476, 477, 484, 485, 486, 487, 488, 489, 494, 495, 496, 497, 498, 499, 647, 697,
     ];
 
-    // Fails if a picked definition lacks the shape it is picked for (a part outside the VPC
-    // reached by a main line from outside and sending one on outside, and a part right of the VPC
+    // Fails if a picked definition lacks the shape it is picked for (a part outside the VPC in the
+    // VPC's rank, reached by a main line from outside and sending one on outside, and a part right of the VPC
     // joined only to the VPC's parts), or fails to lay out or breaks a line along either axis.
     #[test]
     fn mixed_definitions_with_parts_beside_and_right_of_the_vpc_draw_cleanly() {
@@ -1814,11 +1814,16 @@ set:
             let (m, p) = arranged_mixed(src, Axis::Down);
             let area = |id: &str| &m.nodes.iter().find(|n| n.id == id).expect("an edge's end is a part").area;
             let main = |e: &&crate::model::Edge| e.rel == Rel::Main && out(area(&e.from)) && out(area(&e.to));
-            let onward = m.nodes.iter().filter(|n| n.area == Area::Region).any(|n| {
-                m.edges.iter().filter(main).any(|e| e.to == n.id) && m.edges.iter().filter(main).any(|e| e.from == n.id)
-            });
-            assert!(onward, "#{k} has no part outside the VPC whose main line goes on\n{src}");
             let vpc = p.layout.rect(super::super::azgrid::VPC_FRAME);
+            // In the VPC's rank: running down, its icon shares some height with the VPC's frame.
+            let beside = |id: &str| {
+                let r = at(&p, id);
+                r.y < vpc.y + vpc.h && vpc.y < r.y + r.h
+            };
+            let onward = m.nodes.iter().filter(|n| n.area == Area::Region).any(|n| {
+                m.edges.iter().filter(main).any(|e| e.to == n.id) && m.edges.iter().filter(main).any(|e| e.from == n.id) && beside(&n.id)
+            });
+            assert!(onward, "#{k} has no part outside the VPC in the VPC's rank whose main line goes on\n{src}");
             let right_of_the_vpc = m.nodes.iter().filter(|n| n.area == Area::Region).any(|n| {
                 let ends: Vec<&crate::model::Edge> = m.edges.iter().filter(|e| e.from == n.id || e.to == n.id).collect();
                 !ends.is_empty()
