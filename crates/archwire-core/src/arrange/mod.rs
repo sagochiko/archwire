@@ -7,6 +7,8 @@
 
 mod azgrid;
 mod check;
+#[cfg(test)]
+mod generated;
 mod layered;
 mod tree;
 
