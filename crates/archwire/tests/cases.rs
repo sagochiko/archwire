@@ -120,7 +120,7 @@ fn case_list_is_what_the_plan_says() {
             "aux-to-side", "edge-waf-en", "endpoint-3az-en", "endpoint-3az-ja", "endpoint-ja", "endpoint-ja-right", "err-unknown-service",
             "err-unsupported", "hole-apigateway", "hole-s3", "mix-beside-ja", "mix-logs-ja", "mix-min-en", "mix-nat-ja",
             "mix-vpc-ja", "mix-vpc-ja-right", "mix-web-ja", "mix-web-ja-right", "web-2az-en", "web-2az-ja", "web-2az-ja-right",
-            "web-3az-en", "web-3az-en-right", "web-3az-ja", "web-attach-en", "web-named-ja",
+            "web-3az-en", "web-3az-en-right", "web-3az-ja", "web-attach-en", "web-named-ja", "web-two-albs-ja",
         ]
     );
 }
