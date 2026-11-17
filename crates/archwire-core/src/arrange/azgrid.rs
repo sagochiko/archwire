@@ -1590,6 +1590,26 @@ pub(in crate::arrange) mod tests {
         assert_eq!(y(&right, "igw"), y(&right, "alb"));
     }
 
+    // Fails if, with three zones, the one load balancer leaves the row above the zones or stops
+    // standing over the middle zone, along either axis.
+    #[test]
+    fn three_zones_put_the_one_load_balancer_above_the_middle_zone() {
+        let (m, d) = grid(WEB_CASES[2].1);
+        assert_eq!(m.azs.len(), 3);
+        for axis in [Axis::Down, Axis::Right] {
+            let p = lays_out_cleanly("three zones", &m, &d, axis);
+            assert_eq!(p.layout.icons.iter().filter(|i| i.id == "alb").count(), 1, "{axis:?}");
+            let alb = icon(&p, "alb").rect;
+            let middle = alb.x + alb.w / 2;
+            let mid = frame(&p, "az-1c");
+            assert!(mid.x < middle && middle < mid.x + mid.w, "{axis:?}: the centre {middle} is outside {mid:?}");
+            for zone in ["az-1a", "az-1c", "az-1d"] {
+                let z = frame(&p, zone);
+                assert!(alb.y + alb.h < z.y, "{axis:?}: {alb:?} is not above {zone} {z:?}");
+            }
+        }
+    }
+
     // Fails if the band above the private tier keeps a label's height when no line in it is one
     // the layout keeps room for a label for.
     #[test]

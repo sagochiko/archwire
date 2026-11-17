@@ -595,8 +595,9 @@ mod tests {
             assert_eq!(s3.label.replace('\n', " "), parts.join(" "), "{axis:?} in\n{src}");
             let whole = |line: &str| (0..parts.len()).any(|i| (i + 1..=parts.len()).any(|j| parts[i..j].join(" ") == line));
             assert!(s3.label.lines().all(whole), "{:?} {axis:?} in\n{src}", s3.label);
-            // A frame side cuts a label only where no stretch is clear of them, and then the label
-            // lies clear of every line, icon and name.
+            // A frame side may cut a label only where no stretch of the line is clear of frame sides
+            // (`a_label_lies_on_a_frame_side_only_when_every_clear_stretch_is_taken` checks that);
+            // the label then lies clear of every line, icon and name.
             let borders = Scene::new(&l).borders;
             for x in w.iter().filter(|x| !x.label.is_empty()) {
                 let area = label_area_of(x, &l);
@@ -687,6 +688,61 @@ mod tests {
             assert_eq!(s3.label, "Read/Write\n(via VPC endpoint)\n(all AZs)", "{axis:?}");
             let area = label_area_of(s3, &l);
             assert!(Scene::new(&l).borders.iter().all(|&(c, d)| !hits(c, d, area)), "{axis:?}");
+        }
+    }
+
+    /// A part at the left of the Region and one 640 to the right of it inside an AZ frame whose
+    /// left side stands at x = 380, with the straight line between them at y = 130: its middle
+    /// (x = 380) is on the frame side.
+    fn across_a_frame_side() -> (Model, Layout, Vec<Pt>) {
+        let (m, mut l) = scene(&[("a", 0, 100, S3), ("b", 700, 100, S3)], &[("a", "b", Rel::Main, "https")]);
+        l.frames.push(Frame { id: "az".into(), kind: FrameKind::Az, label: String::new(), rect: Rect { x: 380, y: -50, w: 500, h: 400 }, parent: Some("region".into()) });
+        l.icons[1].parent = Some("az".into());
+        (m, l, vec![(60, 130), (700, 130)])
+    }
+
+    /// Two other lines, 5 above and 5 below the line at y = 130, from x = 60 to `gap.0` and from
+    /// `gap.1` to x = 700: a label on the line fits only between `gap.0` and `gap.1`.
+    fn blockers(gap: (i32, i32)) -> Vec<Vec<Pt>> {
+        [125, 135].into_iter().flat_map(|y| [vec![(60, y), (gap.0, y)], vec![(gap.1, y), (700, y)]]).collect()
+    }
+
+    /// True if the vertical frame side at x = 380 (y from -50 to 350) runs through the inside of `r`.
+    fn on_the_side(r: Rect) -> bool {
+        r.x < 380 && 380 < r.x + r.w && r.y < 350 && -50 < r.y + r.h
+    }
+
+    // Fails if a label is put on a frame side while a stretch of its line clear of frame sides is
+    // free, or is not put there when every such stretch is taken by other lines, or then covers one.
+    #[test]
+    fn a_label_lies_on_a_frame_side_only_when_every_clear_stretch_is_taken() {
+        let r = Rules::builtin();
+        let (m, l, me) = across_a_frame_side();
+        let ctx = Ctx { model: &m, layout: &l, rules: &r, scene: Scene::new(&l) };
+        let place = |others: Vec<Vec<Pt>>| {
+            let mut paths = vec![me.clone()];
+            paths.extend(others);
+            let spot = ctx.place_label(&["HTTPS".to_string()], (&paths, 0), true, false, Axis::Right, &[]);
+            (spot, paths)
+        };
+        let clear_of_lines = |area: Rect, paths: &[Vec<Pt>]| paths[1..].iter().all(|p| p.windows(2).all(|s| !hits(s[0], s[1], area)));
+        assert!(on_the_side(crate::measure::wire_label_area("HTTPS", (380, 130), true, false)), "the usual spot is on the side");
+        // Its middle is on the side; the stretches either side of it are free.
+        let (spot, _) = place(Vec::new());
+        let area = spot.area.unwrap();
+        assert!(spot.clear && spot.at.is_some() && !on_the_side(area), "{area:?} at {:?}", spot.at);
+        // Other lines leave room only right of the side, between x = 440 and 560.
+        let (spot, paths) = place(blockers((440, 560)));
+        let area = spot.area.unwrap();
+        assert!(spot.clear && !on_the_side(area) && area.x >= 440 && area.x + area.w <= 560, "{area:?}");
+        assert!(clear_of_lines(area, &paths), "{area:?}");
+        // Other lines leave room only around the side, between x = 340 and 420: no spot clear of it.
+        let (spot, paths) = place(blockers((340, 420)));
+        let area = spot.area.unwrap();
+        assert!(spot.clear && on_the_side(area), "{area:?}");
+        assert!(clear_of_lines(area, &paths), "{area:?}");
+        for i in &l.icons {
+            assert!(!overlaps(i.rect, area) && !overlaps(name_area(i), area), "{} or its name is under {area:?}", i.id);
         }
     }
 

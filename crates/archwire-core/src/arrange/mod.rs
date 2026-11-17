@@ -281,13 +281,22 @@ mod tests {
         assert!(failed.is_empty(), "{} of {} diagrams failed:\n{}", failed.len(), 2 * defs.len(), failed.join("\n"));
     }
 
-    // With the folder given, fails if a generated definition with a VPC cannot be written there.
+    /// True for the stem of a file `generated_definitions_through_compile` writes: four digits, a
+    /// dash and a direction.
+    fn through_compile_stem(stem: &str) -> bool {
+        let Some((number, way)) = stem.split_once('-') else { return false };
+        number.len() == 4 && number.bytes().all(|b| b.is_ascii_digit()) && ["down", "right"].contains(&way)
+    }
+
+    // With the folder given, fails if a generated definition with a VPC gives no diagram or an
+    // error along either direction, or cannot be written there.
     /// With `ARCHWIRE_VPC_OUT=<dir>`, writes every generated definition with a VPC, with each
     /// direction written (`down` and `right`), as `compile` draws it: `<dir>/<number>-<way>.yaml`
     /// (the definition with its direction written), `<dir>/<number>-<way>.drawio` when a diagram
     /// was drawn, and `<dir>/<number>-<way>.json` (the diagnostics). The number has four digits,
-    /// in the order of `generated_with_a_vpc`. A relative folder is taken from the workspace root.
-    /// Without it, does nothing. It writes thousands of files, so it runs only when named:
+    /// in the order of `generated_with_a_vpc`. Files of that name already in the folder are
+    /// removed first, so none is left from an earlier run. A relative folder is taken from the
+    /// workspace root. Without it, does nothing. It writes thousands of files, so it runs only when named:
     ///     cargo test -p archwire-core generated_definitions_through_compile -- --ignored
     #[test]
     #[ignore]
@@ -295,6 +304,15 @@ mod tests {
         let Some(dir) = std::env::var_os("ARCHWIRE_VPC_OUT") else { return };
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(dir);
         std::fs::create_dir_all(&dir).unwrap();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if through_compile_stem(stem) && ["yaml", "drawio", "json"].contains(&ext) {
+                std::fs::remove_file(&path).unwrap();
+            }
+        }
+        let mut failed = Vec::new();
         for (k, src) in generated_with_a_vpc().iter().enumerate() {
             for way in ["down", "right"] {
                 let name = format!("{k:04}-{way}");
@@ -305,8 +323,12 @@ mod tests {
                     std::fs::write(dir.join(format!("{name}.drawio")), x).unwrap();
                 }
                 std::fs::write(dir.join(format!("{name}.json")), out.diagnostics.to_json()).unwrap();
+                if out.drawio.is_none() || !out.diagnostics.errors.is_empty() {
+                    failed.push(format!("{name}: {:?}", out.diagnostics.errors));
+                }
             }
         }
+        assert!(failed.is_empty(), "{} of {} gave no diagram or an error:\n{}", failed.len(), 2 * generated_with_a_vpc().len(), failed.join("\n"));
     }
 
     /// How many diagrams of the new layout `arranged_diagrams_for_the_checker` writes: twenty
