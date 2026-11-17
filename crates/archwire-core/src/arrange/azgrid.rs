@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use super::layered::ROW_STEP;
 use super::check::failed;
-use super::{Crossing, Lane};
+use super::{Attach, Crossing, Lane};
 use crate::diag::Problem;
 use crate::ids::edge_id;
 use crate::def::Rel;
@@ -185,6 +185,9 @@ struct Run {
     band: Option<Band>,
     /// The track's number in its band, from the top.
     track: Option<usize>,
+    /// Laid out from its end inside to its end outside, the other way from the semantic edge: the
+    /// line of a part attached to a part spanning the zones, run as a side line out of that part.
+    flipped: bool,
 }
 
 /// A set of spots on the sides of parts: a shared gap (1, zone, column, row) or one side (0, node, side, 0).
@@ -268,12 +271,20 @@ struct Grid<'a> {
     names_right: i32,
     entry_half: i32,
     reps: Vec<usize>,
+    attach: Attach,
 }
 
 /// The inside of the VPC, or LAYOUT_FAILED naming a line that no widening keeps clear of a part
 /// or a frame's name it passes.
+#[cfg(test)]
 pub(crate) fn lay_vpc(model: &Model, rules: &Rules, parts: &[usize], axis: Axis) -> Result<Placed, Vec<Problem>> {
-    let g = Grid::new(model, rules, parts, axis);
+    lay_vpc_with(model, rules, parts, axis, Attach::Gate)
+}
+
+/// The same, with the parts attached to a part spanning the zones laid out as `attach` says.
+pub(crate) fn lay_vpc_with(model: &Model, rules: &Rules, parts: &[usize], axis: Axis, attach: Attach) -> Result<Placed, Vec<Problem>> {
+    let mut g = Grid::new(model, rules, parts, axis);
+    g.attach = attach;
     // Across: widen until the lines that pass a part or a frame's name keep clear of it. A widening
     // that leaves the same line exactly as close to the same thing does not move them apart, so
     // widening cannot clear it; nor can it when the tries run out.
@@ -395,7 +406,7 @@ impl<'a> Grid<'a> {
         // With two zones, one part spanning them sits on the boundary between the zones; two or
         // more take the row above the zones, as with three zones.
         let boundary = model.azs.len() == 2 && groups.iter().filter(|g| g.place == Place::Span).count() == 1;
-        let mut g = Grid { model, rules, axis, boundary, groups, group_of, public, private, rows, col_half, names_right, entry_half, reps: Vec::new() };
+        let mut g = Grid { model, rules, axis, boundary, groups, group_of, public, private, rows, col_half, names_right, entry_half, reps: Vec::new(), attach: Attach::Gate };
         g.reps = g.drawn_inside();
         g
     }
@@ -550,12 +561,16 @@ impl<'a> Grid<'a> {
         let m = self.model;
         let mut out = Vec::new();
         for (edge, e) in m.edges.iter().enumerate() {
-            let (f, t) = (self.index(&e.from), self.index(&e.to));
-            let (pf, pt) = (self.place(f), self.place(t));
+            let (mut f, mut t) = (self.index(&e.from), self.index(&e.to));
+            let (mut pf, mut pt) = (self.place(f), self.place(t));
             if pf.is_none() && pt.is_none() {
                 continue;
             }
-            let mut r = Run { edge, from: f, to: t, kind: Kind::Elbow, exit: Side::Bottom, entry: Side::Top, drawn: true, pin: None, exit_pos: 50, entry_pos: 50, band: None, track: None };
+            let flipped = matches!(self.attach, Attach::Side(_)) && e.rel == Rel::Assoc && pf.is_none() && pt == Some(Place::Span);
+            if flipped {
+                (f, t, pf, pt) = (t, f, pt, pf);
+            }
+            let mut r = Run { edge, from: f, to: t, kind: Kind::Elbow, exit: Side::Bottom, entry: Side::Top, drawn: true, pin: None, exit_pos: 50, entry_pos: 50, band: None, track: None, flipped };
             let side_to = |from: usize, to: usize| if self.cx(a, to) >= self.cx(a, from) { (Side::Right, Side::Left) } else { (Side::Left, Side::Right) };
             match (pf, pt) {
                 (Some(x), Some(y)) => {
@@ -1385,6 +1400,10 @@ impl<'a> Grid<'a> {
                     tracks: track.into_iter().collect(),
                     axis: Axis::Down,
                 }),
+                Some(gate) if r.flipped => {
+                    let inner: Vec<Pt> = f.points.iter().rev().copied().collect();
+                    crossing.push(Crossing { edge: r.edge, frame: VPC_FRAME.into(), through: Through { gate, inner, inner_is_start: false }, inner_side: f.exit, inner_pos: f.exit_pos });
+                }
                 Some(gate) => {
                     let leaving = self.place(r.from).is_some();
                     let (inner_side, inner_pos) = if leaving { (f.exit, f.exit_pos) } else { (f.entry, f.entry_pos) };
@@ -2638,5 +2657,225 @@ pub(in crate::arrange) mod tests {
             }
         }
         assert!(seen.iter().all(|&n| n > 0), "{seen:?}");
+    }
+
+    /// `src` (a definition without `set`) with `azs` zones in Japanese, and for each load balancer
+    /// in `albs` a certificate and a web ACL in the Region attached to it; with `one_waf`, one web
+    /// ACL attached to every load balancer.
+    pub(in crate::arrange) fn with_attachments(src: &str, azs: usize, albs: &[&str], one_waf: bool) -> Model {
+        let (mut m, _) = grid(&format!("{src}set:\n  azs: {azs}\n  lang: ja\n"));
+        let named = |service: &str, alb: &str| alb.split_once('.').map_or(service.to_string(), |(_, t)| format!("{service}.{t}"));
+        for alb in albs {
+            let acm = named("acm", alb);
+            m.nodes.push(node(&acm, "acm", &acm, Area::Region, None, None));
+            m.edges.push(edge(&acm, alb, Rel::Assoc, "certificate", None));
+        }
+        if one_waf {
+            m.nodes.push(node("waf", "waf", "waf", Area::Region, None, None));
+            for alb in albs {
+                m.edges.push(edge("waf", alb, Rel::Assoc, "web_acl", None));
+            }
+        } else {
+            for alb in albs {
+                let waf = named("waf", alb);
+                m.nodes.push(node(&waf, "waf", &waf, Area::Region, None, None));
+                m.edges.push(edge(&waf, alb, Rel::Assoc, "web_acl", None));
+            }
+        }
+        m
+    }
+
+    const WEB_JA: &str = "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\n";
+    const CDN_ATTACHED: &str = "  - waf.cdn -- cloudfront\n  - acm.cdn -- cloudfront\n";
+
+    /// The shapes the attachments of a load balancer are tried on, by name: one load balancer with
+    /// two and three zones, with and without CloudFront's own attachments; two load balancers each
+    /// with its own, and two sharing one web ACL.
+    pub(in crate::arrange) fn attachment_shapes() -> Vec<(String, Model)> {
+        let two = crate::test_inputs::TWO_WEBS;
+        let mut out = vec![
+            ("web-2az".to_string(), with_attachments(WEB_JA, 2, &["alb"], false)),
+            ("web-2az-cdn".to_string(), with_attachments(&format!("{WEB_JA}{CDN_ATTACHED}"), 2, &["alb"], false)),
+            ("web-3az-cdn".to_string(), with_attachments(&format!("{WEB_JA}{CDN_ATTACHED}"), 3, &["alb"], false)),
+        ];
+        for azs in [2, 3] {
+            out.push((format!("two-albs-{azs}az-cdn"), with_attachments(&format!("{two}{CDN_ATTACHED}"), azs, &["alb.web", "alb.admin"], false)));
+            out.push((format!("two-albs-{azs}az-one-waf"), with_attachments(two, azs, &["alb.web", "alb.admin"], true)));
+        }
+        out
+    }
+
+    /// Turns along a path: points where it changes between across and along.
+    fn turns_of(p: &[Pt]) -> usize {
+        p.windows(3).filter(|w| (w[0].1 == w[1].1) != (w[1].1 == w[2].1)).count()
+    }
+
+    /// Whether two segments, one across and one along, cross inside both, not at an end.
+    fn seg_cross(a: (Pt, Pt), b: (Pt, Pt)) -> bool {
+        let (h, v) = if a.0 .1 == a.1 .1 && b.0 .0 == b.1 .0 { (a, b) } else if b.0 .1 == b.1 .1 && a.0 .0 == a.1 .0 { (b, a) } else { return false };
+        let (x1, x2) = (h.0 .0.min(h.1 .0), h.0 .0.max(h.1 .0));
+        let (y1, y2) = (v.0 .1.min(v.1 .1), v.0 .1.max(v.1 .1));
+        x1 < v.0 .0 && v.0 .0 < x2 && y1 < h.0 .1 && h.0 .1 < y2
+    }
+
+    /// What a way to attach gives on a model along an axis, counted from the routed lines.
+    pub(in crate::arrange) struct Measures {
+        /// The layout's own check: None if it passes, else its errors.
+        pub(in crate::arrange) failed: Option<String>,
+        /// Notes naming a line, and the faults the router's tests count.
+        pub(in crate::arrange) named: Vec<String>,
+        pub(in crate::arrange) faults: Vec<(String, String)>,
+        /// Crossings of any two lines, of an attachment's line with any, and with a main line.
+        pub(in crate::arrange) crossings: usize,
+        pub(in crate::arrange) attach_crossings: usize,
+        pub(in crate::arrange) attach_main_crossings: usize,
+        /// Turns of every line, and of each attachment's line in model order.
+        pub(in crate::arrange) turns: usize,
+        pub(in crate::arrange) attach_turns: Vec<usize>,
+        /// How far each attached part's middle lies from the middle of the part it attaches to,
+        /// across plus along.
+        pub(in crate::arrange) reach: Vec<i32>,
+        /// The diagram, when laid out.
+        pub(in crate::arrange) drawio: Option<String>,
+    }
+
+    pub(in crate::arrange) fn attachment_measures(m: &Model, axis: Axis, attach: Attach) -> Measures {
+        let r = Rules::builtin();
+        let p = match super::super::arrange_with(m, &r, axis, attach) {
+            Err(e) => {
+                let failed = Some(e.iter().map(|x| format!("{} {}", x.code, x.message)).collect::<Vec<_>>().join("; "));
+                return Measures { failed, named: Vec::new(), faults: Vec::new(), crossings: 0, attach_crossings: 0, attach_main_crossings: 0, turns: 0, attach_turns: Vec::new(), reach: Vec::new(), drawio: None };
+            }
+            Ok(p) => p,
+        };
+        let (w, notes) = crate::route::route_planned(m, &p.layout, &r, &p.lines);
+        let (faults, named) = crate::route::tests::wire_faults(&p.layout, &w, &notes);
+        let inside = |id: &str| m.nodes.iter().any(|n| n.id == id && matches!(n.area, Area::VpcEdge | Area::Subnet(_)));
+        let attached = |x: &crate::route::Wire| x.style == crate::route::WireStyle::Assoc && inside(&x.to);
+        let paths: Vec<(bool, bool, Vec<Pt>)> = w.iter().map(|x| (attached(x), x.style == crate::route::WireStyle::Main, crate::route::tests::full_path(x, &p.layout))).collect();
+        let (mut crossings, mut attach_crossings, mut attach_main_crossings) = (0, 0, 0);
+        for (i, a) in paths.iter().enumerate() {
+            for b in &paths[i + 1..] {
+                let n = a.2.windows(2).flat_map(|s| b.2.windows(2).map(move |t| ((s[0], s[1]), (t[0], t[1])))).filter(|&(s, t)| seg_cross(s, t)).count();
+                crossings += n;
+                if a.0 || b.0 {
+                    attach_crossings += n;
+                }
+                if (a.0 && b.1) || (b.0 && a.1) {
+                    attach_main_crossings += n;
+                }
+            }
+        }
+        let centre = |id: &str| {
+            let i = icon(&p, id);
+            (i.rect.x + ICON / 2, i.rect.y + ICON / 2)
+        };
+        let reach = m.edges.iter().filter(|e| e.rel == Rel::Assoc && inside(&e.to)).map(|e| (centre(&e.from).0 - centre(&e.to).0).abs() + (centre(&e.from).1 - centre(&e.to).1).abs()).collect();
+        let drawio = crate::drawio::write(m, &p.layout, &w, &Diagnostics { notes: notes.clone(), ..Diagnostics::default() }, &r);
+        Measures {
+            failed: None,
+            named,
+            faults,
+            crossings,
+            attach_crossings,
+            attach_main_crossings,
+            turns: paths.iter().map(|x| turns_of(&x.2)).sum(),
+            attach_turns: paths.iter().filter(|x| x.0).map(|x| turns_of(&x.2)).collect(),
+            reach,
+            drawio: Some(drawio),
+        }
+    }
+
+    // Fails if a load balancer's certificate or web ACL, laid out right of the VPC with its line
+    // run as a side line out of the load balancer, stops the layout or comes out with a line
+    // crossing an icon, a name or another line, or a note naming a line, with one or two load
+    // balancers, with two or three zones, in either direction.
+    #[test]
+    fn attachments_run_as_side_lines_lay_out_cleanly() {
+        let bad = side_line_faults(Attach::Side(TRACK_STEP));
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
+
+    /// Every shape and direction where `attach` stops the layout, or leaves a fault or a note naming a line.
+    fn side_line_faults(attach: Attach) -> Vec<String> {
+        let mut bad = Vec::new();
+        for (name, m) in attachment_shapes() {
+            for axis in [Axis::Down, Axis::Right] {
+                let x = attachment_measures(&m, axis, attach);
+                if x.failed.is_some() || !x.named.is_empty() || !x.faults.is_empty() {
+                    bad.push(format!("{name} {}: {:?} {:?} {:?}", axis_name(axis), x.failed, x.named, x.faults));
+                }
+            }
+        }
+        bad
+    }
+
+    // Fails if the side lines of attached parts lay out cleanly only at the one distance apart
+    // they turn at, not at two smaller and two larger.
+    #[test]
+    #[ignore]
+    fn attachments_run_as_side_lines_lay_out_cleanly_at_other_steps() {
+        for step in [15, 20, 30, 35] {
+            let bad = side_line_faults(Attach::Side(step));
+            assert!(bad.is_empty(), "{step}: {}", bad.join("\n"));
+        }
+    }
+
+    // Fails if a shape cannot be written out. With ARCHWIRE_ATTACH_OUT set, writes every shape with
+    // every way to attach, both directions, as diagrams and notes, and a table of what each gives.
+    #[test]
+    #[ignore]
+    fn attachment_candidates_for_the_checker() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let dir = std::env::var_os("ARCHWIRE_ATTACH_OUT").map(|d| root.join(d));
+        let mut table = String::from("shape\tdirection\tattach\tlayout\tnamed\tfaults\tcrossings\tattach_crossings\tattach_main_crossings\tturns\tattach_turns\treach\n");
+        for (name, m) in attachment_shapes() {
+            for axis in [Axis::Down, Axis::Right] {
+                for attach in [Attach::Gate, Attach::Side(TRACK_STEP)] {
+                    let x = attachment_measures(&m, axis, attach);
+                    let way = if attach == Attach::Gate { "gate" } else { "side" };
+                    table.push_str(&format!(
+                        "{name}\t{}\t{way}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:?}\t{:?}\n",
+                        axis_name(axis),
+                        x.failed.clone().unwrap_or_else(|| "ok".into()),
+                        x.named.len(),
+                        x.faults.len(),
+                        x.crossings,
+                        x.attach_crossings,
+                        x.attach_main_crossings,
+                        x.turns,
+                        x.attach_turns,
+                        x.reach
+                    ));
+                    if let (Some(d), Some(drawio)) = (&dir, &x.drawio) {
+                        std::fs::create_dir_all(d).unwrap();
+                        let stem = format!("{name}-{}-{way}", axis_name(axis));
+                        std::fs::write(d.join(format!("{stem}.drawio")), drawio).unwrap();
+                        let faults: Vec<String> = x.faults.iter().map(|(id, what)| format!("{id} {what}")).collect();
+                        std::fs::write(d.join(format!("{stem}.notes.txt")), format!("{}\n{}\n", x.named.join("\n"), faults.join("\n"))).unwrap();
+                    }
+                }
+            }
+        }
+        // The same shapes without the load balancer's attachments, and the accepted case with
+        // CloudFront's, for comparison.
+        let mut bases: Vec<(String, Model)> = vec![
+            ("web-2az-base".into(), grid(&format!("{WEB_JA}set:\n  azs: 2\n  lang: ja\n")).0),
+            ("web-3az-base".into(), grid(&format!("{WEB_JA}set:\n  azs: 3\n  lang: ja\n")).0),
+            ("web-attach-en".into(), grid("flows:\n  - user -> cloudfront -> alb -> ecs\n  - waf -- cloudfront\n  - acm -- cloudfront\n").0),
+        ];
+        for azs in [2, 3] {
+            bases.push((format!("two-albs-{azs}az-base"), grid(&format!("{}set:\n  azs: {azs}\n  lang: ja\n", crate::test_inputs::TWO_WEBS)).0));
+        }
+        for (name, m) in bases {
+            for axis in [Axis::Down, Axis::Right] {
+                let x = attachment_measures(&m, axis, Attach::Gate);
+                table.push_str(&format!("{name}\t{}\tnone\t{}\t{}\t{}\t{}\t-\t-\t{}\t-\t-\n", axis_name(axis), x.failed.clone().unwrap_or_else(|| "ok".into()), x.named.len(), x.faults.len(), x.crossings, x.turns));
+            }
+        }
+        if let Some(d) = &dir {
+            std::fs::write(d.join("measures.tsv"), &table).unwrap();
+        }
+        print!("{table}");
     }
 }

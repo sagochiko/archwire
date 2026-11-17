@@ -15,7 +15,7 @@
 //! margin on each side.
 
 use super::azgrid::Placed;
-use super::{Crossing, Lane, Placement};
+use super::{Attach, Crossing, Lane, Placement};
 use crate::def::Rel;
 use crate::layout::{icon, Frame, FrameKind, Icon, Layout, Rect};
 use crate::measure::{frame_name_box, name_area, name_text_width, wire_label_area, wire_text_size, wire_text_width};
@@ -97,6 +97,7 @@ struct Block {
 /// The inside of a VPC laid out as one piece. It comes first among the parts of its rank.
 pub(super) struct Piece<'a> {
     pub(super) placed: &'a Placed,
+    pub(super) attach: Attach,
 }
 
 /// The Region's parts on a main flow and the main lines between them.
@@ -330,11 +331,18 @@ pub(super) fn layered(model: &Model, rules: &Rules, axis: Axis, piece: Option<&P
             })
             .collect();
         let vpc = layout.rect(super::azgrid::VPC_FRAME);
+        // Lines run as side lines out of the part they attach to turn down toward their parts in
+        // the gap right of the VPC, the one from the lowest gate nearest the VPC, so none crosses another.
+        let beside = stagger(model, &layout, p, at);
         for c in &p.placed.crossing {
             let mut c = c.clone();
             c.through.gate = at(c.through.gate);
             c.through.inner.iter_mut().for_each(|q| *q = at(*q));
-            lines.push(crossing_plan(model, &layout, &c, vpc, &lanes, axis));
+            let mut plan = crossing_plan(model, &layout, &c, vpc, &lanes, axis);
+            if let (Some(&(_, step)), Bend::AtX(_)) = (beside.iter().find(|b| b.0 == c.edge), &plan.bend) {
+                plan.bend = Bend::AtX(c.through.gate.0 + step);
+            }
+            lines.push(plan);
             crossings.push(c);
         }
         lines.sort_by_key(|l| l.edge);
@@ -442,6 +450,95 @@ pub(super) fn only_inside(model: &Model, i: usize) -> bool {
         })
         .collect();
     !others.is_empty() && others.iter().all(|&j| inside(model, j))
+}
+
+/// The across coordinates, in the VPC's own, of the gates of the lines of part `i` attached to
+/// a part inside the VPC.
+fn attached_gates(model: &Model, p: &Piece, i: usize) -> Vec<i32> {
+    p.placed.crossing.iter().filter(|c| model.edges[c.edge].rel == Rel::Assoc && model.edges[c.edge].from == model.nodes[i].id).map(|c| c.through.gate.1).collect()
+}
+
+/// Where the attached parts `attached` (in the order of their gates) go in the column at `x` right
+/// of the VPC, clear of `placed`: from the lowest gate up, each level with its gate or as near above
+/// it as is free and above the one below it; or, if that would rise past the VPC's top `top`, from
+/// the highest gate down the same way.
+fn attached_places(model: &Model, rules: &Rules, attached: &[usize], placed: &[Icon], x: i32, top: i32, gate_y: &dyn Fn(usize) -> Option<i32>) -> Vec<i32> {
+    let try_way = |up: bool| -> Option<Vec<i32>> {
+        let mut icons: Vec<Icon> = placed.to_vec();
+        let mut ys = vec![0; attached.len()];
+        let mut last: Option<i32> = None;
+        let ks: Vec<usize> = if up { (0..attached.len()).rev().collect() } else { (0..attached.len()).collect() };
+        for k in ks {
+            let i = attached[k];
+            let g = gate_y(i).expect("attached") - ICON / 2;
+            let want = match (last, up) {
+                (Some(l), true) => g.min(l - ROW_STEP),
+                (Some(l), false) => g.max(l + ROW_STEP),
+                (None, _) => g,
+            };
+            let free = |y: i32| {
+                let ic = icon_of(model, rules, i, icon_at(x, y), Some(REGION_FRAME.into()));
+                !icons.iter().any(|o| rows_too_close(o, &ic) || boxes_meet(o, &ic))
+            };
+            let step = if up { -ROW_STEP } else { ROW_STEP };
+            let mut tries: Vec<i32> = icons.iter().filter(|o| o.rect.x == x).map(|o| o.rect.y + step).chain([want]).filter(|&y| if up { y <= want } else { y >= want }).collect();
+            tries.sort_by_key(|&y| (y - want).abs());
+            let y = tries.into_iter().find(|&y| free(y))?;
+            if up && y < top {
+                return None;
+            }
+            ys[k] = y;
+            last = Some(y);
+            icons.push(icon_of(model, rules, i, icon_at(x, y), Some(REGION_FRAME.into())));
+        }
+        Some(ys)
+    };
+    try_way(true).or_else(|| try_way(false)).unwrap_or_else(|| attached.iter().map(|&i| gate_y(i).expect("attached") - ICON / 2).collect())
+}
+
+/// For the lines run as side lines out of the part they attach to: each one's edge and how far
+/// right of its gate it turns toward its part, in steps of the way's own, by the first order of
+/// steps (1 nearest the VPC) that keeps the lines' outer parts from crossing one another.
+fn stagger(model: &Model, layout: &Layout, p: &Piece, at: impl Fn((i32, i32)) -> (i32, i32)) -> Vec<(usize, i32)> {
+    let Attach::Side(step) = p.attach else { return Vec::new() };
+    // (edge, gate, the part's centre across)
+    let lines: Vec<(usize, (i32, i32), i32)> = p
+        .placed
+        .crossing
+        .iter()
+        .filter(|c| model.edges[c.edge].rel == Rel::Assoc)
+        .map(|c| {
+            let part = layout.icons.iter().find(|i| i.id == model.edges[c.edge].from).expect("placed");
+            (c.edge, at(c.through.gate), part.rect.y + ICON / 2)
+        })
+        .collect();
+    let n = lines.len();
+    let crosses = |steps: &[i32]| {
+        (0..n).any(|a| {
+            (0..n).any(|b| {
+                let (xa, (_, ya), ea) = (lines[a].1 .0 + steps[a] * step, lines[a].1, lines[a].2);
+                let (xb, yb, eb) = (lines[b].1 .0 + steps[b] * step, lines[b].1 .1, lines[b].2);
+                let (lo, hi) = (ya.min(ea), ya.max(ea));
+                // b's run at its gate reaches past a's turn, or b's run into its part starts short of it.
+                a != b && ((lo < yb && yb < hi && xb > xa) || (lo < eb && eb < hi && xb < xa))
+            })
+        })
+    };
+    let mut order: Vec<i32> = (1..=n as i32).collect();
+    let mut best = order.clone();
+    // Orders are tried in sequence; there are few lines.
+    loop {
+        if !crosses(&order) {
+            best = order.clone();
+            break;
+        }
+        // Next permutation.
+        let Some(k) = (1..order.len()).rev().find(|&k| order[k - 1] < order[k]) else { break };
+        let j = (k..order.len()).rev().find(|&j| order[j] > order[k - 1]).expect("exists");
+        order.swap(k - 1, j);
+        order[k..].reverse();
+    }
+    lines.iter().zip(best).map(|(l, s)| (l.0, s * step)).collect()
 }
 
 /// The Region's contents, from the Region's parts and the lines between them alone. The VPC, if
@@ -612,10 +709,20 @@ fn lay_region(model: &Model, rules: &Rules, axis: Axis, piece: Option<&Piece>) -
         // Right of the VPC, level with the first private part sending to it, else the first part
         // inside it joined to it; a row lower each time the place is taken.
         let x = ox + p.placed.w + gap;
-        for &i in &lone {
+        // Run as side lines out of the part they attach to, the attached parts come before the
+        // others, in a column in the order of their gates.
+        let gate_y = |i: usize| attached_gates(model, p, i).into_iter().min().map(|g| g + oy);
+        let mut attached: Vec<usize> = lone.iter().copied().filter(|&i| matches!(p.attach, Attach::Side(_)) && gate_y(i).is_some()).collect();
+        attached.sort_by_key(|&i| gate_y(i));
+        let at_gates = attached_places(model, rules, &attached, &icons, x, oy, &gate_y);
+        let order: Vec<usize> = attached.iter().copied().chain(lone.iter().copied().filter(|i| !attached.contains(i))).collect();
+        for &i in &order {
             let joined: Vec<usize> = partners_all(model, i).into_iter().filter(|&j| inside(model, j)).collect();
             let sender = joined.iter().copied().find(|&j| matches!(model.nodes[j].area, Area::Subnet(crate::model::Tier::Private))).or(joined.first().copied());
             let mut y = sender.and_then(|j| icons.iter().find(|ic| ic.id == model.nodes[j].id)).map_or(oy, |ic| ic.rect.y);
+            if let Some(k) = attached.iter().position(|&a| a == i) {
+                y = at_gates[k];
+            }
             let mut ic = icon_of(model, rules, i, icon_at(x, y), Some(REGION_FRAME.into()));
             // Lower each time the place is taken: past a part of its column a row's step apart,
             // else a row lower.

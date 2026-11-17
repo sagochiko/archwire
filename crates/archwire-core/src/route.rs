@@ -342,7 +342,7 @@ impl<'a> Ctx<'a> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::audit::{audit_wire_label, audit_wire_text_width};
     use crate::labels::{label_distance, point_along};
@@ -372,7 +372,7 @@ mod tests {
     const WEB2: &str = "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\n";
 
     /// Exit, waypoints and entry in order, with any diagonal step folded into a right angle.
-    fn full_path(x: &Wire, l: &Layout) -> Vec<(i32, i32)> {
+    pub(crate) fn full_path(x: &Wire, l: &Layout) -> Vec<(i32, i32)> {
         let mut raw = vec![port_point(l.rect(&x.from), x.exit)];
         raw.extend(x.points.iter().copied());
         raw.push(port_point(l.rect(&x.to), x.entry));
@@ -811,6 +811,11 @@ mod tests {
     /// (line id, what), measured by this test's own arithmetic; and the notes that name a line.
     fn faults(src: &str, axis: Axis) -> (Vec<(String, String)>, Vec<String>) {
         let (_, l, w, notes) = planned(src, axis);
+        wire_faults(&l, &w, &notes)
+    }
+
+    /// The same, for lines already routed on a layout.
+    pub(crate) fn wire_faults(l: &Layout, w: &[Wire], notes: &[String]) -> (Vec<(String, String)>, Vec<String>) {
         let named: Vec<String> = notes.iter().filter(|n| n.contains("edge-")).cloned().collect();
         let mut out: Vec<(String, String)> = Vec::new();
         let paths: Vec<(&Wire, Vec<(i32, i32)>)> = w.iter().map(|x| (x, full_path(x, &l))).collect();
