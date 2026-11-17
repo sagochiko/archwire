@@ -1,17 +1,17 @@
 //! The final check of the finished lines.
 
 use crate::layout::{FrameKind, Layout, Rect};
-use crate::measure::{frame_name_box, name_area, Measure};
+use crate::measure::{frame_name_box, label_margin, name_area};
 use crate::model::{Area, Model};
 use crate::path::grow;
 use crate::route::{Bend, Keep, LinePlan, Port, Side, Track, Wire};
 
 // The final check. It looks at the finished lines with its own arithmetic, not the router's, so
-// a mistake in how the router measures or searches cannot hide itself. Its measures follow the
-// diagram checker (tools/geocheck.py): text width per character, the label boxes, an icon's box
-// shrunk by its blank margin, and two strokes this close together read as one.
+// a mistake in how the router searches cannot hide itself. Its measures of line labels follow the
+// diagram checker (tools/geocheck.py), character by character; an icon's box is shrunk by its blank
+// margin, and two strokes this close together read as one. Names are measured as the diagram is
+// laid out.
 
-const AUDIT_CHAR_ASCII: i32 = 7;
 /// Latin letters in a line's label, widest first, by their width at font size 11. Characters not
 /// listed count at `AUDIT_WIRE_UNLISTED`.
 const AUDIT_WIRE_LATIN: [(&str, i32); 7] = [
@@ -26,17 +26,12 @@ const AUDIT_WIRE_LATIN: [(&str, i32); 7] = [
 const AUDIT_WIRE_NARROW: &str = "fijlrtI()[]/.,:;-'!| ";
 const AUDIT_WIRE_UNLISTED: i32 = 12;
 const AUDIT_WIRE_NARROW_W: i32 = 4;
-const AUDIT_CHAR_WIDE: i32 = 12;
 const AUDIT_WIRE_WIDE: i32 = 11;
 const AUDIT_WIRE_PAREN: i32 = 6;
 const AUDIT_ICON_MARGIN: i32 = 2;
 const AUDIT_STROKES_MERGE: i32 = 2;
 
 type Seg = ((i32, i32), (i32, i32));
-
-fn audit_text_width(text: &str) -> i32 {
-    text.lines().map(|l| l.chars().map(|c| if c.is_ascii() { AUDIT_CHAR_ASCII } else { AUDIT_CHAR_WIDE }).sum()).max().unwrap_or(0)
-}
 
 /// A line's label is drawn at font size 11, where Latin letters differ in width and a full-width
 /// character is narrower; a full-width parenthesis shows only half its width where it opens a line
@@ -279,33 +274,12 @@ fn audit_keeps_draft(w: &Wire, p: &LinePlan, layout: &Layout) -> bool {
 /// semantic edge it stands for. A line between two parts outside the VPC (neither in a subnet
 /// nor on the VPC's edge) that passes through the inside of a VPC frame is named too: it reads
 /// as a line to the parts in the VPC. Ids in line order, each once.
-/// The VPC layout is checked with its own measure of names, written apart from the router's; the
-/// layout without a VPC with the measure it is laid out by, which is never narrower than draw.io draws.
-pub(crate) fn audit(model: &Model, layout: &Layout, wires: &[Wire], plans: &[LinePlan], measure: Measure) -> Vec<String> {
-    let icon_labels: Vec<(&str, Rect)> = layout
-        .icons
-        .iter()
-        .map(|i| {
-            if measure == Measure::Flow {
-                return (i.id.as_str(), name_area(i));
-            }
-            let half = (audit_text_width(&i.label) + 1) / 2;
-            (i.id.as_str(), Rect { x: i.rect.x + i.rect.w / 2 - half, y: i.rect.y + i.rect.h + 4, w: 2 * half, h: 14 * i.lines as i32 + 6 })
-        })
-        .collect();
-    let frame_names: Vec<Rect> = layout
-        .frames
-        .iter()
-        .map(|f| {
-            if measure == Measure::Flow {
-                return frame_name_box(f);
-            }
-            let (indent, h) = if f.kind == FrameKind::Az { (10, 20) } else { (30, 25) };
-            Rect { x: f.rect.x, y: f.rect.y, w: indent + audit_text_width(&f.label), h }
-        })
-        .collect();
+/// Names are measured as the diagram is laid out, never narrower than draw.io draws them.
+pub(crate) fn audit(model: &Model, layout: &Layout, wires: &[Wire], plans: &[LinePlan]) -> Vec<String> {
+    let icon_labels: Vec<(&str, Rect)> = layout.icons.iter().map(|i| (i.id.as_str(), name_area(i))).collect();
+    let frame_names: Vec<Rect> = layout.frames.iter().map(frame_name_box).collect();
     let paths: Vec<Vec<(i32, i32)>> = wires.iter().map(|w| audit_path(w, layout)).collect();
-    let room = measure.label_margin(0);
+    let room = label_margin(0);
     let labels: Vec<Option<Rect>> = wires.iter().zip(&paths).map(|(w, p)| audit_wire_label(w, p).map(|r| grow(r, room))).collect();
     let mut bad = vec![false; wires.len()];
     for (n, (w, p)) in wires.iter().zip(&paths).enumerate() {

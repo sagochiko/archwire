@@ -17,12 +17,9 @@ use crate::ids::edge_id;
 use crate::labels::{path_length, LabelSpot};
 use crate::layout::{Icon, Layout, Rect};
 use crate::lines::{gather, label_parts, Line};
-use crate::measure::Measure;
 use crate::model::{Axis, Model, Node};
 use crate::path::{outward, reverse, Draft, Fence, Pt, Scene};
-use crate::rules::{DerivedRole, Rules, Scope};
-
-pub use crate::grid::route;
+use crate::rules::{DerivedRole, Rules};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side { Top, Bottom, Left, Right }
@@ -173,7 +170,6 @@ pub(crate) struct Ctx<'a> {
     pub(crate) layout: &'a Layout,
     pub(crate) rules: &'a Rules,
     pub(crate) scene: Scene<'a>,
-    pub(crate) measure: Measure,
 }
 
 impl Ctx<'_> {
@@ -183,12 +179,12 @@ impl Ctx<'_> {
     }
 }
 
-/// Like `route`, with every line's first try taken from `plans`. A line with no plan gets the
-/// usual `candidates`; `plan()` is never called. Reads only frames and icons the layout has.
+/// Routes every line, its first try taken from `plans`. A line with no plan gets the usual
+/// `candidates`. Reads only frames and icons the layout has.
 pub fn route_planned(model: &Model, layout: &Layout, rules: &Rules, plans: &[LinePlan]) -> (Vec<Wire>, Vec<String>) {
-    let mut scene = Scene::new(layout, Measure::Flow);
+    let mut scene = Scene::new(layout);
     scene.fence = Fence::of(model, layout);
-    let ctx = Ctx { model, layout, rules, scene, measure: Measure::Flow };
+    let ctx = Ctx { model, layout, rules, scene };
     let (specs, notes) = gather(model, layout, rules);
     // A line takes the draft of the semantic edge it stands for.
     let mut drafts: Vec<Option<Draft>> = specs
@@ -223,7 +219,7 @@ pub fn route_planned(model: &Model, layout: &Layout, rules: &Rules, plans: &[Lin
 }
 
 /// Shares out the ports, lays every line, places the labels and runs the final check, which
-/// also looks at how each line keeps its draft in `plans` (none on the path without drafts).
+/// also looks at how each line keeps its draft in `plans` (none when no plans are given).
 pub(crate) fn draw(ctx: &Ctx, specs: &[Line], drafts: &[Draft], plans: &[LinePlan], mut notes: Vec<String>) -> (Vec<Wire>, Vec<String>) {
     let (model, layout, rules, lang) = (ctx.model, ctx.layout, ctx.rules, ctx.model.lang);
     let mut ports = ctx.share_out(specs, drafts);
@@ -315,7 +311,7 @@ pub(crate) fn draw(ctx: &Ctx, specs: &[Line], drafts: &[Draft], plans: &[LinePla
         });
     }
     // Whatever the router believed, the finished lines are checked once more on their own terms.
-    for id in audit(model, layout, &wires, plans, ctx.measure) {
+    for id in audit(model, layout, &wires, plans) {
         let note = rules.text("note.unrouted_line", lang).replace("{line}", &id);
         if !notes.contains(&note) {
             notes.push(note);
@@ -327,10 +323,6 @@ pub(crate) fn draw(ctx: &Ctx, specs: &[Line], drafts: &[Draft], plans: &[LinePla
 impl<'a> Ctx<'a> {
     pub(crate) fn node(&self, id: &str) -> &'a Node {
         self.model.nodes.iter().find(|n| n.id == id).expect("edge ends are nodes")
-    }
-
-    pub(crate) fn scope(&self, n: &Node) -> Scope {
-        self.rules.service(&n.service).map(|s| s.scope).expect("model services are in the rules")
     }
 
     pub(crate) fn icon(&self, id: &str) -> &'a Icon {
@@ -605,7 +597,7 @@ mod tests {
             assert!(s3.label.lines().all(whole), "{:?} {axis:?} in\n{src}", s3.label);
             // A frame side cuts a label only where no stretch is clear of them, and then the label
             // lies clear of every line, icon and name.
-            let borders = Scene::new(&l, Measure::Flow).borders;
+            let borders = Scene::new(&l).borders;
             for x in w.iter().filter(|x| !x.label.is_empty()) {
                 let area = label_area_of(x, &l);
                 if !borders.iter().any(|&(c, d)| hits(c, d, area)) { continue; }
@@ -678,7 +670,7 @@ mod tests {
             // Whole parts: on one line, or one part per line.
             assert!(["読み書き （VPC エンドポイント経由） （全 AZ から）", "読み書き\n（VPC エンドポイント経由）\n（全 AZ から）"].contains(&s3.label.as_str()), "{:?}", s3.label);
             let area = label_area_of(s3, &l);
-            assert!(Scene::new(&l, Measure::Flow).borders.iter().any(|&(c, d)| hits(c, d, area)), "{area:?} is clear of frame sides, so the first search should have found it");
+            assert!(Scene::new(&l).borders.iter().any(|&(c, d)| hits(c, d, area)), "{area:?} is clear of frame sides, so the first search should have found it");
             for y in &w {
                 for s in full_path(y, &l).windows(2) {
                     assert!(!hits(s[0], s[1], area), "{} runs through the label of {}", y.id, s3.id);
@@ -694,7 +686,7 @@ mod tests {
             let s3 = w.iter().find(|x| x.to == "s3").unwrap();
             assert_eq!(s3.label, "Read/Write\n(via VPC endpoint)\n(all AZs)", "{axis:?}");
             let area = label_area_of(s3, &l);
-            assert!(Scene::new(&l, Measure::Flow).borders.iter().all(|&(c, d)| !hits(c, d, area)), "{axis:?}");
+            assert!(Scene::new(&l).borders.iter().all(|&(c, d)| !hits(c, d, area)), "{axis:?}");
         }
     }
 
@@ -702,7 +694,7 @@ mod tests {
     fn a_label_with_no_spot_clear_of_lines_and_text_stays_at_its_usual_spot_and_is_not_clear() {
         let (m, l, w, _) = compiled(WEB2);
         let r = Rules::builtin();
-        let ctx = Ctx { model: &m, layout: &l, rules: &r, scene: Scene::new(&l, Measure::Flow), measure: Measure::Flow };
+        let ctx = Ctx { model: &m, layout: &l, rules: &r, scene: Scene::new(&l) };
         let paths: Vec<Vec<Pt>> = w.iter().map(|x| full_path(x, &l)).collect();
         let me = w.iter().position(|x| x.id == "edge-cloudfront-to-s3").unwrap();
         // Labels already placed everywhere: no spot is clear even over frame sides.
@@ -741,14 +733,14 @@ mod tests {
     #[test]
     fn the_final_check_names_lines_that_overlap_or_cross_text_whatever_the_router_thought() {
         let (m, l, mut w, _) = compiled(WEB2);
-        assert_eq!(audit(&m, &l, &w, &[], Measure::Flow), Vec::<String>::new());
+        assert_eq!(audit(&m, &l, &w, &[]), Vec::<String>::new());
         // Lay one line on top of another, one pixel apart, and another across an icon's label.
         let a = w.iter().position(|x| x.id == "edge-ecs-1a-to-aurora-1a").unwrap();
         let b = w.iter().position(|x| x.id == "edge-ecs-1c-to-aurora-1c").unwrap();
         let pa = full_path(&w[a], &l);
         w[b].points = vec![(pa[0].0 + 1, pa[0].1 + 5), (pa[0].0 + 1, pa[pa.len() - 1].1 - 5)];
         w[b].exit = w[a].exit;
-        let named = audit(&m, &l, &w, &[], Measure::Flow);
+        let named = audit(&m, &l, &w, &[]);
         assert!(named.contains(&"edge-ecs-1a-to-aurora-1a".to_string()) && named.contains(&"edge-ecs-1c-to-aurora-1c".to_string()), "{named:?}");
     }
 
@@ -934,7 +926,7 @@ mod tests {
     fn no_frame_side_cuts_a_line_label_in_the_acceptance_definitions() {
         for src in acceptance_definitions() { for axis in AXES {
             let (_, l, w, _) = planned(&src, axis);
-            let borders = Scene::new(&l, Measure::Flow).borders;
+            let borders = Scene::new(&l).borders;
             for x in w.iter().filter(|x| !x.label.is_empty()) {
                 let area = label_area_of(x, &l);
                 for &(c, d) in &borders {
@@ -966,7 +958,7 @@ mod tests {
             let mut moved = 0;
             for src in acceptance_definitions() {
                 let (_, l, w, _) = planned(&src, axis);
-                let borders = Scene::new(&l, Measure::Flow).borders;
+                let borders = Scene::new(&l).borders;
                 let cut = |area: Rect| borders.iter().any(|&(c, d)| hits(c, d, area));
                 for x in w.iter().filter(|x| !x.label.is_empty()) {
                     let usual = Wire { label_at: None, ..x.clone() };
@@ -1592,10 +1584,10 @@ mod tests {
         let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &plans);
         assert!(drawn(wire(&w, "a", "b"), &l).windows(2).any(|s| hits(s[0], s[1], Rect { x: 200, y: 0, w: 200, h: 300 })));
         assert!(notes.iter().any(|n| n.contains("edge-a-to-b")), "{notes:?}");
-        assert_eq!(audit(&m, &l, &w, &[], Measure::Flow), vec!["edge-a-to-b".to_string()]);
+        assert_eq!(audit(&m, &l, &w, &[]), vec!["edge-a-to-b".to_string()]);
         let mut inside = m.clone();
         inside.nodes[1].area = crate::model::Area::Subnet(crate::model::Tier::Private);
-        assert_eq!(audit(&inside, &l, &w, &[], Measure::Flow), Vec::<String>::new());
+        assert_eq!(audit(&inside, &l, &w, &[]), Vec::<String>::new());
     }
 
     // Fails if a line crosses the frame's side away from its gate, or the inner points are searched again.
@@ -1649,10 +1641,10 @@ mod tests {
     fn audit_finds_a_changed_whole_line() {
         let (m, l, plans) = waypoints();
         let (mut w, _) = route_planned(&m, &l, &Rules::builtin(), &plans);
-        assert_eq!(audit(&m, &l, &w, &plans, Measure::Flow), Vec::<String>::new());
+        assert_eq!(audit(&m, &l, &w, &plans), Vec::<String>::new());
         w[0].points = vec![(160, 30), (160, 230)];
-        assert_eq!(audit(&m, &l, &w, &[], Measure::Flow), Vec::<String>::new(), "the changed line overlaps nothing");
-        assert!(audit(&m, &l, &w, &plans, Measure::Flow).contains(&"edge-a-to-b".to_string()));
+        assert_eq!(audit(&m, &l, &w, &[]), Vec::<String>::new(), "the changed line overlaps nothing");
+        assert!(audit(&m, &l, &w, &plans).contains(&"edge-a-to-b".to_string()));
     }
 
     // Fails if the final check does not look for the gate.
@@ -1660,9 +1652,9 @@ mod tests {
     fn audit_finds_a_line_missing_its_gate() {
         let (m, l, plans) = crossing();
         let (mut w, _) = route_planned(&m, &l, &Rules::builtin(), &plans);
-        assert_eq!(audit(&m, &l, &w, &plans, Measure::Flow), Vec::<String>::new());
+        assert_eq!(audit(&m, &l, &w, &plans), Vec::<String>::new());
         w[0].points = vec![(150, 130), (150, 160), (250, 160), (250, 130), (300, 130)];
-        assert!(audit(&m, &l, &w, &plans, Measure::Flow).contains(&"edge-a-to-b".to_string()));
+        assert!(audit(&m, &l, &w, &plans).contains(&"edge-a-to-b".to_string()));
     }
 
     // Fails if the final check does not look at the fixed ends.
@@ -1670,9 +1662,9 @@ mod tests {
     fn audit_finds_a_moved_fixed_end() {
         let (m, l, plans) = fixed_25();
         let (mut w, _) = route_planned(&m, &l, &Rules::builtin(), &plans);
-        assert_eq!(audit(&m, &l, &w, &plans, Measure::Flow), Vec::<String>::new());
+        assert_eq!(audit(&m, &l, &w, &plans), Vec::<String>::new());
         w[0].entry.pos = 50;
-        assert!(audit(&m, &l, &w, &plans, Measure::Flow).contains(&"edge-a-to-b".to_string()));
+        assert!(audit(&m, &l, &w, &plans).contains(&"edge-a-to-b".to_string()));
     }
 
     // Fails if the final check does not look at where a line runs on its band.
@@ -1681,10 +1673,10 @@ mod tests {
         let (m, l, mut plans) = crossing();
         plans[0].tracks = vec![Track { horizontal: true, from: 220, to: 380, at: 130 }];
         let (mut w, _) = route_planned(&m, &l, &Rules::builtin(), &plans);
-        assert_eq!(audit(&m, &l, &w, &plans, Measure::Flow), Vec::<String>::new());
+        assert_eq!(audit(&m, &l, &w, &plans), Vec::<String>::new());
         // Through the gate and the inner point still, but at 140 between them.
         w[0].points = vec![(200, 130), (200, 140), (300, 140), (300, 130)];
-        assert!(audit(&m, &l, &w, &plans, Measure::Flow).contains(&"edge-a-to-b".to_string()));
+        assert!(audit(&m, &l, &w, &plans).contains(&"edge-a-to-b".to_string()));
     }
 
     /// The note that a line could not be drawn clear, for this line id.
@@ -1716,7 +1708,7 @@ mod tests {
         // Out of (60, 30), right to x = 450, then back left into (300, 30).
         assert_eq!(drawn(wire(&w, "a", "b"), &l), [(60, 30), (450, 30), (300, 30)]);
         assert!(notes.contains(&unrouted("edge-a-to-b")), "{notes:?}");
-        assert!(audit(&m, &l, &w, &plans, Measure::Flow).contains(&"edge-a-to-b".to_string()));
+        assert!(audit(&m, &l, &w, &plans).contains(&"edge-a-to-b".to_string()));
     }
 
     /// Out of (60, 30), 100 right, 10 down, 340 right, then 260 down into b's top at (500, 300).
@@ -1839,7 +1831,7 @@ mod tests {
         let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &plans);
         assert_eq!(drawn(wire(&w, "a", "b"), &l), [(60, 130), (150, 130), (250, 130), (450, 130)]);
         assert!(notes.is_empty(), "{notes:?}");
-        assert_eq!(audit(&m, &l, &w, &plans, Measure::Flow), Vec::<String>::new());
+        assert_eq!(audit(&m, &l, &w, &plans), Vec::<String>::new());
     }
 
     /// The drawn path keeps the gate and the inner points in order, and stays clear of the icon `x`.
@@ -1909,10 +1901,10 @@ mod tests {
         let plans = vec![p];
         let (mut w, _) = route_planned(&m, &l, &Rules::builtin(), &plans);
         assert_eq!(drawn(&w[0], &l), [(60, 30), (150, 30), (150, 230), (300, 230)]);
-        assert_eq!(audit(&m, &l, &w, &plans, Measure::Flow), Vec::<String>::new());
+        assert_eq!(audit(&m, &l, &w, &plans), Vec::<String>::new());
         w[0].points = vec![(160, 30), (160, 230)];
-        assert_eq!(audit(&m, &l, &w, &[], Measure::Flow), Vec::<String>::new(), "the moved line overlaps nothing");
-        assert!(audit(&m, &l, &w, &plans, Measure::Flow).contains(&"edge-a-to-b".to_string()));
+        assert_eq!(audit(&m, &l, &w, &[]), Vec::<String>::new(), "the moved line overlaps nothing");
+        assert!(audit(&m, &l, &w, &plans).contains(&"edge-a-to-b".to_string()));
     }
 
     // Fails if the final check takes a track as kept when the line leaves it and comes back, leaving a gap.
@@ -1923,11 +1915,11 @@ mod tests {
         p.tracks = vec![Track { horizontal: true, from: 80, to: 280, at: 30 }];
         let plans = vec![p];
         let (mut w, _) = route_planned(&m, &l, &Rules::builtin(), &plans);
-        assert_eq!(audit(&m, &l, &w, &plans, Measure::Flow), Vec::<String>::new());
+        assert_eq!(audit(&m, &l, &w, &plans), Vec::<String>::new());
         // At 30 from 60 to 100 and from 200 to 300: the band's 100 to 200 is left.
         w[0].points = vec![(100, 30), (100, 80), (200, 80), (200, 30)];
-        assert_eq!(audit(&m, &l, &w, &[], Measure::Flow), Vec::<String>::new(), "the line overlaps nothing");
-        assert!(audit(&m, &l, &w, &plans, Measure::Flow).contains(&"edge-a-to-b".to_string()));
+        assert_eq!(audit(&m, &l, &w, &[]), Vec::<String>::new(), "the line overlaps nothing");
+        assert!(audit(&m, &l, &w, &plans).contains(&"edge-a-to-b".to_string()));
     }
 
     /// The built-in rules with the services `from` renamed `to`, and `model` with its parts of

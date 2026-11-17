@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BinaryHeap};
 
 use crate::layout::{FrameKind, Icon, Layout, Rect};
 use crate::lines::Line;
-use crate::measure::Measure;
+use crate::measure::{frame_name_box, name_area};
 use crate::model::{Area, Axis, Model};
 use crate::route::{port_point, Bend, Ctx, Keep, LinePlan, Port, Side, Through, LEVEL, RANK_AUTO, RANK_MAIN};
 
@@ -76,11 +76,6 @@ pub(crate) fn dir_of(a: Pt, b: Pt) -> Option<Dir> {
 
 pub(crate) fn center(r: Rect) -> Pt {
     (r.x + r.w / 2, r.y + r.h / 2)
-}
-
-/// The left or right side of `a` that faces `b`.
-pub(crate) fn facing(a: Rect, b: Rect) -> Side {
-    if center(b).0 >= center(a).0 { Side::Right } else { Side::Left }
 }
 
 /// The rectangle of no width or no height an axis-aligned segment covers.
@@ -197,8 +192,7 @@ pub(crate) struct Scene<'a> {
     xs: Vec<i32>,
     ys: Vec<i32>,
     /// The planned paths of side lines, with the two parts each joins: other lines may not cross
-    /// them, so a line goes round a side part and its partner instead of between them. Only in
-    /// the layout without a VPC.
+    /// them, so a line goes round a side part and its partner instead of between them.
     pub(crate) barriers: Vec<(String, String, Vec<Pt>)>,
     /// The VPC frames, and the parts outside every VPC: a line between two such parts may not
     /// pass through the inside of a VPC frame, where it would read as a line to the parts in it.
@@ -235,9 +229,9 @@ impl Fence {
 }
 
 impl<'a> Scene<'a> {
-    pub(crate) fn new(layout: &'a Layout, measure: Measure) -> Scene<'a> {
-        let labels: Vec<(&str, Rect)> = layout.icons.iter().map(|i| (i.id.as_str(), measure.icon_name(i))).collect();
-        let frame_names: Vec<Rect> = layout.frames.iter().map(|f| measure.frame_name(f)).collect();
+    pub(crate) fn new(layout: &'a Layout) -> Scene<'a> {
+        let labels: Vec<(&str, Rect)> = layout.icons.iter().map(|i| (i.id.as_str(), name_area(i))).collect();
+        let frame_names: Vec<Rect> = layout.frames.iter().map(frame_name_box).collect();
         // An icon and its label form one block, so no channel runs between them.
         let blocks = layout.icons.iter().zip(&labels).map(|(i, l)| {
             let (x, y) = (i.rect.x.min(l.1.x), i.rect.y);

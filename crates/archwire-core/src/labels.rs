@@ -1,7 +1,7 @@
 //! Placing a line's label along the line.
 
 use crate::layout::Rect;
-use crate::measure::{wire_label_area, Measure};
+use crate::measure::{label_margin, wire_label_area};
 use crate::model::Axis;
 use crate::path::{alongside, Pt};
 use crate::route::Ctx;
@@ -95,7 +95,7 @@ impl<'a> Ctx<'a> {
         let mut tries = Vec::new();
         for between in [0, 1] {
             for margin in [LABEL_ROOM, LABEL_MARGIN] {
-                let margin = self.measure.label_margin(margin);
+                let margin = label_margin(margin);
                 tries.extend(texts.iter().map(|t| (between, margin, t)));
             }
         }
@@ -123,7 +123,7 @@ impl<'a> Ctx<'a> {
             }
         }
         let area = wire_label_area(&one, usual_point, level, false);
-        if self.scene.label_clear(area, self.measure.label_margin(LABEL_MARGIN), paths, me, placed) {
+        if self.scene.label_clear(area, label_margin(LABEL_MARGIN), paths, me, placed) {
             return LabelSpot { text: one, above: level, flip: false, at: None, area: Some(area), clear: true };
         }
         if let Some(s) = spots.iter().find(|s| self.scene.label_clear(s.5, s.0, paths, me, placed)) {
@@ -143,7 +143,7 @@ impl<'a> Ctx<'a> {
         LabelSpot { text: one, above: level, flip: false, at: None, area: Some(area), clear: false }
     }
 
-    /// In the layout without a VPC, a bent line's label goes first on its first stretch along
+    /// A bent line's label goes first on its first stretch along
     /// the arrangement's axis, when no other line runs along it: there it reads as this line's
     /// alone, where a label beside a channel shared by bends can read as a neighbour's. Running
     /// down, the first upright stretch, with the label beside it on the right, or on the left.
@@ -152,7 +152,7 @@ impl<'a> Ctx<'a> {
     /// Within the stretch and on one line; None if no spot there is clear.
     fn label_on_axis_stretch(&self, text: &str, (paths, me): (&[Vec<Pt>], usize), axis: Axis, placed: &[Rect]) -> Option<LabelSpot> {
         let path = &paths[me];
-        if self.measure != Measure::Flow || path.len() < 3 {
+        if path.len() < 3 {
             return None;
         }
         let k = match axis {
@@ -176,7 +176,7 @@ impl<'a> Ctx<'a> {
                 && (along(p) - along(a)).abs() < first
         };
         for margin in [LABEL_ROOM, LABEL_MARGIN] {
-            let margin = self.measure.label_margin(margin);
+            let margin = label_margin(margin);
             for (at, p, on_level) in self.label_spots(path, before + first / 2, 0) {
                 if on_level != horizontal || !on_first(p) {
                     continue;

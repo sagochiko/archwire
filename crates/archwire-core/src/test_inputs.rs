@@ -1,69 +1,11 @@
 //! Definitions read by more than one module's tests, kept in one place so that every test reading
 //! a list reads the same definitions in the same order.
 
-/// The fixed web examples: definitions with a VPC that give a diagram.
-pub(crate) const WEB_EXAMPLES: [&str; 10] = [
-    include_str!("../../../tests/cases/aux-to-side/def.yaml"),
-    include_str!("../../../tests/cases/endpoint-3az-en/def.yaml"),
-    include_str!("../../../tests/cases/endpoint-3az-ja/def.yaml"),
-    include_str!("../../../tests/cases/endpoint-ja/def.yaml"),
-    include_str!("../../../tests/cases/hole-s3/def.yaml"),
-    include_str!("../../../tests/cases/web-2az-en/def.yaml"),
-    include_str!("../../../tests/cases/web-2az-ja/def.yaml"),
-    include_str!("../../../tests/cases/web-3az-en/def.yaml"),
-    include_str!("../../../tests/cases/web-3az-ja/def.yaml"),
-    include_str!("../../../tests/cases/web-attach-en/def.yaml"),
-];
-
-/// Definitions with a VPC from the tests of inference, the old grid layout and its routing that
-/// are accepted, each once and none of them among the web examples or the heavy variants.
-pub(crate) const VPC_TEST_DEFINITIONS: [&str; 27] = [
-    "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n",
-    "flows:\n  - user -> alb -> ecs -> aurora\nset:\n  azs: 3\n",
-    "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\n",
-    "flows:\n  - user -> alb -> ecs\n  - cloudfront -> s3\n  - user -> cloudfront\n  - ecs -> s3\n",
-    "flows:\n  - user -> alb -> ecs\n  - ecs -> internet\n",
-    "flows:\n  - user -> alb -> ecs\n  - ecs -> internet\nset:\n  nat: single\n",
-    "flows:\n  - user -> alb -> ecs\n  - ecs ~> cloudwatch\n",
-    "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - cloudfront -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\n  - acm -- cloudfront\n",
-    "flows:\n  - user -> cloudfront -> alb -> ecs\n  - alb ~> s3\n  - cloudfront ~> s3\n",
-    "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\nchoose:\n  route.ecs.s3: endpoint\n",
-    "flows:\n  - user -> alb -> ecs -> aurora\n",
-    "flows:\n  - user -> alb -> ecs -> aurora\n  - aurora -> ecs\n",
-    "flows:\n  - user -> cloudfront -> alb -> ecs\n",
-    "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\n  - ecs ~> cloudwatch\nset:\n  lang: ja\n",
-    "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\nchoose:\n  route.ecs.s3: endpoint\nset:\n  lang: ja\n",
-    "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n",
-    "flows:\n  - user -> alb -> ecs\n  - alb ~> cloudwatch\n",
-    "flows:\n  - user -> alb -> ecs -> aurora\n  - ecs ~> cloudwatch\n",
-    "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\n",
-    "flows:\n  - user -> alb -> ecs -> s3\nset:\n  lang: ja\n  azs: 3\nchoose:\n  route.ecs.s3: endpoint\n",
-    "flows:\n  - user -> alb -> ecs -> s3\n  - ecs ~> cloudwatch\nset:\n  lang: ja\nchoose:\n  route.ecs.s3: endpoint\n",
-    "flows:\n  - user -> alb -> ecs -> s3\n  - ecs ~> cloudwatch\nset:\n  lang: ja\n  azs: 3\nchoose:\n  route.ecs.s3: endpoint\n",
-    "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\nset:\n  azs: 3\n  lang: ja\nchoose:\n  route.ecs.s3: nat\n",
-    "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\nset:\n  azs: 3\n  lang: ja\nchoose:\n  route.ecs.s3: endpoint\n",
-    "flows:\n  - user -> alb -> ecs -> aurora\n  - ecs -> s3\nchoose:\n  route.ecs.s3: nat\n",
-    "flows:\n  - user -> alb -> ecs -> aurora\n  - alb -> aurora\n  - aurora ~> cloudwatch\n  - alb ~> s3\nset:\n  azs: 3\n",
-    "flows:\n  - user -> cloudfront -> alb -> ecs\n  - acm -- cloudfront\n  - waf -- cloudfront\n  - cloudfront -> s3\n  - cloudfront ~> cloudwatch\n",
-];
-
 /// Two zones in Japanese with lines from ECS and Aurora to S3 and the side column: crowded, as in the routing tests.
 pub(crate) const CROWDED_S3_JA: &str = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - cloudfront ~> cloudwatch\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - aurora ~> cloudwatch\n  - waf -- cloudfront\n  - acm -- cloudfront\n  - aurora -> s3\n  - alb ~> s3\nset:\n  azs: 2\n  lang: ja\n  nat: per-az\nchoose:\n  route.ecs.s3: endpoint\n  route.aurora.s3: nat\n";
 
 /// Two zones in English with lines from every part to S3 and CloudWatch: crowded, as in the routing tests.
 pub(crate) const CROWDED_SIDE_EN: &str = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - cloudfront -> s3\n  - cloudfront ~> cloudwatch\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n  - aurora ~> cloudwatch\n  - ecs -> internet\n  - waf -- cloudfront\n  - acm -- cloudfront\n  - user -> alb\n  - aurora -> s3\n  - alb ~> s3\n  - ecs ~> s3\nset:\n  azs: 2\n  lang: en\n  nat: per-az\nchoose:\n  route.aurora.s3: nat\n";
-
-/// The heavy definition of the routing tests with each of its settings.
-pub(crate) fn heavy_variants() -> Vec<String> {
-    let heavy = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - user -> alb\n  - cloudfront -> s3\n  - cloudfront ~> cloudwatch\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n  - ecs -> internet\n  - waf -- cloudfront\n  - acm -- cloudfront\nchoose:\n  route.ecs.s3: endpoint\n";
-    let single = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\n  - acm -- cloudfront\n  - ecs -> internet\n";
-    let mut out = Vec::new();
-    for extra in ["", "set:\n  azs: 3\n", "set:\n  nat: single\n", "set:\n  azs: 3\n  nat: single\n", "set:\n  lang: ja\n"] {
-        out.push(format!("{heavy}{extra}"));
-        out.push(format!("{single}{extra}"));
-    }
-    out
-}
 
 pub(crate) const WEB_CASES: [(&str, &str); 10] = [
     ("web-2az-ja", include_str!("../../../tests/cases/web-2az-ja/def.yaml")),
@@ -333,9 +275,6 @@ mod tests {
     // Fails if an input silently drops out of a shared list.
     #[test]
     fn the_shared_inputs_keep_their_counts() {
-        assert_eq!(WEB_EXAMPLES.len(), 10);
-        assert_eq!(VPC_TEST_DEFINITIONS.len(), 27);
-        assert_eq!(heavy_variants().len(), 10);
         assert_eq!(WEB_CASES.len(), 10);
         assert_eq!(generated_with_a_vpc().len(), 1008);
         assert_eq!(API_CASES.len(), 7);
@@ -347,10 +286,7 @@ mod tests {
     #[test]
     fn the_shared_inputs_parse_and_appear_once() {
         let lists: Vec<(&str, Vec<String>)> = vec![
-            ("WEB_EXAMPLES", WEB_EXAMPLES.iter().map(|s| s.to_string()).collect()),
-            ("VPC_TEST_DEFINITIONS", VPC_TEST_DEFINITIONS.iter().map(|s| s.to_string()).collect()),
             ("CROWDED", vec![CROWDED_S3_JA.to_string(), CROWDED_SIDE_EN.to_string()]),
-            ("heavy_variants", heavy_variants()),
             ("WEB_CASES", WEB_CASES.iter().map(|(_, s)| s.to_string()).collect()),
             ("FEWER_READERS", vec![FEWER_READERS.to_string()]),
             ("generated_with_a_vpc", generated_with_a_vpc()),

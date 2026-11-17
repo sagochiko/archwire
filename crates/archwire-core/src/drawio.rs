@@ -19,7 +19,7 @@ const MAIN_EDGE_STYLE: &str = "edgeStyle=orthogonalEdgeStyle;html=1;endArrow=blo
 const AUX_EDGE_STYLE: &str = "edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeColor=#E7157B;rounded=0;dashed=1;labelBackgroundColor=none;verticalAlign=bottom;align=left;spacingLeft=6";
 const AUX_COLOR: &str = "strokeColor=#E7157B";
 const ARROW: &str = "endArrow=block;endFill=1";
-/// An association line in the layout without a VPC has no arrowhead.
+/// An association line has no arrowhead.
 const NO_ARROW: &str = "endArrow=none";
 /// A line whose route is still a hole is drawn in the auxiliary style, in grey.
 const HOLE_COLOR: &str = "strokeColor=#879196";
@@ -29,9 +29,8 @@ const LABEL_LEFT: &str = "align=right;spacingRight=6";
 const LABEL_BOTTOM: &str = "verticalAlign=bottom";
 const LABEL_TOP: &str = "verticalAlign=top";
 
-/// `assoc_arrow` is whether association lines (`--`) end in an arrowhead: they do in the VPC
-/// layout and do not in the layout without a VPC. The caller says which.
-pub fn write(model: &Model, layout: &Layout, wires: &[Wire], diag: &Diagnostics, rules: &Rules, assoc_arrow: bool) -> String {
+/// Association lines (`--`) end without an arrowhead.
+pub fn write(model: &Model, layout: &Layout, wires: &[Wire], diag: &Diagnostics, rules: &Rules) -> String {
     let origin = |parent: &Option<String>| parent.as_deref().map_or((0, 0), |p| {
         let r = layout.rect(p);
         (r.x, r.y)
@@ -73,7 +72,6 @@ pub fn write(model: &Model, layout: &Layout, wires: &[Wire], diag: &Diagnostics,
         let mut style = match w.style {
             WireStyle::Main => MAIN_EDGE_STYLE.to_string(),
             WireStyle::Aux => AUX_EDGE_STYLE.to_string(),
-            WireStyle::Assoc if assoc_arrow => AUX_EDGE_STYLE.to_string(),
             WireStyle::Assoc => AUX_EDGE_STYLE.replace(ARROW, NO_ARROW),
             WireStyle::Hole => AUX_EDGE_STYLE.replace(AUX_COLOR, HOLE_COLOR),
         };
@@ -306,7 +304,7 @@ mod tests {
     fn coordinates_are_relative_to_the_parent_frame() {
         let rules = crate::rules::Rules::builtin();
         let (model, layout) = two_in_a_region();
-        let x = super::write(&model, &layout, &[], &crate::diag::Diagnostics::default(), &rules, false);
+        let x = super::write(&model, &layout, &[], &crate::diag::Diagnostics::default(), &rules);
         let cell = |id: &str| x.split("<object ").find(|s| s.starts_with(&format!("id=\"{id}\""))).unwrap().to_string();
         // The Region frame has no parent: its own coordinates. The parts: 250 - 100 and 130 - 50 from the Region's corner.
         assert!(cell("region").contains("parent=\"1\"") && cell("region").contains("x=\"100\" y=\"50\" width=\"600\" height=\"300\""), "{x}");
@@ -347,7 +345,7 @@ mod tests {
             line("near-source", "HTTPS", false, false, true, None),
             line("left-alone", "HTTPS", false, false, false, None),
         ];
-        let x = super::write(&model, &layout, &wires, &crate::diag::Diagnostics::default(), &rules, false);
+        let x = super::write(&model, &layout, &wires, &crate::diag::Diagnostics::default(), &rules);
         let line = |id: &str| x.lines().find(|l| l.contains(&format!("id=\"{id}\""))).unwrap().to_string();
         // Moved along the line, above it and centred.
         let above = line("moved-above");
@@ -405,7 +403,7 @@ mod tests {
             source: r.source.clone(),
         };
         let diag = Diagnostics { derived: vec![why], ..Default::default() };
-        let x = super::write(&model, &layout, &[], &diag, &rules, true);
+        let x = super::write(&model, &layout, &[], &diag, &rules);
         let cell = |id: &str| x.split("<object ").find(|s| s.starts_with(&format!("id=\"{id}\""))).unwrap().split('>').next().unwrap().to_string();
         assert!(cell("s3").contains("rule=\"regional-service-outside-vpc\""));
         assert!(!cell("s3.web").contains("rule="));
@@ -442,7 +440,7 @@ mod tests {
         };
         let icon = |id: &str, x: i32| Icon { id: id.into(), label: id.into(), lines: 1, rect: Rect { x, y: 0, w: 60, h: 60 }, parent: None };
         let layout = Layout { frames: Vec::new(), icons: vec![icon("waf", 0), icon("cloudfront", 200)] };
-        let x = super::write(&model, &layout, &[], &Diagnostics::default(), &rules, false);
+        let x = super::write(&model, &layout, &[], &Diagnostics::default(), &rules);
         let has = |id: &str| x.split("<object ").any(|s| s.starts_with(&format!("id=\"{id}\"")));
         assert!(has("waf") && has("cloudfront"), "{x}");
     }

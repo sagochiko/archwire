@@ -23,7 +23,7 @@ const AZ_NAME_H: i32 = 20;
 const WIRE_LABEL_LINE: i32 = 13;
 const WIRE_LABEL_BESIDE: i32 = 6;
 
-/// The least room between a line and another line's label in the layout without a VPC.
+/// The least room between a line and another line's label.
 const FLOW_LABEL_ROOM: i32 = 3;
 
 fn text_width(text: &str) -> i32 {
@@ -112,7 +112,7 @@ fn name_latin_width(c: char) -> i32 {
     }
 }
 
-/// Text width of an icon's or a frame's name in the layout without a VPC: Latin text letter by
+/// Text width of an icon's or a frame's name: Latin text letter by
 /// letter, other text at the width of a full-width character.
 pub(crate) fn name_text_width(text: &str) -> i32 {
     text.lines()
@@ -121,13 +121,13 @@ pub(crate) fn name_text_width(text: &str) -> i32 {
         .unwrap_or(0)
 }
 
-/// The area an icon's name takes in the layout without a VPC: like `label_area`, measured with `name_text_width`.
+/// The area an icon's name takes: like `label_area`, measured with `name_text_width`.
 pub(crate) fn name_area(i: &Icon) -> Rect {
     let half = (name_text_width(&i.label) + 1) / 2;
     Rect { w: 2 * half, x: i.rect.x + i.rect.w / 2 - half, ..label_area(i) }
 }
 
-/// The area a frame's name takes at its top-left corner in the layout without a VPC.
+/// The area a frame's name takes at its top-left corner, measured with `name_text_width`.
 pub(crate) fn frame_name_box(f: &Frame) -> Rect {
     Rect { w: FRAME_NAME_INDENT + name_text_width(&f.label), ..frame_name_area(f) }
 }
@@ -152,37 +152,11 @@ pub(crate) const NAME_WIDE_DRAWN: [i32; 39] = [
     120, 120, 120, 120, 120, 111, 116, 120, 120, 120, 120, 120, 120,
 ];
 
-/// How names are measured: the VPC layout keeps its own measure; the layout without a VPC uses
-/// `name_area` and `frame_name_box`, never narrower than draw.io draws a name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Measure {
-    Grid,
-    Flow,
-}
-
-impl Measure {
-    pub(crate) fn icon_name(self, i: &Icon) -> Rect {
-        match self {
-            Measure::Grid => label_area(i),
-            Measure::Flow => name_area(i),
-        }
-    }
-    pub(crate) fn frame_name(self, f: &Frame) -> Rect {
-        match self {
-            Measure::Grid => frame_name_area(f),
-            Measure::Flow => frame_name_box(f),
-        }
-    }
-    /// The least room kept between a line's label and anything else. In the layout without a VPC
-    /// a line may not run closer than `FLOW_LABEL_ROOM` to another line's label: draw.io draws the
-    /// tops of wide letters a pixel or two from the box `wire_label_area` gives, so a line along
-    /// the box's edge touches the text.
-    pub(crate) fn label_margin(self, margin: i32) -> i32 {
-        match self {
-            Measure::Grid => margin,
-            Measure::Flow => margin.max(FLOW_LABEL_ROOM),
-        }
-    }
+/// The least room kept between a line's label and anything else. A line may not run closer than
+/// `FLOW_LABEL_ROOM` to another line's label: draw.io draws the tops of wide letters a pixel or two
+/// from the box `wire_label_area` gives, so a line along the box's edge touches the text.
+pub(crate) fn label_margin(margin: i32) -> i32 {
+    margin.max(FLOW_LABEL_ROOM)
 }
 
 /// The area a line's label takes when anchored at `p`, as draw.io draws it at font size 11:
@@ -223,7 +197,7 @@ mod tests {
         }
         // Characters not measured count at the widest width, never narrower.
         assert!(name_text_width("\t") >= name_text_width("@"));
-        // The VPC layout's measure is left as it was.
+        // The coarser measure `label_area` and `frame_name_area` start from is left as it was.
         assert_eq!(text_width("mmmm"), 28);
     }
 }

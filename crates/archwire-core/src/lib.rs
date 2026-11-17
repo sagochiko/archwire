@@ -7,12 +7,10 @@ pub mod engine;
 pub mod inference;
 pub mod layout;
 pub mod model;
-pub mod place;
 pub mod route;
 pub mod rules;
 
 mod audit;
-mod grid;
 mod ids;
 mod labels;
 mod lines;
@@ -22,8 +20,8 @@ mod path;
 pub(crate) mod test_inputs;
 
 use diag::{Diagnostics, Problem, Versions};
+use arrange::Placement;
 use model::Model;
-use place::Placement;
 use rules::Rules;
 
 pub struct Output {
@@ -78,7 +76,7 @@ fn flow_output(model: &Model, placed: Result<Placement, Vec<Problem>>, mut diagn
     };
     let (wires, notes) = route::route_planned(model, &p.layout, rules, &p.lines);
     diagnostics.notes.extend(notes);
-    let drawio = drawio::write(model, &p.layout, &wires, &diagnostics, rules, false);
+    let drawio = drawio::write(model, &p.layout, &wires, &diagnostics, rules);
     Output { drawio: Some(drawio), diagnostics }
 }
 
@@ -93,15 +91,15 @@ pub(crate) fn arranged_drawio(
 ) -> Result<(String, Vec<String>), Vec<Problem>> {
     let p = arrange::arrange(model, rules, axis)?;
     let (wires, notes) = route::route_planned(model, &p.layout, rules, &p.lines);
-    Ok((drawio::write(model, &p.layout, &wires, diagnostics, rules, false), notes))
+    Ok((drawio::write(model, &p.layout, &wires, diagnostics, rules), notes))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_inputs::{
-        heavy_variants, CROWDED_SIDE_EN, CROWDED_S3_JA, ID_CLASH, LOAD_BALANCER_ALONE, MIX_LOGS, MIX_NAT, MIX_SMALLEST, MIX_WEB, ONE_FUNCTION_THREE_WAYS,
-        TWIN_APPS, TWO_WEBS, VPC_TEST_DEFINITIONS, WEB_CASES, WEB_EXAMPLES,
+        CROWDED_SIDE_EN, CROWDED_S3_JA, ID_CLASH, LOAD_BALANCER_ALONE, MIX_LOGS, MIX_NAT, MIX_SMALLEST, MIX_WEB, ONE_FUNCTION_THREE_WAYS, TWIN_APPS,
+        TWO_WEBS, WEB_CASES,
     };
 
     // Fails if a definition once stopped for mixing VPC parts with separate services stops for
@@ -397,70 +395,6 @@ mod tests {
         for src in [rest, wide.as_str(), API] {
             assert_eq!(main_lines_across_side_lines(src), Vec::<String>::new(), "{src}");
         }
-    }
-
-    /// How many definitions the old and the new layout are compared on: the web examples, the test
-    /// definitions and the heavy variants, less the one test definition that writes `alb -> aurora`
-    /// (`VPC_TEST_DEFINITIONS[25]`), which the inference does not accept.
-    const KEPT: usize = 46;
-
-    /// The definitions whose diagnostics must not change with the layout, with their models: the
-    /// fixed lists above, none of which writes a direction or has three zones with fewer Readers.
-    /// Each must write a VPC part and give a model, but `VPC_TEST_DEFINITIONS[25]`, which must stop
-    /// on `alb -> aurora` and is left out; one that no longer does fails here by name.
-    fn kept_definitions() -> Vec<(String, Model, Diagnostics)> {
-        let rules = Rules::builtin();
-        let all: Vec<String> = WEB_EXAMPLES.iter().chain(VPC_TEST_DEFINITIONS.iter()).map(|s| s.to_string()).chain(heavy_variants()).collect();
-        assert_eq!(all.len(), KEPT + 1);
-        let mut out: Vec<(String, Model, Diagnostics)> = Vec::new();
-        let mut stopped = Vec::new();
-        for src in all {
-            assert!(!out.iter().any(|(s, _, _)| *s == src), "listed twice:\n{src}");
-            let def = def::parse(&src).unwrap();
-            let vpc = def.links.iter().flat_map(|l| [&l.from, &l.to]).any(|r| rules.service(&r.service).is_some_and(|s| s.scope == rules::Scope::Vpc));
-            assert!(vpc, "writes no VPC part:\n{src}");
-            assert!(!def.set.contains_key("direction"), "writes a direction:\n{src}");
-            assert!(!(def.set.get("azs").map(String::as_str) == Some("3") && def.set.contains_key("readers")), "fewer Readers:\n{src}");
-            let (model, d) = inference::infer(&def, &rules);
-            match model {
-                Some(m) => out.push((src, m, d)),
-                None => {
-                    assert_eq!(src, VPC_TEST_DEFINITIONS[25], "no model: {:?}\n{src}", d.errors);
-                    let got: Vec<_> = d.errors.iter().map(|e| (e.code.as_str(), e.at.as_deref(), e.got.as_deref())).collect();
-                    assert_eq!(got, [("UNSUPPORTED", Some("flows[1]"), Some("alb -> aurora"))], "{src}");
-                    stopped.push(src);
-                }
-            }
-        }
-        assert_eq!(stopped.len(), 1);
-        assert_eq!(out.len(), KEPT);
-        out
-    }
-
-    // Fails if the new layout drops the note on lines merged across zones, or breaks a line the old layout drew whole.
-    // CROWDED_S3_JA and CROWDED_SIDE_EN are left out: the old layout cannot draw them without faults either.
-    #[test]
-    fn old_and_new_layouts_give_the_same_diagnostics() {
-        let rules = Rules::builtin();
-        let kept = kept_definitions();
-        assert!(kept.iter().all(|(s, _, _)| s != CROWDED_S3_JA && s != CROWDED_SIDE_EN));
-        let mut differ = Vec::new();
-        for (src, model, d) in &kept {
-            let mut old = d.clone();
-            let layout = layout::layout(model, &rules);
-            old.notes.extend(route::route(model, &layout, &rules).1);
-            for axis in [model::Axis::Down, model::Axis::Right] {
-                let mut new = d.clone();
-                match arranged_drawio(model, d, &rules, axis) {
-                    Ok((_, notes)) => new.notes.extend(notes),
-                    Err(e) => new.errors.extend(e),
-                }
-                if old.to_json() != new.to_json() {
-                    differ.push(format!("{axis:?}\n{src}old notes: {:?}\nnew notes: {:?}\nnew errors: {:?}", old.notes, new.notes, new.errors));
-                }
-            }
-        }
-        assert!(differ.is_empty(), "{} differ:\n{}", differ.len(), differ.join("\n----\n"));
     }
 
     /// The lines the new layout cannot draw clear in the crowded definitions, by axis. Down:

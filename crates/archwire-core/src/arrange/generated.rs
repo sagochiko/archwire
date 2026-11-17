@@ -224,7 +224,7 @@ fn draw_stages(src: &str, axis: Axis) -> (Drawn, Vec<String>) {
         Err(p) => return stop(Drawn::Panicked(p)),
     };
     diag.notes.extend(notes.iter().cloned());
-    let xml = match guarded("write", || crate::drawio::write(&model, &placement.layout, &wires, &diag, &r, false)) {
+    let xml = match guarded("write", || crate::drawio::write(&model, &placement.layout, &wires, &diag, &r)) {
         Ok(x) => x,
         Err(p) => return stop(Drawn::Panicked(p)),
     };
