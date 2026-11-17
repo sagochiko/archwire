@@ -1,0 +1,7 @@
+flows:
+  - user -> cloudfront -> alb -> ecs -> aurora
+  - ecs ~> cloudwatch
+  - cloudwatch -> sns
+  - guardduty -> eventbridge -> stepfunctions -> sns
+set:
+  lang: ja

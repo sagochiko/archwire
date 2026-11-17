@@ -1,0 +1,6 @@
+flows:
+  - guardduty -> securityhub -> eventbridge -> sns
+  - inspector -> securityhub
+  - config -> securityhub
+set:
+  lang: ja

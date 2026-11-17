@@ -1,0 +1,4 @@
+flows:
+  - guardduty -> securityhub -> eventbridge -> stepfunctions
+  - stepfunctions -> ssm
+  - stepfunctions -> sns
