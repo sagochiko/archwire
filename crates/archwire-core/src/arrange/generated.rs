@@ -732,3 +732,94 @@ fn count_lines_meeting_at_corners() {
     std::fs::write(path.with_file_name("meet-drawn.tsv"), drawn.iter().map(|(s, n)| format!("{s}\t{n}\n")).collect::<String>()).unwrap();
 }
 
+
+/// Every line's label lying just below or above a part's name, the two sharing some width, as
+/// rows "line | label | part | own | side | gap | label box | name box": `own` when the part is an
+/// end of the line, `side` below or above, `gap` the height between the two boxes, up to `most`.
+fn labels_by_names(layout: &Layout, wires: &[Wire], most: i32) -> Vec<String> {
+    let mut out = Vec::new();
+    for w in wires {
+        let path = crate::audit::drawn_path(w, layout);
+        let Some(l) = crate::audit::audit_wire_label(w, &path) else { continue };
+        for i in &layout.icons {
+            let n = crate::measure::name_area(i);
+            if !(l.x < n.x + n.w && n.x < l.x + l.w) {
+                continue;
+            }
+            let (side, gap) = if l.y >= n.y + n.h {
+                ("below", l.y - (n.y + n.h))
+            } else if l.y + l.h <= n.y {
+                ("above", n.y - (l.y + l.h))
+            } else {
+                continue;
+            };
+            if gap > most {
+                continue;
+            }
+            let own = [&w.from, &w.to].iter().any(|e| **e == i.id) || w.represents.iter().any(|(a, b)| *a == i.id || *b == i.id);
+            let label = w.label.replace('\n', " ");
+            out.push(format!("{}\t{label}\t{}\t{own}\t{side}\t{gap}\t{:?}\t{:?}", w.id, i.id, (l.x, l.y, l.w, l.h), (n.x, n.y, n.w, n.h)));
+        }
+    }
+    out
+}
+
+// Writes, for every set of inputs, each line's label lying close below or above a part's name
+// to the file named by ARCHWIRE_LABEL_NAME_OUT, and the drawings counted per set beside it. It
+// runs only when named.
+#[test]
+#[ignore]
+fn count_labels_by_names() {
+    let Some(path) = folder_from("ARCHWIRE_LABEL_NAME_OUT") else { return };
+    let mut sets: Vec<(&str, String, Model, Axis)> = Vec::new();
+    for (name, src) in all_inputs() {
+        for (axis, way) in AXES {
+            if let Some(m) = model_of(&src) {
+                sets.push(("mixed", format!("{name} {way}"), m, axis));
+            }
+        }
+    }
+    for (k, src) in crate::test_inputs::generated_with_a_vpc().into_iter().enumerate() {
+        for (axis, way) in AXES {
+            if let Some(m) = model_of(&src) {
+                sets.push(("vpc2016", format!("generated_with_a_vpc#{k} {way}"), m, axis));
+            }
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let hand: Vec<(String, Model)> = super::azgrid::tests::inputs().into_iter().filter(|(n, _, _)| n.starts_with("mix-")).map(|(n, m, _)| (n, m)).collect();
+    let mut eighty: Vec<std::path::PathBuf> = std::fs::read_dir(root.join("out/view/m2b/gen-before")).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|e| e == "yaml")).collect();
+    eighty.sort();
+    for f in eighty {
+        let src = std::fs::read_to_string(&f).unwrap();
+        let stem = f.file_stem().unwrap().to_str().unwrap().to_string();
+        let axis = if stem.ends_with("-down") { Axis::Down } else { Axis::Right };
+        let m = match src.strip_prefix("# hand-built model: ") {
+            Some(n) => hand.iter().find(|(h, _)| h == n.trim()).expect("a hand-built model").1.clone(),
+            None => model_of(&src).expect("a model"),
+        };
+        sets.push(("eighty", stem, m, axis));
+    }
+    let mut cases: Vec<std::path::PathBuf> = std::fs::read_dir(root.join("tests/cases")).unwrap().map(|e| e.unwrap().path()).filter(|p| !p.file_name().unwrap().to_str().unwrap().starts_with("err-")).collect();
+    cases.sort();
+    for c in cases {
+        let src = std::fs::read_to_string(c.join("def.yaml")).unwrap();
+        let m = model_of(&src).expect("a case gives a model");
+        let axis = m.direction.unwrap_or_else(|| super::default_axis(&m));
+        sets.push(("cases", c.file_name().unwrap().to_str().unwrap().to_string(), m, axis));
+    }
+    let mut out = String::from("set\tdrawing\tline\tlabel\tpart\town\tside\tgap\tlabel_box\tname_box\n");
+    let mut drawn: Vec<(&str, usize)> = Vec::new();
+    for (set, name, m, axis) in &sets {
+        let Some((layout, wires)) = routed(m, *axis) else { continue };
+        match drawn.iter_mut().find(|d| d.0 == *set) {
+            Some(d) => d.1 += 1,
+            None => drawn.push((set, 1)),
+        }
+        for r in labels_by_names(&layout, &wires, 40) {
+            out.push_str(&format!("{set}\t{name}\t{r}\n"));
+        }
+    }
+    std::fs::write(&path, out).unwrap();
+    std::fs::write(path.with_file_name("label-name-drawn.tsv"), drawn.iter().map(|(s, n)| format!("{s}\t{n}\n")).collect::<String>()).unwrap();
+}
