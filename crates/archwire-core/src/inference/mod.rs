@@ -575,6 +575,148 @@ mod tests {
         assert_eq!(d.exit_code(), 0);
     }
 
+    /// The web stack in Japanese with these lines added.
+    fn web_with(lines: &str) -> String {
+        let web = include_str!("../../../../tests/cases/web-2az-ja/def.yaml");
+        let src = web.replace("set:\n", &format!("{lines}set:\n"));
+        assert_ne!(web, src);
+        src
+    }
+
+    fn node_of<'m>(m: &'m Model, id: &str) -> (Area, Option<&'m str>) {
+        let n = m.nodes.iter().find(|n| n.id == id).unwrap_or_else(|| panic!("no node {id}"));
+        (n.area, n.region.as_deref())
+    }
+
+    // Fails if a load balancer's certificate is drawn in us-east-1 or outside the Region, or keeps
+    // the reasons of a global part or of CloudFront's certificate.
+    #[test]
+    fn a_load_balancer_certificate_stays_in_the_region() {
+        let (m, d) = run(&web_with("  - acm -- alb\n"));
+        let m = m.unwrap_or_else(|| panic!("{:?}", d.errors));
+        assert_eq!(d.exit_code(), 0, "{:?}", d.errors);
+        assert_eq!(node_of(&m, "acm"), (Area::Region, None));
+        assert_eq!(rules_of(&d, "acm"), ["alb-certificate-in-load-balancer-region"]);
+        assert_eq!(label(&m, "acm", "alb"), "certificate");
+    }
+
+    // Fails if a load balancer's web ACL is drawn in the AWS Cloud frame or keeps the reason of a
+    // global part.
+    #[test]
+    fn a_load_balancer_web_acl_stays_in_the_region() {
+        let (m, d) = run(&web_with("  - waf -- alb\n"));
+        let m = m.unwrap_or_else(|| panic!("{:?}", d.errors));
+        assert_eq!(d.exit_code(), 0, "{:?}", d.errors);
+        assert_eq!(node_of(&m, "waf"), (Area::Region, None));
+        assert_eq!(rules_of(&d, "waf"), ["regional-web-acl-in-resource-region"]);
+        assert_eq!(label(&m, "waf", "alb"), "web_acl");
+    }
+
+    // Fails if the override of one attached part leaks to another.
+    #[test]
+    fn four_attachments_keep_their_own_places() {
+        let src = web_with("  - acm.cdn -- cloudfront\n  - acm.alb -- alb\n  - waf.cdn -- cloudfront\n  - waf.alb -- alb\n");
+        let (m, d) = run(&src);
+        let m = m.unwrap_or_else(|| panic!("{:?}", d.errors));
+        assert_eq!(d.exit_code(), 0, "{:?}", d.errors);
+        assert_eq!(node_of(&m, "acm.cdn"), (Area::Cloud, Some("us-east-1")));
+        assert_eq!(node_of(&m, "acm.alb"), (Area::Region, None));
+        assert_eq!(node_of(&m, "waf.cdn"), (Area::Cloud, None));
+        assert_eq!(node_of(&m, "waf.alb"), (Area::Region, None));
+        assert_eq!(rules_of(&d, "acm.cdn"), ["cloudfront-certificate-in-us-east-1"]);
+        assert_eq!(rules_of(&d, "acm.alb"), ["alb-certificate-in-load-balancer-region"]);
+        assert_eq!(rules_of(&d, "waf.cdn"), ["global-service-outside-region"]);
+        assert_eq!(rules_of(&d, "waf.alb"), ["regional-web-acl-in-resource-region"]);
+    }
+
+    /// The error of a part attached to both CloudFront and a load balancer, at line `at`.
+    fn stopped_on_both(src: &str, part: &str, at: &str, one: &str, other: &str) {
+        let (m, d) = run(src);
+        assert!(m.is_none(), "{src}");
+        assert_eq!(d.errors.len(), 1, "{:?}", d.errors);
+        assert_eq!(first(&d), ("UNSUPPORTED", Some(at), Some(part)), "{src}");
+        let message = &d.errors[0].message;
+        assert!(message.contains(&format!("`{part}` is attached to both `{one}` and `{other}`")), "{message}");
+        assert!(message.contains(&format!("`{part}.cloudfront -- cloudfront`")) && message.contains(&format!("`{part}.alb -- alb`")), "{message}");
+    }
+
+    // Fails if one certificate attached to CloudFront and to a load balancer is silently drawn as one.
+    #[test]
+    fn one_certificate_on_both_stops() {
+        stopped_on_both(&web_with("  - acm -- cloudfront\n  - acm -- alb\n"), "acm", "flows[5]", "cloudfront", "alb");
+    }
+
+    // Fails if a web ACL attached to CloudFront and to a load balancer is accepted: CloudFront's
+    // line has no Region of its own, so comparing the raw overrides misses it.
+    #[test]
+    fn one_web_acl_on_both_stops() {
+        stopped_on_both(&web_with("  - waf -- cloudfront\n  - waf -- alb\n"), "waf", "flows[5]", "cloudfront", "alb");
+    }
+
+    // Fails if the clash is looked for only on CloudFront's line.
+    #[test]
+    fn the_stop_comes_at_the_second_line_whatever_the_order() {
+        stopped_on_both(&web_with("  - acm -- alb\n  - acm -- cloudfront\n"), "acm", "flows[5]", "alb", "cloudfront");
+        stopped_on_both(&web_with("  - waf -- alb\n  - waf -- cloudfront\n"), "waf", "flows[5]", "alb", "cloudfront");
+    }
+
+    // Fails if a load balancer may have two web ACLs.
+    #[test]
+    fn one_web_acl_per_load_balancer() {
+        let (m, d) = run(&web_with("  - waf.a -- alb\n  - waf.b -- alb\n"));
+        assert!(m.is_none());
+        assert_eq!(d.errors.len(), 1, "{:?}", d.errors);
+        assert_eq!((first(&d), d.errors[0].rule.as_deref()), (("TOO_MANY_ATTACHED", Some("flows[5]"), Some("waf.b")), Some("one-web-acl-per-resource")));
+    }
+
+    // Fails if one web ACL on two load balancers in the Region is stopped, or is copied per load balancer.
+    #[test]
+    fn one_web_acl_on_two_load_balancers() {
+        let src = format!("{}  - waf -- alb.web\n  - waf -- alb.admin\n", crate::test_inputs::TWO_WEBS);
+        let (m, d) = run(&src);
+        let m = m.unwrap_or_else(|| panic!("{:?}", d.errors));
+        assert_eq!(d.exit_code(), 0, "{:?}", d.errors);
+        assert_eq!(m.nodes.iter().filter(|n| n.service == "waf").count(), 1);
+        assert_eq!(node_of(&m, "waf"), (Area::Region, None));
+        let lines: Vec<(&str, &str)> = m.edges.iter().filter(|e| e.from == "waf").map(|e| (e.to.as_str(), e.label.as_str())).collect();
+        assert_eq!(lines, [("alb.web", "web_acl"), ("alb.admin", "web_acl")]);
+        assert!(m.edges.iter().filter(|e| e.from == "waf").all(|e| e.rel == Rel::Assoc));
+        assert_eq!(rules_of(&d, "waf"), ["regional-web-acl-in-resource-region"]);
+    }
+
+    // Fails if an attachment written the other way round is accepted.
+    #[test]
+    fn reversed_attachments_stay_unsupported() {
+        for line in ["alb -- acm", "alb -- waf"] {
+            let (m, d) = run(&web_with(&format!("  - {line}\n")));
+            assert!(m.is_none(), "{line}");
+            assert_eq!(first(&d), ("UNSUPPORTED", Some("flows[4]"), Some(line)), "{line}");
+            assert_eq!(d.errors[0].message, format!("`{line}` is not a supported connection"));
+        }
+    }
+
+    // Fails if a definition without a VPC reads only its services' scopes and not a connection's.
+    #[test]
+    fn a_scope_override_reaches_a_definition_without_a_vpc() {
+        let links = include_str!("../../../../rules/aws/links.toml");
+        let region = "from_region = \"us-east-1\"\n";
+        assert_eq!(links.matches(region).count(), 1);
+        let rules = Rules::load(
+            include_str!("../../../../rules/aws/services.toml"),
+            include_str!("../../../../rules/aws/rules.toml"),
+            include_str!("../../../../rules/aws/labels.toml"),
+            &links.replacen(region, &format!("from_scope = \"regional\"\n{region}"), 1),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let src = "flows:\n  - user -> cloudfront -> s3\n  - acm -- cloudfront\n";
+        let (m, d) = infer(&crate::def::parse(src).unwrap(), &rules);
+        let m = m.unwrap_or_else(|| panic!("{:?}", d.errors));
+        assert!(m.azs.is_empty());
+        assert_eq!(node_of(&m, "acm"), (Area::Region, Some("us-east-1")));
+        // The built-in data leaves it in the AWS Cloud frame.
+        assert_eq!(node_of(&run(src).0.unwrap(), "acm"), (Area::Cloud, Some("us-east-1")));
+    }
+
     #[test]
     fn an_api_without_a_kind_is_a_hole() {
         let src = "flows:\n  - user -> apigateway -> lambda\n  - cognito -- apigateway\n";
@@ -1847,10 +1989,10 @@ mod tests {
         }
 
         #[test]
-        fn attachments_attach_only_to_cloudfront_and_carry_no_flows() {
+        fn attachments_carry_no_flows_and_attach_only_as_listed() {
             let base = "flows:\n  - user -> cloudfront -> alb -> ecs\n";
             for line in [
-                "waf -- alb", "acm -- alb", "waf -- acm", "acm -- waf", "cloudfront -- waf", "cloudfront -- acm", "alb -- acm",
+                "waf -- acm", "acm -- waf", "cloudfront -- waf", "cloudfront -- acm", "alb -- acm",
                 "user -- alb", "alb -- cloudfront", "waf -> alb", "acm -> s3", "waf ~> cloudwatch", "user -> waf", "cloudfront -> acm",
             ] {
                 let (m, d) = run(&format!("{base}  - {line}\n"));

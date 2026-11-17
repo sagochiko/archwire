@@ -562,10 +562,50 @@ mod tests {
         for src in drawn {
             drawn_cleanly(src);
         }
-        let attached = "flows:\n  - user -> alb.a -> ecs\n  - waf -- alb.b\n  - user -> alb.b -> ecs\n";
-        assert_eq!(stops(attached), [unsupported("flows[1]", Some("waf -- alb.b"))]);
+        drawn_cleanly("flows:\n  - user -> alb.a -> ecs\n  - waf -- alb.b\n  - user -> alb.b -> ecs\n");
         let misspelt = "flows:\n  - user -> alb.a -> ecs\n  - user -> albb.b -> ecs\n";
         assert_eq!(stops(misspelt), [("UNKNOWN_SERVICE".to_string(), Some("flows[1][1]".to_string()), Some("albb".to_string()))]);
+    }
+
+    // Fails if a certificate or web ACL attached to a load balancer is stopped, comes out with a line
+    // the router could not place, leaves the Region, stops sitting right of the VPC, or its line
+    // stops leaving the load balancer by its right side (or its bottom when a part of its row stands
+    // right of it), with one or two load balancers, in either direction, with two or three zones.
+    #[test]
+    fn attachments_on_the_load_balancer_are_drawn() {
+        let web = WEB_CASES.iter().find(|(n, _)| *n == "web-2az-ja").unwrap().1.replace("set:\n  lang: ja\n", "");
+        let shapes = [
+            format!("{web}  - acm -- alb\n  - waf -- alb\n"),
+            format!("{web}  - acm.cdn -- cloudfront\n  - waf.cdn -- cloudfront\n  - acm -- alb\n  - waf -- alb\n"),
+            format!("{TWO_WEBS}  - acm.web -- alb.web\n  - waf.web -- alb.web\n  - acm.admin -- alb.admin\n  - waf.admin -- alb.admin\n"),
+            format!("{TWO_WEBS}  - waf -- alb.web\n  - waf -- alb.admin\n"),
+        ];
+        assert!(shapes.iter().all(|s| !s.contains("set:")));
+        let rules = Rules::builtin();
+        for shape in &shapes {
+            for src in every_shape(shape) {
+                drawn_cleanly(&src);
+                let (m, _) = inference::infer(&def::parse(&src).unwrap(), &rules);
+                let m = m.unwrap();
+                let p = arrange::arrange(&m, &rules, m.direction.unwrap()).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+                let (wires, _) = route::route_planned(&m, &p.layout, &rules, &p.lines);
+                let (vpc, region) = (p.layout.rect("vpc"), p.layout.rect("region"));
+                let on_alb: Vec<&model::Edge> = m.edges.iter().filter(|e| e.rel == def::Rel::Assoc && m.nodes.iter().any(|n| n.id == e.to && n.service == "alb")).collect();
+                assert!(on_alb.len() >= 2, "{src}");
+                for e in on_alb {
+                    let part = m.nodes.iter().find(|n| n.id == e.from).unwrap();
+                    assert_eq!(part.area, model::Area::Region, "{src}: {}", e.from);
+                    let r = p.layout.rect(&e.from);
+                    assert!(r.x >= vpc.x + vpc.w, "{src}: {} is not right of the VPC", e.from);
+                    assert!(r.x >= region.x && r.x + r.w <= region.x + region.w && r.y >= region.y && r.y + r.h <= region.y + region.h, "{src}: {} leaves the Region", e.from);
+                    let alb = p.layout.rect(&e.to);
+                    let blocked = p.layout.icons.iter().any(|o| o.rect.y == alb.y && o.rect.x > alb.x && o.rect.x < vpc.x + vpc.w);
+                    let side = if blocked { route::Side::Bottom } else { route::Side::Right };
+                    let w = wires.iter().find(|w| w.from == e.from && w.to == e.to).unwrap_or_else(|| panic!("{src}: no line {} to {}", e.from, e.to));
+                    assert_eq!(w.entry.side, side, "{src}: {} to {}", e.from, e.to);
+                }
+            }
+        }
     }
 
     // Fails if named VPC parts are still stopped, a database loses its replication line, or a line

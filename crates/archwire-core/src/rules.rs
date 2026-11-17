@@ -139,6 +139,9 @@ pub struct LinkRule {
     /// The Region the `from` part lives in, and the rule that places it there.
     pub from_region: Option<String>,
     pub from_rule: Option<String>,
+    /// With this connection the `from` part takes this scope (and so its frame) instead of its
+    /// service's, with `from_rule` saying why. Only `regional` and `global` may be written.
+    pub from_scope: Option<Scope>,
     /// Per role of `to` ("writer", "reader"): the label key of the connection.
     pub to_role: BTreeMap<String, String>,
     /// With this connection the `from` part is placed in this subnet tier of the VPC, one copy per zone,
@@ -200,6 +203,8 @@ struct LinkRaw {
     from_region: Option<String>,
     #[serde(default)]
     from_rule: Option<String>,
+    #[serde(default)]
+    from_scope: Option<Scope>,
     #[serde(default)]
     to_role: BTreeMap<String, String>,
     #[serde(default)]
@@ -482,12 +487,20 @@ fn check_links(
                 problems.push(problem("LINK_DUPLICATE", &at, "the same pair and relation is listed twice".into()));
             }
         }
-        if l.max_from.is_some() != l.max_rule.is_some() || l.from_region.is_some() != l.from_rule.is_some() {
+        let moves = l.from_region.is_some() || l.from_scope.is_some();
+        if l.max_from.is_some() != l.max_rule.is_some() || moves != l.from_rule.is_some() {
             problems.push(problem(
                 "LINK_BAD_LIMIT",
                 &at,
-                "`max_from` needs `max_rule` and `from_region` needs `from_rule`, and the other way round".into(),
+                "`max_from` needs `max_rule`, and `from_region` or `from_scope` needs `from_rule`, and the other way round".into(),
             ));
+        }
+        // A connection puts its `from` part in the VPC with `from_subnet`, never with its scope.
+        if matches!(l.from_scope, Some(Scope::Vpc | Scope::Outside)) {
+            problems.push(problem("LINK_BAD_SCOPE", &at, "`from_scope` may be `regional` or `global`; a part goes into the VPC with `from_subnet`".into()));
+        }
+        if l.from_scope.is_some() && l.from_subnet.is_some() {
+            problems.push(problem("LINK_BAD_SCOPE", &at, "`from_scope` and `from_subnet` are not written together".into()));
         }
         let tier = [l.from_subnet.is_some(), l.from_subnet_rule.is_some(), l.from_copies_rule.is_some()];
         if tier.contains(&true) && tier.contains(&false) {
@@ -515,6 +528,7 @@ fn check_links(
                 max_rule: l.max_rule,
                 from_region: l.from_region,
                 from_rule: l.from_rule,
+                from_scope: l.from_scope,
                 to_role: l.to_role,
                 from_subnet: l.from_subnet,
                 from_subnet_rule: l.from_subnet_rule,
@@ -568,7 +582,7 @@ mod tests {
     #[test]
     fn every_constraint_rule_has_an_https_source() {
         let r = Rules::builtin();
-        for id in ["cloudfront-certificate-in-us-east-1","load-balancer-in-vpc","alb-spans-two-azs","internet-facing-alb-in-vpc-with-igw","private-egress-through-nat","cognito-user-pool-in-one-region","one-web-acl-per-resource"] {
+        for id in ["cloudfront-certificate-in-us-east-1","load-balancer-in-vpc","alb-spans-two-azs","internet-facing-alb-in-vpc-with-igw","private-egress-through-nat","cognito-user-pool-in-one-region","one-web-acl-per-resource","alb-certificate-in-load-balancer-region","regional-web-acl-in-resource-region"] {
             let rule = r.rule(id);
             assert_eq!(rule.kind, DerivedKind::Constraint);
             assert!(rule.source.as_deref().unwrap().starts_with("https://docs.aws.amazon.com/"), "{id}");
@@ -690,6 +704,99 @@ mod tests {
         assert_eq!(r.link("cognito", "apigateway", Rel::Assoc).unwrap().to_kind["http"].rule, "http-api-jwt-authorizer");
         assert_eq!(r.link("cloudfront", "lambda", Rel::Main), None);
         assert!(r.has_text("invoke") && !r.has_text("Amazon S3"));
+    }
+
+    // Fails if the web ACL rule goes back to saying only CloudFront distributions share a web ACL,
+    // or stops saying one resource has only one.
+    #[test]
+    fn the_web_acl_rule_does_not_say_only_cloudfront_shares() {
+        let rule = Rules::builtin().rule("one-web-acl-per-resource").clone();
+        assert_eq!(rule.kind, DerivedKind::Constraint);
+        for word in ["one or more AWS resources", "only one web ACL"] {
+            assert!(rule.reason_en.contains(word), "{word}: {}", rule.reason_en);
+        }
+        assert!(!rule.reason_en.contains("CloudFront"), "{}", rule.reason_en);
+        for word in ["1つ以上の AWS リソース", "1つだけ"] {
+            assert!(rule.reason_ja.contains(word), "{word}: {}", rule.reason_ja);
+        }
+        assert!(!rule.reason_ja.contains("CloudFront"), "{}", rule.reason_ja);
+    }
+
+    // Fails if the certificate rule of a load balancer cites another page, is made a default, or
+    // says more than its page does about the Region of the load balancer.
+    #[test]
+    fn a_load_balancer_certificate_rule_stays_within_its_source() {
+        let rule = Rules::builtin().rule("alb-certificate-in-load-balancer-region").clone();
+        assert_eq!(rule.kind, DerivedKind::Constraint);
+        assert_eq!(rule.source.as_deref(), Some("https://docs.aws.amazon.com/acm/latest/userguide/acm-overview.html"));
+        for word in ["same Region as the load balancer", "same Region as the Application Load Balancer"] {
+            assert!(!rule.reason_en.contains(word), "{word}: {}", rule.reason_en);
+        }
+        for word in ["regional resources", "for each Region", "cannot be copied between Regions"] {
+            assert!(rule.reason_en.contains(word), "{word}: {}", rule.reason_en);
+        }
+        assert!(!rule.reason_ja.contains("ロードバランサーと同じリージョン"), "{}", rule.reason_ja);
+        for word in ["リージョンのリソース", "リージョンごと", "コピーできない"] {
+            assert!(rule.reason_ja.contains(word), "{word}: {}", rule.reason_ja);
+        }
+    }
+
+    // Fails if the web ACL of a load balancer cites another page or is made a default.
+    #[test]
+    fn a_load_balancer_web_acl_rule_has_its_source() {
+        let rule = Rules::builtin().rule("regional-web-acl-in-resource-region").clone();
+        assert_eq!(rule.kind, DerivedKind::Constraint);
+        assert_eq!(rule.source.as_deref(), Some("https://docs.aws.amazon.com/waf/latest/developerguide/how-aws-waf-works-resources.html"));
+        assert!(rule.reason_en.contains("same Region as the resources it protects"), "{}", rule.reason_en);
+    }
+
+    // Fails if a connection may move its `from` part to another scope or Region without a rule
+    // saying why, give a reason without moving it, move it into the VPC by its scope, write its
+    // place twice, or name a rule rules.toml does not have.
+    #[test]
+    fn a_scope_override_needs_its_rule() {
+        let services = include_str!("../../../rules/aws/services.toml");
+        let rules = include_str!("../../../rules/aws/rules.toml");
+        let labels = include_str!("../../../rules/aws/labels.toml");
+        let links = include_str!("../../../rules/aws/links.toml");
+        let alb_cert = "from = \"acm\"\nto = \"alb\"\nrel = \"assoc\"\nlabel = \"certificate\"\n";
+        let scope = "from_scope = \"regional\"\n";
+        let why = "from_rule = \"alb-certificate-in-load-balancer-region\"\n";
+        let user_alb = "from = \"user\"\nto = \"alb\"\nrel = \"main\"\nlabel = \"https\"\n";
+        let lambda = "from = \"lambda\"\nto = \"aurora\"\nrel = \"main\"\nlabel = \"read_write\"\n";
+        let edit = |from: &str, to: &str| {
+            assert_eq!(links.matches(from).count(), 1, "{from}");
+            links.replacen(from, to, 1)
+        };
+        // The data as written has a connection with each override: a scope, and a Region.
+        assert!(links.contains(&format!("{alb_cert}{scope}{why}")));
+        assert!(links.contains("from_region = \"us-east-1\"\nfrom_rule = \"cloudfront-certificate-in-us-east-1\""));
+        let load = |text: &str| Rules::load(services, rules, labels, text).err().map(|e| e[0].code.clone());
+        let cases: [(String, Option<&str>); 7] = [
+            // Neither override nor reason.
+            (links.to_string(), None),
+            // An override with its reason: a scope, and a scope with a Region.
+            (edit(&format!("{alb_cert}{scope}{why}"), &format!("{alb_cert}{scope}from_region = \"us-east-1\"\n{why}")), None),
+            // An override without its reason.
+            (edit(&format!("{alb_cert}{scope}{why}"), &format!("{alb_cert}{scope}")), Some("LINK_BAD_LIMIT")),
+            // A reason without an override.
+            (edit(user_alb, &format!("{user_alb}{why}")), Some("LINK_BAD_LIMIT")),
+            // A scope that would put the part in the VPC or outside AWS.
+            (edit(&format!("{alb_cert}{scope}"), &format!("{alb_cert}from_scope = \"vpc\"\n")), Some("LINK_BAD_SCOPE")),
+            // A scope next to a subnet tier.
+            (edit(lambda, &format!("{lambda}{scope}{why}")), Some("LINK_BAD_SCOPE")),
+            // A reason rules.toml does not have.
+            (edit(why, "from_rule = \"alb-certificate\"\n"), Some("LINK_UNKNOWN_RULE")),
+        ];
+        for (text, want) in &cases {
+            assert_eq!(load(text).as_deref(), *want, "{want:?}");
+        }
+        let outside = edit(&format!("{alb_cert}{scope}"), &format!("{alb_cert}from_scope = \"outside\"\n"));
+        assert_eq!(load(&outside).as_deref(), Some("LINK_BAD_SCOPE"));
+        let r = Rules::builtin();
+        assert_eq!(r.link("acm", "alb", Rel::Assoc).unwrap().from_scope, Some(Scope::Regional));
+        assert_eq!(r.link("waf", "alb", Rel::Assoc).unwrap().from_scope, Some(Scope::Regional));
+        assert_eq!(r.link("acm", "cloudfront", Rel::Assoc).unwrap().from_scope, None);
     }
 
     #[test]

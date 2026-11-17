@@ -5,7 +5,8 @@
 # connection and the rule whose reason is given to `to`; while the kind is not decided the
 # connection keeps `label`. `to_role` gives, per role of the `to` part (`writer`, `reader`),
 # the label of the connection. `max_from` limits how many `from` parts one `to` part may have,
-# with `max_rule` saying why. `from_region` places the `from` part in that Region, with
+# with `max_rule` saying why. `from_region` places the `from` part in that Region, and
+# `from_scope` (`regional` or `global`) gives it that scope instead of its service's, with
 # `from_rule` saying why. `from_subnet` places the `from` part in that subnet tier of the VPC,
 # one copy per Availability Zone, with `from_subnet_rule` saying why it is in the VPC and
 # `from_copies_rule` why there is one copy per zone; the three are written together.
@@ -107,6 +108,24 @@ rel = "assoc"
 label = "certificate"
 from_region = "us-east-1"
 from_rule = "cloudfront-certificate-in-us-east-1"
+
+[[link]]
+from = "acm"
+to = "alb"
+rel = "assoc"
+label = "certificate"
+from_scope = "regional"
+from_rule = "alb-certificate-in-load-balancer-region"
+
+[[link]]
+from = "waf"
+to = "alb"
+rel = "assoc"
+label = "web_acl"
+max_from = 1
+max_rule = "one-web-acl-per-resource"
+from_scope = "regional"
+from_rule = "regional-web-acl-in-resource-region"
 
 [[link]]
 from = "user"

@@ -6,7 +6,7 @@ use crate::def::{Definition, Link, Ref, Rel};
 use crate::diag::Problem;
 use crate::ids::{kind_hole, route_hole};
 use crate::model::{Area, Tier};
-use crate::rules::{LinkRule, Rules, Subnet};
+use crate::rules::{LinkRule, Rules, Scope, Service, Subnet};
 
 fn arrow(rel: Rel) -> &'static str {
     match rel {
@@ -88,13 +88,30 @@ pub(super) fn attached_by<'r>(accepted: &[(&Link, &'r LinkRule)], name: &str) ->
     accepted.iter().find(|(l, rule)| l.from.name == name && rule.from_subnet.is_some()).map(|(_, rule)| *rule)
 }
 
+/// The accepted connection that gives a part another scope (`from_scope`), if any: the first such
+/// connection from the part among all of them. The checks stop a part two connections place apart.
+fn scoped_by<'r>(accepted: &[(&Link, &'r LinkRule)], name: &str) -> Option<&'r LinkRule> {
+    accepted.iter().find(|(l, rule)| l.from.name == name && rule.from_scope.is_some()).map(|(_, rule)| *rule)
+}
+
+/// The area a part of this service has with this scope, mapped as `area_of` maps the service's own.
+fn area_with(service: &Service, scope: Option<Scope>) -> Area {
+    match scope {
+        Some(scope) => area_of(&Service { scope, ..service.clone() }),
+        None => area_of(service),
+    }
+}
+
 /// Where a written part belongs: the subnet tier an accepted connection places it in, else the
-/// area its service gives. The checks, the model and the reasons all read this one answer.
-/// None for a part of an unknown service.
+/// scope an accepted connection gives it, else the area its service gives. The checks, the model
+/// and the reasons all read this one answer. None for a part of an unknown service.
 pub(super) fn area(rules: &Rules, accepted: &[(&Link, &LinkRule)], r: &Ref) -> Option<Area> {
     match attached_by(accepted, &r.name).and_then(|rule| rule.from_subnet) {
         Some(subnet) => Some(Area::Subnet(tier(subnet))),
-        None => rules.service(&r.service).map(area_of),
+        None => {
+            let scope = scoped_by(accepted, &r.name).and_then(|rule| rule.from_scope);
+            rules.service(&r.service).map(|s| area_with(s, scope))
+        }
     }
 }
 
@@ -120,7 +137,37 @@ pub(super) fn check_links<'a>(
     check_egress(rules, &accepted, errors);
     check_main_flows(def, rules, parts, &accepted, errors);
     check_limits(&accepted, errors);
+    check_places(rules, &accepted, errors);
     accepted
+}
+
+/// One part, two places: a part whose connections give it a different area or Region than an
+/// earlier connection from it stops at the later line. Each connection's place is its service's
+/// with the connection's own `from_scope` and `from_region` applied, so a connection without an
+/// override still counts. A connection that places the part in a subnet tier is left out: the
+/// part follows that one, whatever its other connections are.
+fn check_places(rules: &Rules, accepted: &[(&Link, &LinkRule)], errors: &mut Vec<Problem>) {
+    let mut first: Vec<(&str, (Area, Option<&str>), &Link)> = Vec::new();
+    for (l, rule) in accepted.iter().filter(|(_, rule)| rule.from_subnet.is_none()) {
+        let Some(service) = rules.service(&l.from.service) else { continue };
+        let place = (area_with(service, rule.from_scope), rule.from_region.as_deref());
+        match first.iter().find(|(name, _, _)| *name == l.from.name) {
+            None => first.push((&l.from.name, place, l)),
+            Some((_, seen, earlier)) if *seen != place => {
+                let part = &l.from.name;
+                let split = |to: &Ref| format!("`{}.{} -- {}`", l.from.service, to.name.split_once('.').map_or(to.service.as_str(), |(_, t)| t), to.name);
+                let message = format!(
+                    "`{part}` is attached to both `{}` and `{}`, which need it in different places; write them as two parts, such as {} and {}",
+                    earlier.to.name,
+                    l.to.name,
+                    split(&earlier.to),
+                    split(&l.to)
+                );
+                errors.push(problem("UNSUPPORTED", &l.at, part, Vec::new(), message));
+            }
+            Some(_) => {}
+        }
+    }
 }
 
 /// A main flow to where traffic leaves the VPC (`egress`) needs its `from` part in a private

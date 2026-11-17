@@ -1,4 +1,4 @@
-version = "2026.11.4"
+version = "2026.11.5"
 
 # kind = "constraint": states an AWS constraint; `source` (AWS documentation URL) is required.
 # kind = "default": a choice archwire makes when the definition is silent; `source` is optional.
@@ -147,11 +147,25 @@ reason_en = "The JWT authorizer type is supported only for HTTP APIs, and an Ama
 reason_ja = "JWT オーソライザーのタイプは HTTP API でのみサポートされ、トークンの発行者には Amazon Cognito のユーザープールを指定できる。archwire はこの関連付けを JWT オーソライザーとして描く。"
 
 [[rule]]
+id = "alb-certificate-in-load-balancer-region"
+kind = "constraint"
+source = "https://docs.aws.amazon.com/acm/latest/userguide/acm-overview.html"
+reason_en = "Certificates in AWS Certificate Manager are regional resources: to use a certificate with Elastic Load Balancing for the same domain names in more than one Region, a certificate is requested or imported for each Region, and a certificate cannot be copied between Regions. archwire draws the certificate attached to an Application Load Balancer inside the Region frame."
+reason_ja = "AWS Certificate Manager の証明書はリージョンのリソースで、同じドメイン名の証明書を複数のリージョンの Elastic Load Balancing で使うには、リージョンごとに証明書をリクエストまたはインポートする。証明書はリージョンの間でコピーできない。archwire は、Application Load Balancer に付けた証明書をリージョンの枠の中に描く。"
+
+[[rule]]
+id = "regional-web-acl-in-resource-region"
+kind = "constraint"
+source = "https://docs.aws.amazon.com/waf/latest/developerguide/how-aws-waf-works-resources.html"
+reason_en = "A web ACL (protection pack) and the AWS WAF resources it uses must be located in the same Region as the resources it protects, and an Application Load Balancer is one of the regional resource types AWS WAF can protect. archwire draws the web ACL attached to an Application Load Balancer inside the Region frame."
+reason_ja = "web ACL（保護パック）と、それが使う AWS WAF のリソースは、保護するリソースと同じリージョンに置かなければならない。Application Load Balancer は、AWS WAF で保護できるリージョンのリソースの1つ。archwire は、Application Load Balancer に付けた web ACL をリージョンの枠の中に描く。"
+
+[[rule]]
 id = "one-web-acl-per-resource"
 kind = "constraint"
 source = "https://docs.aws.amazon.com/waf/latest/developerguide/how-aws-waf-works-resources.html"
-reason_en = "Each AWS resource can be associated with only one web ACL (protection pack). One web ACL can be associated with more than one CloudFront distribution."
-reason_ja = "AWS のリソース1つに関連付けられる web ACL（保護パック）は1つだけ。1つの web ACL は複数の CloudFront ディストリビューションに関連付けられる。"
+reason_en = "A single web ACL (protection pack) can be associated with one or more AWS resources, but each AWS resource can be associated with only one web ACL."
+reason_ja = "1つの web ACL（保護パック）は1つ以上の AWS リソースに関連付けられるが、AWS のリソース1つに関連付けられる web ACL は1つだけ。"
 
 [[rule]]
 id = "function-attaches-to-resource-vpc"

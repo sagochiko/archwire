@@ -18,7 +18,7 @@ pub(super) fn kind(def: &Definition, r: &Ref) -> Option<String> {
     r.option.clone().or_else(|| def.choose.get(&kind_hole(&r.name)).cloned())
 }
 
-/// The connection that moves a part to another Region, if any.
+/// The connection that moves a part to another Region or scope, with the rule that says why, if any.
 pub(super) fn moved<'a>(accepted: &[(&'a Link, &'a LinkRule)], name: &str) -> Option<&'a LinkRule> {
     accepted.iter().find(|(l, rule)| l.from.name == name && rule.from_rule.is_some()).map(|(_, rule)| *rule)
 }
@@ -31,13 +31,11 @@ pub(super) fn build(
     open: &[(String, &Ref)],
     settings: &Settings,
 ) -> Model {
-    let svc = |name: &str| rules.service(name).expect("names were checked");
-
     let mut nodes: Vec<Node> = Vec::new();
     for r in parts {
-        let s = svc(&r.service);
-        // No accepted connection has a VPC service, so every part is outside the VPC.
-        let area = area_of(s);
+        // Where the part belongs, as the checks decided it from all the connections: no accepted
+        // connection has a VPC service, so a connection may give the part another scope, never a subnet.
+        let area = area_in(rules, accepted, r).expect("names were checked");
         nodes.push(Node {
             id: r.name.clone(),
             service: r.service.clone(),
