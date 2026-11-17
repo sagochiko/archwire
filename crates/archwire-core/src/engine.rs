@@ -100,6 +100,37 @@ mod tests {
         assert_eq!(e[0].message, "`balancer.admin` is a second part spanning the Availability Zones, after `balancer.web`; this version draws one such part in a VPC");
     }
 
+    // Fails if a third spanning part goes unreported, an unnamed part is not counted, a part written
+    // again is reported twice, a part first written on a `--` or `~>` line is reported elsewhere,
+    // or a single spanning part is stopped.
+    #[test]
+    fn spanning_parts_are_reported_once_each_at_their_first_position() {
+        let cases: [(&str, &[(&str, &str, &str)]); 7] = [
+            (
+                "flows:\n  - user -> alb.a -> ecs\n  - user -> alb.b -> ecs\n  - user -> alb.c -> ecs\n",
+                &[("flows[1][1]", "alb.b", "alb.a"), ("flows[2][1]", "alb.c", "alb.a")],
+            ),
+            ("flows:\n  - user -> alb -> ecs\n  - user -> alb.admin -> ecs.admin\n", &[("flows[1][1]", "alb.admin", "alb")]),
+            ("flows:\n  - user -> alb.a -> ecs.a\n  - user -> alb.b -> ecs.b\n  - alb.b -> ecs.c\n", &[("flows[1][1]", "alb.b", "alb.a")]),
+            ("flows:\n  - user -> alb.a -> ecs\n  - waf -- alb.b\n  - user -> alb.b -> ecs\n", &[("flows[1][1]", "alb.b", "alb.a")]),
+            ("flows:\n  - user -> alb.a -> ecs\n  - alb.b ~> cloudwatch\n  - user -> alb.b -> ecs\n", &[("flows[1][0]", "alb.b", "alb.a")]),
+            ("flows:\n  - user -> alb.a -> ecs.a\n  - alb.a -> ecs.b\n", &[]),
+            ("flows:\n  - user -> alb.a -> ecs\n  - user -> albb.b -> ecs\n", &[]),
+        ];
+        for (src, want) in cases {
+            let got = spanning_parts(&crate::def::parse(src).unwrap(), &Rules::builtin()).err().unwrap_or_default();
+            let got: Vec<_> = got.iter().map(|p| (p.code.as_str(), p.at.clone().unwrap(), p.got.clone().unwrap(), p.message.clone())).collect();
+            let want: Vec<_> = want
+                .iter()
+                .map(|(at, name, first)| {
+                    let message = format!("`{name}` is a second part spanning the Availability Zones, after `{first}`; this version draws one such part in a VPC");
+                    ("UNSUPPORTED", at.to_string(), name.to_string(), message)
+                })
+                .collect();
+            assert_eq!(got, want, "{src}");
+        }
+    }
+
     fn pick_src(src: &str) -> Result<Engine, Vec<Problem>> {
         pick(&crate::def::parse(src).unwrap(), &Rules::builtin())
     }

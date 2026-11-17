@@ -534,7 +534,8 @@ mod tests {
         assert_eq!(e.message, "`alb.admin` is a second part spanning the Availability Zones, after `alb.web`; this version draws one such part in a VPC");
     }
 
-    // Fails if named VPC parts are still stopped, or a line is drawn to the reader of another named database.
+    // Fails if named VPC parts are still stopped, a database loses its replication line, or a line
+    // joins the writer of one named database to the other database in either direction.
     #[test]
     fn named_parts_under_one_balancer_are_drawn() {
         for set in ["", "set:\n  direction: right\n"] {
@@ -545,7 +546,65 @@ mod tests {
             let x = out.drawio.unwrap_or_else(|| panic!("no diagram for {src}"));
             object(&x, "aurora.web@1a");
             object(&x, "aurora.admin@1c");
-            assert!(!x.contains("id=\"edge-aurora.web@1a-to-aurora.admin@1c\""), "{src}");
+            line(&x, "edge-aurora.web@1a-to-aurora.web@1c");
+            line(&x, "edge-aurora.admin@1a-to-aurora.admin@1c");
+            for (from, to) in [("web", "admin"), ("admin", "web")] {
+                let wrong = format!("id=\"edge-aurora.{from}@");
+                let joined = x.lines().filter(|l| l.contains(&wrong) && l.contains(&format!("-to-aurora.{to}@"))).count();
+                assert_eq!(joined, 0, "{src}: a line joins aurora.{from} to aurora.{to}");
+            }
+        }
+    }
+
+    // Fails if named services sharing one named database, a named service without a database next
+    // to one with it, or three named services each with its own database stop, or come out with a
+    // line the router could not place, in either direction with two or three zones.
+    #[test]
+    fn named_services_behind_one_balancer_are_drawn_in_every_shape() {
+        let shapes = [
+            "flows:\n  - user -> cloudfront -> alb -> ecs.web -> aurora.main\n  - alb -> ecs.admin -> aurora.main\n",
+            "flows:\n  - user -> cloudfront -> alb -> ecs.web -> aurora.web\n  - alb -> ecs.admin\n",
+            "flows:\n  - user -> cloudfront -> alb -> ecs.a -> aurora.a\n  - alb -> ecs.b -> aurora.b\n  - alb -> ecs.c -> aurora.c\n",
+        ];
+        for shape in shapes {
+            for direction in ["down", "right"] {
+                for azs in [2, 3] {
+                    let src = format!("{shape}set:\n  direction: {direction}\n  azs: {azs}\n");
+                    let out = compile(&src);
+                    assert_eq!(out.diagnostics.exit_code(), 0, "{src}: {:?}", out.diagnostics.errors);
+                    assert!(out.drawio.is_some(), "{src}");
+                    assert!(out.diagnostics.notes.iter().all(|n| !n.contains("edge-")), "{src}: {:?}", out.diagnostics.notes);
+                }
+            }
+        }
+    }
+
+    /// `n` named services behind one load balancer, the first one reaching a database.
+    fn services_behind_one_balancer(n: usize, direction: &str, azs: usize) -> String {
+        let mut src = "flows:\n  - user -> cloudfront -> alb -> ecs.s01 -> aurora\n".to_string();
+        for i in 2..=n {
+            src.push_str(&format!("  - alb -> ecs.s{i:02}\n"));
+        }
+        src + &format!("set:\n  direction: {direction}\n  azs: {azs}\n")
+    }
+
+    // Fails if the load balancer's side gives out at another count of services, or a definition
+    // past that count comes out as a diagram instead of stopping with LAYOUT_FAILED.
+    #[test]
+    fn services_behind_one_balancer_stop_once_its_sides_run_out_of_spots() {
+        for (azs, last) in [(2, 50), (3, 33)] {
+            for direction in ["down", "right"] {
+                let src = services_behind_one_balancer(last, direction, azs);
+                let out = compile(&src);
+                assert_eq!(out.diagnostics.exit_code(), 0, "{src}: {:?}", out.diagnostics.errors);
+                assert!(out.drawio.is_some(), "{src}");
+                let src = services_behind_one_balancer(last + 1, direction, azs);
+                let out = compile(&src);
+                assert!(out.drawio.is_none(), "{src}");
+                assert_eq!(out.diagnostics.exit_code(), 1, "{src}");
+                let errors = &out.diagnostics.errors;
+                assert!(!errors.is_empty() && errors.iter().all(|e| e.code == "LAYOUT_FAILED"), "{src}: {errors:?}");
+            }
         }
     }
 
