@@ -281,6 +281,34 @@ mod tests {
         assert!(failed.is_empty(), "{} of {} diagrams failed:\n{}", failed.len(), 2 * defs.len(), failed.join("\n"));
     }
 
+    // With the folder given, fails if a generated definition with a VPC cannot be written there.
+    /// With `ARCHWIRE_VPC_OUT=<dir>`, writes every generated definition with a VPC, with each
+    /// direction written (`down` and `right`), as `compile` draws it: `<dir>/<number>-<way>.yaml`
+    /// (the definition with its direction written), `<dir>/<number>-<way>.drawio` when a diagram
+    /// was drawn, and `<dir>/<number>-<way>.json` (the diagnostics). The number has four digits,
+    /// in the order of `generated_with_a_vpc`. A relative folder is taken from the workspace root.
+    /// Without it, does nothing. It writes thousands of files, so it runs only when named:
+    ///     cargo test -p archwire-core generated_definitions_through_compile -- --ignored
+    #[test]
+    #[ignore]
+    fn generated_definitions_through_compile() {
+        let Some(dir) = std::env::var_os("ARCHWIRE_VPC_OUT") else { return };
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (k, src) in generated_with_a_vpc().iter().enumerate() {
+            for way in ["down", "right"] {
+                let name = format!("{k:04}-{way}");
+                let s = with_direction(src, way);
+                let out = crate::compile(&s);
+                std::fs::write(dir.join(format!("{name}.yaml")), &s).unwrap();
+                if let Some(x) = &out.drawio {
+                    std::fs::write(dir.join(format!("{name}.drawio")), x).unwrap();
+                }
+                std::fs::write(dir.join(format!("{name}.json")), out.diagnostics.to_json()).unwrap();
+            }
+        }
+    }
+
     /// How many diagrams of the new layout `arranged_diagrams_for_the_checker` writes: twenty
     /// inputs, each along both axes.
     const ARRANGED: usize = 40;
@@ -319,9 +347,11 @@ mod tests {
 
     // Fails if a diagram of the new layout handed to the checker cannot be laid out or breaks a line.
     /// With `ARCHWIRE_GEN_OUT=<dir>`, removes the `v<number>-<axis>` files a run left there, then
-    /// writes each input drawn along both axes (a definition by `compile`, a model built by hand by the same layout) as `<dir>/v<number>-<axis>.drawio`
-    /// and `<dir>/v<number>-<axis>.yaml`: the definition with its direction written, or one comment
-    /// line naming a model built by hand. Without it, only draws them.
+    /// writes each input drawn along both axes (a definition by `compile`, a model built by hand by the same layout) as `<dir>/v<number>-<axis>.drawio`,
+    /// `<dir>/v<number>-<axis>.yaml`: the definition with its direction written, or one comment
+    /// line naming a model built by hand, and `<dir>/v<number>-<axis>.json`: the diagnostics of
+    /// `compile`, or, for a model built by hand, empty diagnostics with the router's notes.
+    /// Without it, only draws them.
     #[test]
     fn arranged_diagrams_for_the_checker() {
         let picked = arranged_for_the_checker();
@@ -338,7 +368,7 @@ mod tests {
                 let path = entry.unwrap().path();
                 let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                 let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                if ours(stem) && ["yaml", "drawio"].contains(&ext) {
+                if ours(stem) && ["yaml", "drawio", "json"].contains(&ext) {
                     std::fs::remove_file(&path).unwrap();
                 }
             }
@@ -356,15 +386,20 @@ mod tests {
                         assert_eq!(grid(&s).0.direction, Some(axis), "{name}");
                         let out = crate::compile(&s);
                         let drawn = match out.drawio {
-                            Some(x) if out.diagnostics.errors.is_empty() => Ok((x, out.diagnostics.notes)),
+                            Some(x) if out.diagnostics.errors.is_empty() => Ok((x, out.diagnostics)),
                             _ => Err(out.diagnostics.errors),
                         };
                         (drawn, s)
                     }
-                    Err(hand) => (crate::arranged_drawio(model, &Diagnostics::default(), &r, axis), format!("# hand-built model: {hand}\n")),
+                    Err(hand) => {
+                        let drawn = crate::arranged_drawio(model, &Diagnostics::default(), &r, axis)
+                            .map(|(x, notes)| (x, Diagnostics { notes, ..Default::default() }));
+                        (drawn, format!("# hand-built model: {hand}\n"))
+                    }
                 };
                 match drawn {
-                    Ok((x, notes)) => {
+                    Ok((x, diag)) => {
+                        let notes = &diag.notes;
                         let broken: Vec<&String> = notes.iter().filter(|n| n.contains("edge-")).collect();
                         if !broken.is_empty() {
                             failed.push(format!("{name}: {broken:?}\n{yaml}"));
@@ -372,6 +407,7 @@ mod tests {
                         if let Some(d) = &dir {
                             std::fs::write(d.join(format!("{name}.yaml")), &yaml).unwrap();
                             std::fs::write(d.join(format!("{name}.drawio")), x).unwrap();
+                            std::fs::write(d.join(format!("{name}.json")), diag.to_json()).unwrap();
                         }
                         written += 1;
                     }

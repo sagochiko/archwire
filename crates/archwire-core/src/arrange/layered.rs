@@ -1769,7 +1769,7 @@ set:
     fn drawn_mixed(src: &str, axis: Axis) -> String {
         use super::super::generated::{draw_counted, Drawn};
         match draw_counted(src, axis) {
-            Drawn::Drawn { xml, notes, lines_broken } => {
+            Drawn::Drawn { xml, notes, lines_broken, .. } => {
                 let broken: Vec<&String> = notes.iter().filter(|n| n.contains("edge-")).collect();
                 assert!(broken.is_empty() && lines_broken.is_empty(), "{axis:?} {broken:?} {lines_broken:?}\n{src}");
                 xml

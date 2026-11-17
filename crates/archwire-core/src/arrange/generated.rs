@@ -173,8 +173,9 @@ pub(in crate::arrange) enum Drawn {
     LayoutFailed(Vec<Problem>),
     /// A stage panicked: its name and the panic message.
     Panicked(String),
-    /// A diagram, the router's notes, and what the checks on the gathered and drawn lines found.
-    Drawn { xml: String, notes: Vec<String>, lines_broken: Vec<String> },
+    /// A diagram, the router's notes, the diagnostics with those notes as JSON, and what the
+    /// checks on the gathered and drawn lines found.
+    Drawn { xml: String, notes: Vec<String>, json: String, lines_broken: Vec<String> },
 }
 
 /// Runs `f`, turning a panic into the stage's name and the panic message.
@@ -235,7 +236,7 @@ fn draw_stages(src: &str, axis: Axis) -> (Drawn, Vec<String>) {
         Ok(t) => t,
         Err(p) => return stop(Drawn::Panicked(p)),
     };
-    (Drawn::Drawn { xml, notes, lines_broken }, through)
+    (Drawn::Drawn { xml, notes, json: diag.to_json(), lines_broken }, through)
 }
 
 /// Check 8, apart from the checks on gathered lines: a drawn line whose two ends are both outside
@@ -385,14 +386,15 @@ struct Counted {
 }
 
 /// Draws every input along both axes. With `out`, writes each drawn diagram there as
-/// `<stem>.drawio` beside its definition with its direction written, `<stem>.yaml`, after
-/// removing the files of these stems a run left.
+/// `<stem>.drawio` beside its definition with its direction written, `<stem>.yaml`, and its
+/// diagnostics with the router's notes, `<stem>.json`, after removing the files of these stems a
+/// run left.
 fn count(inputs: &[(String, String)], out: Option<&std::path::Path>) -> Counted {
     if let Some(dir) = out {
         std::fs::create_dir_all(dir).unwrap();
         for (name, _) in inputs {
             for (_, way) in AXES {
-                for ext in ["drawio", "yaml"] {
+                for ext in ["drawio", "yaml", "json"] {
                     let f = dir.join(format!("{}.{ext}", stem(name, way)));
                     if f.exists() {
                         std::fs::remove_file(f).unwrap();
@@ -409,10 +411,11 @@ fn count(inputs: &[(String, String)], out: Option<&std::path::Path>) -> Counted 
                 Drawn::Errors(e) => ("errors", problems(&e)),
                 Drawn::LayoutFailed(e) => ("layout_failed", problems(&e)),
                 Drawn::Panicked(p) => ("panicked", p),
-                Drawn::Drawn { xml, notes, lines_broken } => {
+                Drawn::Drawn { xml, notes, json, lines_broken } => {
                     if let Some(dir) = out {
                         std::fs::write(dir.join(format!("{}.drawio", stem(name, way))), &xml).unwrap();
                         std::fs::write(dir.join(format!("{}.yaml", stem(name, way))), with_direction(src, way)).unwrap();
+                        std::fs::write(dir.join(format!("{}.json", stem(name, way))), json).unwrap();
                     }
                     let broken: Vec<&String> = notes.iter().filter(|n| n.contains("edge-")).collect();
                     for f in lines_broken.iter().chain(&through) {
@@ -548,7 +551,8 @@ const GENERATED_FOR_THE_CHECKER: [usize; 20] = [14, 6, 227, 1, 48, 99, 148, 197,
 /// With `ARCHWIRE_GEN_OUT=<dir>`, removes the `m<number>-<axis>` files a run left there, then
 /// writes each picked input drawn along both axes as `<dir>/m<number>-<axis>.yaml` (the
 /// definition with its direction written) and, when a diagram was drawn,
-/// `<dir>/m<number>-<axis>.drawio`. Without it, only infers them.
+/// `<dir>/m<number>-<axis>.drawio` and `<dir>/m<number>-<axis>.json` (the diagnostics with the
+/// router's notes). Without it, only infers them.
 #[test]
 fn mixed_diagrams_for_the_checker() {
     let named = mixed_representatives();
@@ -585,7 +589,7 @@ fn mixed_diagrams_for_the_checker() {
         let path = entry.unwrap().path();
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if ours(stem) && ["yaml", "drawio"].contains(&ext) {
+        if ours(stem) && ["yaml", "drawio", "json"].contains(&ext) {
             std::fs::remove_file(&path).unwrap();
         }
     }
@@ -596,8 +600,9 @@ fn mixed_diagrams_for_the_checker() {
             let s = with_direction(src, way);
             std::fs::write(dir.join(format!("{name}.yaml")), &s).unwrap();
             yamls += 1;
-            if let Drawn::Drawn { xml, .. } = draw_counted(&s, axis) {
+            if let Drawn::Drawn { xml, json, .. } = draw_counted(&s, axis) {
                 std::fs::write(dir.join(format!("{name}.drawio")), xml).unwrap();
+                std::fs::write(dir.join(format!("{name}.json")), json).unwrap();
                 drawn += 1;
             }
         }
