@@ -148,18 +148,21 @@ enum Kind {
     /// into the copy.
     NatAcross,
     /// From the entry gateway to a part spanning the zones beside the first one, which the entry
-    /// gateway's straight line goes to: running down, out of the entry gateway's side facing it,
-    /// one corner, into its top; running right, out of the entry gateway's top, along a track of
-    /// the band above, into its top.
+    /// gateway's straight line goes to: out of the entry gateway's side facing the way the lines
+    /// run, beside the straight line, along a track of a band, into the middle of the part's top.
+    /// Running down the band lies between the two rows; running right the line rises to the band
+    /// above them.
     Beside,
 }
 
 /// A band kept for lines: above the zones for the NAT gateways' lines and the entry gateway's
-/// lines to the parts spanning the zones beside the first when lines run right, above the private
-/// tier, and below each private row.
+/// lines to the parts spanning the zones beside the first when lines run right; between the entry
+/// gateway's row and the row of the parts spanning the zones for those lines when lines run down;
+/// above the private tier, and below each private row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Band {
     Nat,
+    Split,
     Fan,
     Below(usize),
 }
@@ -216,6 +219,8 @@ impl Across {
 #[derive(Debug, Clone, Default)]
 struct Down {
     nat_top: i32,
+    /// Where the band between the entry gateway's row and the row of the parts spanning the zones starts.
+    split_top: i32,
     entry_y: i32,
     span_y: i32,
     az_top: i32,
@@ -566,10 +571,10 @@ impl<'a> Grid<'a> {
                         }
                         (Place::Entry, Place::Span) => {
                             r.kind = Kind::Beside;
-                            (r.exit, r.entry) = if self.axis == Axis::Down { (side_to(f, t).0, Side::Top) } else { (Side::Top, Side::Top) };
-                            if self.axis == Axis::Right {
-                                r.band = Some(Band::Nat);
-                            }
+                            (r.exit, r.entry, r.band) = match self.axis {
+                                Axis::Down => (Side::Bottom, Side::Top, Some(Band::Split)),
+                                Axis::Right => (Side::Right, Side::Top, Some(Band::Nat)),
+                            };
                         }
                         (Place::Span, Place::Private) if self.cx(a, f) == self.cx(a, t) => {
                             r.kind = Kind::Direct;
@@ -661,8 +666,23 @@ impl<'a> Grid<'a> {
         }
         self.pin_straight(a, &mut out);
         self.share_out(a, &mut out);
+        self.spread_beside(a, &mut out);
         self.number_tracks(a, &mut out);
         out
+    }
+
+    /// The lines to the parts spanning the zones beside the first leave the entry gateway on the
+    /// side of its straight line they turn toward (right of it running down, above it running
+    /// right), the line to the part furthest away furthest out, at even steps between the middle
+    /// and the side's end.
+    fn spread_beside(&self, a: &Across, runs: &mut [Run]) {
+        let mut beside: Vec<(i32, usize)> = runs.iter().enumerate().filter(|(_, r)| r.kind == Kind::Beside).map(|(k, r)| ((self.cx(a, r.to) - self.cx(a, r.from)).abs(), k)).collect();
+        beside.sort();
+        let n = beside.len() as i32;
+        let toward = if self.axis == Axis::Down { 1 } else { -1 };
+        for (rank, &(_, k)) in beside.iter().enumerate() {
+            runs[k].exit_pos = (50 + toward * 50 * (rank as i32 + 1) / (n + 1)) as u8;
+        }
     }
 
     /// Whether the parts spanning the zones sit in the public tier's row of copies: on the
@@ -806,10 +826,7 @@ impl<'a> Grid<'a> {
             (Kind::InTrack, _) => -1_000_000,
             (Kind::OutTrack | Kind::OutFan, _) => 1_000_000,
             (Kind::NatIn, _) if at_exit => -1_000_000,
-            // Lines from the entry gateway's side toward parts further away keep further out on
-            // it, so none crosses another on the way.
             (Kind::NatOut, _) if !at_exit => -((self.cx(a, r.from) - self.cx(a, r.to)).abs() as i64),
-            (Kind::Beside, _) if at_exit => -((self.cx(a, r.from) - self.cx(a, r.to)).abs() as i64),
             (Kind::Out, _) => r.edge as i64,
             (Kind::InGate, _) => self.cx(a, me) as i64,
             (_, Side::Top | Side::Bottom) => other_x(),
@@ -1063,6 +1080,11 @@ impl<'a> Grid<'a> {
         if self.axis == Axis::Down && entry {
             d.entry_y = y;
             y += names(Place::Entry) + ROW_GAP;
+            let splits = count(Band::Split);
+            if splits > 0 {
+                d.split_top = d.entry_y + names(Place::Entry);
+                y = y.max(d.split_top + (splits + 1) * TRACK_STEP);
+            }
         }
         let spans = self.spans().next().is_some();
         if self.above() {
@@ -1136,6 +1158,7 @@ impl<'a> Grid<'a> {
         let k = r.track? as i32;
         Some(match r.band? {
             Band::Nat => d.nat_top + k * TRACK_STEP,
+            Band::Split => d.split_top + (k + 1) * TRACK_STEP,
             Band::Fan => {
                 let pitch = self.fan_pitch(runs);
                 d.fan.0 + (d.fan.1 - d.fan.0 - (tracks_in(runs, Band::Fan) - 1) * pitch) / 2 + k * pitch
@@ -1257,9 +1280,17 @@ impl<'a> Grid<'a> {
                 }
                 Kind::Beside => {
                     let (e, n) = (e.expect("inside"), n.expect("inside"));
-                    match ty {
-                        Some(y) => vec![base(vec![(e.0, y), (n.0, y)], None)],
-                        None => vec![base(vec![(n.0, e.1)], None)],
+                    let y = ty.unwrap_or_else(|| self.middle_of(d, r));
+                    match self.axis {
+                        Axis::Down => vec![base(vec![(e.0, y), (n.0, y)], None)],
+                        // Out of the entry gateway's right side, a step right, up to the band: the
+                        // line going furthest rises first, so the lines do not cross.
+                        Axis::Right => {
+                            let reach = |q: &Run| (self.cx(a, q.to) - self.cx(a, q.from)).abs();
+                            let further = runs.iter().filter(|q| q.kind == Kind::Beside && reach(q) > reach(r)).count() as i32;
+                            let x = e.0 + (further + 1) * TRACK_STEP;
+                            vec![base(vec![(x, e.1), (x, y), (n.0, y)], None)]
+                        }
                     }
                 }
                 Kind::NatAcross => {
@@ -1366,6 +1397,7 @@ impl<'a> Grid<'a> {
             .map(|(b, tracks)| {
                 let (lo, hi) = match b {
                     Band::Nat => (d.nat_top, d.nat_top + (tracks_in(&runs, b) - 1) * TRACK_STEP),
+                    Band::Split => (d.split_top, d.split_top + (tracks_in(&runs, b) + 1) * TRACK_STEP),
                     Band::Fan => d.fan,
                     Band::Below(row) => (d.below[row], d.below[row] + (tracks_in(&runs, b) + 1) * TRACK_STEP),
                 };
@@ -1862,7 +1894,11 @@ pub(in crate::arrange) mod tests {
                 let (straight, other) = (draft(&p, &m, "igw", "alb"), draft(&p, &m, "igw", "alb.b"));
                 assert_eq!((&straight.bend, straight.exit_pos, straight.entry_pos), (&Bend::Straight, Some(50), Some(50)), "{azs} {axis:?}");
                 assert_ne!(other.bend, Bend::Straight, "{azs} {axis:?}");
-                assert_ne!((other.exit, other.exit_pos), (straight.exit, straight.exit_pos), "{azs} {axis:?}");
+                // Both leave by the entry gateway's side facing the way the lines run, at spots of their own.
+                let ahead = if axis == Axis::Down { Side::Bottom } else { Side::Right };
+                assert_eq!((straight.exit, other.exit), (ahead, ahead), "{azs} {axis:?}");
+                assert_ne!(other.exit_pos, straight.exit_pos, "{azs} {axis:?}");
+                assert_eq!((other.entry, other.entry_pos), (Side::Top, Some(50)), "{azs} {axis:?}");
             }
         }
     }
@@ -1887,8 +1923,9 @@ pub(in crate::arrange) mod tests {
         }
     }
 
-    // Fails if the entry gateway's lines to the load balancers beside the first cross each other:
-    // the line to the one further away has to keep further out on the entry gateway's side.
+    // Fails if the entry gateway's lines to the load balancers beside the first cross each other
+    // or the straight line to the first: the line to the one further away has to keep further out
+    // on the entry gateway's side, on the side of the straight line they turn toward.
     #[test]
     fn lines_to_balancers_beside_the_first_do_not_cross() {
         let r = Rules::builtin();
@@ -1898,7 +1935,9 @@ pub(in crate::arrange) mod tests {
             for axis in [Axis::Down, Axis::Right] {
                 let p = arrange(&m, &r, axis).unwrap_or_else(|e| panic!("{azs} {axis:?}: {e:?}"));
                 let (b, c) = (kept_points(&p, draft(&p, &m, "igw", "alb.b")), kept_points(&p, draft(&p, &m, "igw", "alb.c")));
+                let a = kept_points(&p, draft(&p, &m, "igw", "alb.a"));
                 assert!(!cross(&b, &c), "{azs} {axis:?}: {b:?} crosses {c:?}");
+                assert!(!cross(&a, &b) && !cross(&a, &c), "{azs} {axis:?}: {b:?} or {c:?} crosses {a:?}");
             }
         }
     }
