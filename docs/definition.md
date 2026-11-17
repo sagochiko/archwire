@@ -336,7 +336,7 @@ choose:
   "added": true,
   "kind": "default",
   "rule": "nat-device-is-nat-gateway",
-  "reason": "AWS offers a managed NAT device, the NAT gateway, and a NAT instance you build yourself on EC2, and recommends NAT gateways for better availability and bandwidth and less administration. archwire draws a NAT gateway.",
+  "reason": "You can use the managed NAT device AWS offers, the NAT gateway, or build your own NAT device on EC2, a NAT instance; AWS recommends NAT gateways for better availability and bandwidth and less administration. archwire draws a NAT gateway.",
   "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat.html"
 },
 ```

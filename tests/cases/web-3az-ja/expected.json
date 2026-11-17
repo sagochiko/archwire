@@ -121,7 +121,7 @@
       "added": true,
       "kind": "default",
       "rule": "nat-device-is-nat-gateway",
-      "reason": "AWS は、マネージドな NAT デバイスである NAT ゲートウェイと、EC2 上に自分で作る NAT インスタンスを用意していて、可用性と帯域幅が優れ管理の手間が少ない NAT ゲートウェイを推奨している。archwire は NAT ゲートウェイを描く。",
+      "reason": "AWS が提供するマネージドな NAT デバイスである NAT ゲートウェイを使うことも、EC2 インスタンス上に自分で NAT デバイス（NAT インスタンス）を作ることもできる。AWS は、可用性と帯域幅が優れ管理の手間が少ない NAT ゲートウェイを推奨している。archwire は NAT ゲートウェイを描く。",
       "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat.html"
     },
     {
@@ -137,7 +137,7 @@
       "added": true,
       "kind": "default",
       "rule": "nat-device-is-nat-gateway",
-      "reason": "AWS は、マネージドな NAT デバイスである NAT ゲートウェイと、EC2 上に自分で作る NAT インスタンスを用意していて、可用性と帯域幅が優れ管理の手間が少ない NAT ゲートウェイを推奨している。archwire は NAT ゲートウェイを描く。",
+      "reason": "AWS が提供するマネージドな NAT デバイスである NAT ゲートウェイを使うことも、EC2 インスタンス上に自分で NAT デバイス（NAT インスタンス）を作ることもできる。AWS は、可用性と帯域幅が優れ管理の手間が少ない NAT ゲートウェイを推奨している。archwire は NAT ゲートウェイを描く。",
       "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat.html"
     },
     {
@@ -153,7 +153,7 @@
       "added": true,
       "kind": "default",
       "rule": "nat-device-is-nat-gateway",
-      "reason": "AWS は、マネージドな NAT デバイスである NAT ゲートウェイと、EC2 上に自分で作る NAT インスタンスを用意していて、可用性と帯域幅が優れ管理の手間が少ない NAT ゲートウェイを推奨している。archwire は NAT ゲートウェイを描く。",
+      "reason": "AWS が提供するマネージドな NAT デバイスである NAT ゲートウェイを使うことも、EC2 インスタンス上に自分で NAT デバイス（NAT インスタンス）を作ることもできる。AWS は、可用性と帯域幅が優れ管理の手間が少ない NAT ゲートウェイを推奨している。archwire は NAT ゲートウェイを描く。",
       "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat.html"
     },
     {
