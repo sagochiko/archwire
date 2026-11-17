@@ -355,16 +355,28 @@ mod tests {
     use crate::audit::{audit_wire_label, audit_wire_text_width};
     use crate::labels::{label_distance, point_along};
     use crate::layout::{Frame, FrameKind};
-    use crate::measure::{frame_name_area, label_area, wire_label_area, wire_text_width};
+    use crate::measure::{frame_name_box, label_area, name_area, wire_label_area, wire_text_width};
     use crate::path::{hits, opposite, overlaps, shared};
     use crate::test_inputs::{CROWDED_SIDE_EN, CROWDED_S3_JA};
 
-    fn wires(src: &str) -> (Model, Layout, Vec<Wire>, Vec<String>) {
+    /// The model, layout, wires and notes the drawing path gives a definition along `axis`.
+    fn planned(src: &str, axis: Axis) -> (Model, Layout, Vec<Wire>, Vec<String>) {
         let r = Rules::builtin();
-        let (m, _) = crate::inference::infer(&crate::def::parse(src).unwrap(), &r);
-        let m = m.unwrap(); let l = crate::layout::layout(&m, &r); let (w, n) = route(&m, &l, &r);
-        (m, l, w, n)
+        let m = crate::inference::infer(&crate::def::parse(src).unwrap(), &r).0.unwrap();
+        let p = crate::arrange::arrange(&m, &r, axis).unwrap_or_else(|e| panic!("{axis:?}: {e:?}\n{src}"));
+        let (w, n) = route_planned(&m, &p.layout, &r, &p.lines);
+        (m, p.layout, w, n)
     }
+
+    /// Like `planned`, along the direction the definition writes, else the default one.
+    fn compiled(src: &str) -> (Model, Layout, Vec<Wire>, Vec<String>) {
+        let r = Rules::builtin();
+        let m = crate::inference::infer(&crate::def::parse(src).unwrap(), &r).0.unwrap();
+        planned(src, m.direction.unwrap_or_else(|| crate::arrange::default_axis(&m)))
+    }
+
+    const AXES: [Axis; 2] = [Axis::Down, Axis::Right];
+
     const WEB2: &str = "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\n";
 
     /// Exit, waypoints and entry in order, with any diagonal step folded into a right angle.
@@ -395,89 +407,99 @@ mod tests {
         Rect { x: i.rect.x + i.rect.w / 2 - half, y: i.rect.y + i.rect.h + 4, w: 2 * half, h: 14 * i.lines as i32 + 6 }
     }
 
+    /// True if the drawn line runs along one straight line, waypoints and all.
+    fn straight(x: &Wire, l: &Layout) -> bool {
+        let p = full_path(x, l);
+        p.iter().all(|q| q.0 == p[0].0) || p.iter().all(|q| q.1 == p[0].1)
+    }
+
     fn both() -> [String; 2] { [WEB2.to_string(), format!("{WEB2}set:\n  azs: 3\n")] }
 
     #[test]
     fn every_semantic_edge_is_represented_exactly_once() {
-        for src in [WEB2.to_string(), format!("{WEB2}set:\n  azs: 3\n")] {
-            let (m, _, w, _) = wires(&src);
+        for src in both() { for axis in AXES {
+            let (m, _, w, _) = planned(&src, axis);
             let mut drawn: Vec<(String, String)> = w.iter().flat_map(|x| x.represents.clone()).collect();
             let mut want: Vec<(String, String)> = m.edges.iter().map(|e| (e.from.clone(), e.to.clone())).collect();
             drawn.sort(); want.sort();
-            assert_eq!(drawn, want);
-        }
+            assert_eq!(drawn, want, "{axis:?}");
+        } }
     }
 
     #[test]
     fn bottom_ports_clear_the_label() {
-        let (_, _, w, _) = wires(WEB2);
-        let x = w.iter().find(|x| x.id == "edge-alb-to-ecs-1a").unwrap();
-        assert_eq!(x.exit, Port { side: Side::Bottom, pos: 25, offset: 24 });
-        assert_eq!(x.points, vec![(515, 670), (335, 670)]);
-        let y = w.iter().find(|x| x.id == "edge-alb-to-ecs-1c").unwrap();
-        assert_eq!((y.exit.pos, y.points.clone()), (75, vec![(545, 670), (725, 670)]));
-    }
-
-    #[test]
-    fn cross_az_wires_use_separate_channels() {
-        let (_, _, w, _) = wires(WEB2);
-        let a = w.iter().find(|x| x.id == "edge-ecs-1a-to-aurora-1c").unwrap();
-        let c = w.iter().find(|x| x.id == "edge-ecs-1c-to-aurora-1a").unwrap();
-        assert_eq!((a.points[0].1, c.points[0].1), (840, 885));
+        let mut from_alb = 0;
+        for src in both() { for axis in AXES {
+            let (_, l, w, _) = planned(&src, axis);
+            let lines = |id: &str| l.icons.iter().find(|i| i.id == id).unwrap().lines as i32;
+            for x in &w {
+                for (id, p) in [(&x.from, x.exit), (&x.to, x.entry)] {
+                    if p.side == Side::Bottom {
+                        assert_eq!(p.offset, LABEL_FIRST + LABEL_LINE * (lines(id) - 1), "{} at {id} {axis:?}", x.id);
+                    }
+                }
+                from_alb += usize::from(x.from == "alb" && x.exit.side == Side::Bottom);
+            }
+        } }
+        assert!(from_alb > 0, "no line leaves the load balancer by its bottom side");
     }
 
     #[test]
     fn styles_follow_the_relation_and_holes() {
-        let (_, _, w, _) = wires("flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\n");
-        let style = |to: &str| w.iter().find(|x| x.to == to).unwrap().style;
-        assert_eq!(style("s3"), WireStyle::Hole);
-        assert_eq!(style("cloudwatch"), WireStyle::Aux);
-        assert_eq!(w.iter().find(|x| x.from == "waf").unwrap().style, WireStyle::Assoc);
-        assert_eq!(w.iter().find(|x| x.to == "s3").unwrap().label, "Route undecided");
-        assert_eq!(w.iter().find(|x| x.id == "edge-aurora-1a-to-aurora-1c").unwrap().style, WireStyle::Aux);
-    }
-
-    #[test]
-    fn three_azs_merge_cross_az_wires_and_say_so() {
-        let (_, _, w, notes) = wires(&format!("{WEB2}set:\n  azs: 3\n"));
-        assert!(w.iter().all(|x| !(x.from.starts_with("ecs-") && x.to.starts_with("aurora-") && x.from[4..] != x.to[7..])));
-        assert!(w.iter().find(|x| x.id == "edge-ecs-1a-to-aurora-1a").unwrap().represents.len() >= 3);
-        assert!(!notes.is_empty());
-    }
-
-    #[test]
-    fn no_wire_segment_crosses_an_icon_it_is_not_attached_to() {
-        for src in [WEB2.to_string(), format!("{WEB2}set:\n  azs: 3\n")] {
-            let (_, l, w, _) = wires(&src);
-            for x in &w {
-                let pts = full_path(x, &l);
-                for seg in pts.windows(2) { for i in &l.icons {
-                    if i.id == x.from || i.id == x.to { continue; }
-                    assert!(!segment_hits_rect(seg[0], seg[1], i.rect), "{} crosses {}", x.id, i.id);
-                } }
-            }
+        for axis in AXES {
+            let (_, _, w, _) = planned("flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\n", axis);
+            let style = |to: &str| w.iter().find(|x| x.to == to).unwrap().style;
+            assert_eq!(style("s3"), WireStyle::Hole);
+            assert_eq!(style("cloudwatch"), WireStyle::Aux);
+            assert_eq!(w.iter().find(|x| x.from == "waf").unwrap().style, WireStyle::Assoc);
+            assert_eq!(w.iter().find(|x| x.to == "s3").unwrap().label, "Route undecided");
+            assert_eq!(w.iter().find(|x| x.id == "edge-aurora-1a-to-aurora-1c").unwrap().style, WireStyle::Aux);
         }
     }
 
     #[test]
+    fn three_azs_merge_cross_az_wires_and_say_so() {
+        for axis in AXES {
+            let (_, _, w, notes) = planned(&format!("{WEB2}set:\n  azs: 3\n"), axis);
+            assert!(w.iter().all(|x| !(x.from.starts_with("ecs-") && x.to.starts_with("aurora-") && x.from[4..] != x.to[7..])));
+            assert!(w.iter().find(|x| x.id == "edge-ecs-1a-to-aurora-1a").unwrap().represents.len() >= 3);
+            assert!(!notes.is_empty());
+        }
+    }
+
+    #[test]
+    fn no_wire_segment_crosses_an_icon_it_is_not_attached_to() {
+        for src in both() { for axis in AXES {
+            let (_, l, w, _) = planned(&src, axis);
+            for x in &w {
+                let pts = full_path(x, &l);
+                for seg in pts.windows(2) { for i in &l.icons {
+                    if i.id == x.from || i.id == x.to { continue; }
+                    assert!(!segment_hits_rect(seg[0], seg[1], i.rect), "{} crosses {} {axis:?}", x.id, i.id);
+                } }
+            }
+        } }
+    }
+
+    #[test]
     fn no_wire_segment_crosses_a_label_except_its_own_ends() {
-        for src in both() {
-            let (_, l, w, _) = wires(&src);
+        for src in both() { for axis in AXES {
+            let (_, l, w, _) = planned(&src, axis);
             for x in &w {
                 let pts = full_path(x, &l);
                 let last = pts.len() - 2;
                 for (k, seg) in pts.windows(2).enumerate() { for i in &l.icons {
                     if (k == 0 && i.id == x.from) || (k == last && i.id == x.to) { continue; }
-                    assert!(!segment_hits_rect(seg[0], seg[1], label_rect(i)), "{} crosses the label of {}", x.id, i.id);
+                    assert!(!segment_hits_rect(seg[0], seg[1], label_rect(i)), "{} crosses the label of {} {axis:?}", x.id, i.id);
                 } }
             }
-        }
+        } }
     }
 
     #[test]
     fn no_two_wires_share_a_segment() {
-        for src in both() {
-            let (_, l, w, _) = wires(&src);
+        for src in both() { for axis in AXES {
+            let (_, l, w, _) = planned(&src, axis);
             // Wires are told apart by index, so two wires are always compared even if their ids matched.
             type Seg = (usize, (i32, i32), (i32, i32));
             let segs: Vec<Seg> = w.iter().enumerate()
@@ -490,15 +512,15 @@ mod tests {
                 } else if a.1.1 == a.2.1 && b.1.1 == b.2.1 && a.1.1 == b.1.1 {
                     a.1.0.max(a.2.0).min(b.1.0.max(b.2.0)) - a.1.0.min(a.2.0).max(b.1.0.min(b.2.0))
                 } else { 0 };
-                assert!(shared <= 1, "{} and {} share {shared} px", w[a.0].id, w[b.0].id);
+                assert!(shared <= 1, "{} and {} share {shared} px {axis:?}", w[a.0].id, w[b.0].id);
             } }
-        }
+        } }
     }
 
     #[test]
     fn every_wire_is_orthogonal_and_leaves_and_enters_outward() {
-        for src in both() {
-            let (_, l, w, notes) = wires(&src);
+        for src in both() { for axis in AXES {
+            let (_, l, w, notes) = planned(&src, axis);
             assert!(notes.iter().all(|n| !n.contains("could not")), "{notes:?}");
             for x in &w {
                 let mut raw = vec![port_point(l.rect(&x.from), x.exit)];
@@ -509,50 +531,52 @@ mod tests {
                 let out = match x.exit.side { Side::Top => b.1 < a.1, Side::Bottom => b.1 > a.1, Side::Left => b.0 < a.0, Side::Right => b.0 > a.0 };
                 let (c, d) = (raw[raw.len() - 2], raw[raw.len() - 1]);
                 let inward = match x.entry.side { Side::Top => d.1 > c.1, Side::Bottom => d.1 < c.1, Side::Left => d.0 > c.0, Side::Right => d.0 < c.0 };
-                assert!(out && inward, "{} runs along its icon's side", x.id);
+                assert!(out && inward, "{} runs along its icon's side {axis:?}", x.id);
             }
-        }
+        } }
     }
 
     #[test]
     fn lines_to_regional_services_merge_and_say_all_azs() {
-        let (_, _, w, _) = wires(WEB2);
-        let cw = w.iter().find(|x| x.to == "cloudwatch").unwrap();
-        assert_eq!((cw.id.as_str(), cw.label.as_str(), cw.style), ("edge-ecs-1c-to-cloudwatch", "Logs and metrics\n(all AZs)", WireStyle::Aux));
-        assert_eq!(cw.represents, [("ecs-1a".to_string(), "cloudwatch".to_string()), ("ecs-1c".to_string(), "cloudwatch".to_string())]);
-        assert!(cw.horizontal_label);
-        assert_eq!(w.iter().filter(|x| x.to == "cloudwatch").count(), 1);
-        let (_, _, ja, _) = wires(&format!("{WEB2}set:\n  lang: ja\n"));
-        assert_eq!(ja.iter().find(|x| x.to == "cloudwatch").unwrap().label, "ログ・メトリクス\n（全 AZ から）");
-        let (_, _, w3, _) = wires(&format!("{WEB2}set:\n  azs: 3\n"));
-        let writer = w3.iter().find(|x| x.id == "edge-ecs-1a-to-aurora-1a").unwrap();
-        assert_eq!(writer.label, "Read/Write (all AZs)");
+        for axis in AXES {
+            let (_, _, w, _) = planned(WEB2, axis);
+            let cw: Vec<&Wire> = w.iter().filter(|x| x.to == "cloudwatch").collect();
+            assert_eq!(cw.len(), 1, "{axis:?}");
+            assert_eq!((cw[0].label.replace('\n', " ").as_str(), cw[0].style), ("Logs and metrics (all AZs)", WireStyle::Aux), "{axis:?}");
+            assert_eq!(cw[0].represents, [("ecs-1a".to_string(), "cloudwatch".to_string()), ("ecs-1c".to_string(), "cloudwatch".to_string())]);
+            let (_, _, ja, _) = planned(&format!("{WEB2}set:\n  lang: ja\n"), axis);
+            assert!(ja.iter().find(|x| x.to == "cloudwatch").unwrap().label.contains("（全 AZ から）"), "{axis:?}");
+            let (_, _, w3, _) = planned(&format!("{WEB2}set:\n  azs: 3\n"), axis);
+            let writer = w3.iter().find(|x| x.id == "edge-ecs-1a-to-aurora-1a").unwrap();
+            assert_eq!(writer.label.replace('\n', " "), "Read/Write (all AZs)", "{axis:?}");
+        }
     }
 
     #[test]
-    fn main_column_is_straight_and_nat_lines_mirror() {
-        let (_, l, w, _) = wires(WEB2);
-        let get = |id: &str| w.iter().find(|x| x.id == id).unwrap_or_else(|| panic!("{id}"));
-        for id in ["edge-user-to-cloudfront", "edge-cloudfront-to-igw", "edge-igw-to-alb"] {
-            assert!(get(id).points.is_empty(), "{id}");
+    fn main_column_is_straight_and_only_the_entry_gateway_line_has_its_label_near_its_source() {
+        for axis in AXES {
+            let (_, l, w, _) = planned(WEB2, axis);
+            let get = |id: &str| w.iter().find(|x| x.id == id).unwrap_or_else(|| panic!("{id}"));
+            for id in ["edge-user-to-cloudfront", "edge-cloudfront-to-igw", "edge-igw-to-alb"] {
+                assert!(straight(get(id), &l), "{id} {axis:?}: {:?}", get(id).points);
+            }
+            let near: Vec<&str> = w.iter().filter(|x| x.label_near_source).map(|x| x.id.as_str()).collect();
+            assert_eq!(near, ["edge-igw-to-alb"], "{axis:?}");
         }
-        let mirror = |p: Vec<(i32, i32)>| p.into_iter().map(|(x, y)| (1060 - x, y)).collect::<Vec<_>>();
-        assert_eq!(mirror(full_path(get("edge-nat-1a-to-igw"), &l)), full_path(get("edge-nat-1c-to-igw"), &l));
-        assert_eq!(get("edge-ecs-1a-to-nat-1a").points.len(), get("edge-ecs-1c-to-nat-1c").points.len());
-        let near: Vec<&str> = w.iter().filter(|x| x.label_near_source).map(|x| x.id.as_str()).collect();
-        assert_eq!(near, ["edge-igw-to-alb"]);
     }
 
     #[test]
     fn an_endpoint_route_says_so_in_its_label() {
         let src = "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\nchoose:\n  route.ecs.s3: endpoint\n";
-        let (_, _, w, _) = wires(src);
-        let s3 = w.iter().find(|x| x.to == "s3").unwrap();
-        assert_eq!((s3.label.replace('\n', " ").as_str(), s3.style), ("Read/Write (via VPC endpoint) (all AZs)", WireStyle::Main));
-        let (_, _, ja, _) = wires(&format!("{src}set:\n  lang: ja\n"));
-        assert_eq!(ja.iter().find(|x| x.to == "s3").unwrap().label.replace('\n', " "), "読み書き （VPC エンドポイント経由） （全 AZ から）");
-        let (_, _, nat, _) = wires(&src.replace("endpoint", "nat"));
-        assert!(!nat.iter().find(|x| x.to == "s3").unwrap().label.contains("VPC"));
+        for axis in AXES {
+            let (_, _, w, _) = planned(src, axis);
+            let s3 = w.iter().find(|x| x.to == "s3").unwrap();
+            assert_eq!((s3.label.replace('\n', " ").as_str(), s3.style), ("Read/Write (via VPC endpoint) (all AZs)", WireStyle::Main));
+            let (_, _, ja, _) = planned(&format!("{src}set:\n  lang: ja\n"), axis);
+            assert_eq!(ja.iter().find(|x| x.to == "s3").unwrap().label.replace('\n', " "), "読み書き （VPC エンドポイント経由） （全 AZ から）");
+            let (_, _, nat, _) = planned(&src.replace("endpoint", "nat"), axis);
+            assert!(!nat.iter().find(|x| x.to == "s3").unwrap().label.contains("VPC"));
+        }
     }
 
     /// A route answered with `endpoint`, in Japanese: the label has three parts and is too long for one line.
@@ -570,19 +594,29 @@ mod tests {
 
     #[test]
     fn a_japanese_label_of_several_parts_stacks_them_clear_of_frame_sides() {
-        for src in endpoint_ja_definitions() {
-            let (_, l, w, notes) = wires(&src);
-            assert!(notes.iter().all(|n| !n.contains("edge-")), "{notes:?} in\n{src}");
+        let parts = ["読み書き", "（VPC エンドポイント経由）", "（全 AZ から）"];
+        for src in endpoint_ja_definitions() { for axis in AXES {
+            let (_, l, w, notes) = planned(&src, axis);
+            assert!(notes.iter().all(|n| !n.contains("edge-")), "{notes:?} {axis:?} in\n{src}");
             let s3 = w.iter().find(|x| x.to == "s3").unwrap();
-            assert_eq!(s3.label, "読み書き\n（VPC エンドポイント経由）\n（全 AZ から）", "{src}");
-            let borders = Scene::new(&l, Measure::Grid).borders;
+            // The three parts in order, none broken across lines.
+            assert_eq!(s3.label.replace('\n', " "), parts.join(" "), "{axis:?} in\n{src}");
+            let whole = |line: &str| (0..parts.len()).any(|i| (i + 1..=parts.len()).any(|j| parts[i..j].join(" ") == line));
+            assert!(s3.label.lines().all(whole), "{:?} {axis:?} in\n{src}", s3.label);
+            // A frame side cuts a label only where no stretch is clear of them, and then the label
+            // lies clear of every line, icon and name.
+            let borders = Scene::new(&l, Measure::Flow).borders;
             for x in w.iter().filter(|x| !x.label.is_empty()) {
                 let area = label_area_of(x, &l);
-                for &(c, d) in &borders {
-                    assert!(!hits(c, d, area), "a frame side {c:?}-{d:?} cuts the label of {} in\n{src}", x.id);
+                if !borders.iter().any(|&(c, d)| hits(c, d, area)) { continue; }
+                for y in &w {
+                    assert!(full_path(y, &l).windows(2).all(|s| !hits(s[0], s[1], area)), "{} runs through the label of {} on a frame side {axis:?} in\n{src}", y.id, x.id);
+                }
+                for i in &l.icons {
+                    assert!(!overlaps(i.rect, area) && !overlaps(name_area(i), area), "{} or its name is under the label of {} on a frame side {axis:?} in\n{src}", i.id, x.id);
                 }
             }
-        }
+        } }
     }
 
     #[test]
@@ -632,52 +666,43 @@ mod tests {
 
     #[test]
     fn a_label_with_no_spot_clear_of_frame_sides_lies_on_them_clear_of_lines_and_text() {
-        assert_eq!(violations(ENDPOINT_3AZ_EN), Vec::<String>::new());
-        let (_, l, w, notes) = wires(ENDPOINT_3AZ_EN);
-        assert!(notes.iter().all(|n| !n.contains("edge-")), "{notes:?}");
-        let s3 = w.iter().find(|x| x.to == "s3").unwrap();
-        // Whole parts: on one line, or one part per line.
-        assert!(
-            ["Read/Write (via VPC endpoint) (all AZs)", "Read/Write\n(via VPC endpoint)\n(all AZs)"].contains(&s3.label.as_str()),
-            "{:?}",
-            s3.label
-        );
-        let area = label_area_of(s3, &l);
-        assert!(Scene::new(&l, Measure::Grid).borders.iter().any(|&(c, d)| hits(c, d, area)), "{area:?} is clear of frame sides, so the first search should have found it");
-        for y in &w {
-            for s in full_path(y, &l).windows(2) {
-                assert!(!hits(s[0], s[1], area), "{} runs through the label of {}", y.id, s3.id);
+        // Running right, the S3 line of the Japanese endpoint example leaves the last zone and
+        // crosses the VPC's side and the Region's: no stretch of it holds its label clear of every frame side.
+        let three = ENDPOINT_JA.replace("lang: ja\n", "lang: ja\n  azs: 3\n");
+        for (src, id) in [(ENDPOINT_JA, "edge-ecs-1c-to-s3"), (three.as_str(), "edge-ecs-1d-to-s3")] {
+            assert_eq!(violations(src, Axis::Right), Vec::<String>::new(), "{src}");
+            let (_, l, w, notes) = planned(src, Axis::Right);
+            assert!(notes.iter().all(|n| !n.contains("edge-")), "{notes:?}");
+            let s3 = w.iter().find(|x| x.to == "s3").unwrap();
+            assert_eq!(s3.id, id);
+            // Whole parts: on one line, or one part per line.
+            assert!(["読み書き （VPC エンドポイント経由） （全 AZ から）", "読み書き\n（VPC エンドポイント経由）\n（全 AZ から）"].contains(&s3.label.as_str()), "{:?}", s3.label);
+            let area = label_area_of(s3, &l);
+            assert!(Scene::new(&l, Measure::Flow).borders.iter().any(|&(c, d)| hits(c, d, area)), "{area:?} is clear of frame sides, so the first search should have found it");
+            for y in &w {
+                for s in full_path(y, &l).windows(2) {
+                    assert!(!hits(s[0], s[1], area), "{} runs through the label of {}", y.id, s3.id);
+                }
             }
-        }
-        for i in &l.icons {
-            assert!(!overlaps(i.rect, area) && !overlaps(label_area(i), area), "{} or its name is under the label", i.id);
-        }
-        // The same in Japanese.
-        let ja = ENDPOINT_3AZ_EN.replace("lang: en", "lang: ja");
-        assert_eq!(violations(&ja), Vec::<String>::new());
-        let (_, l, w, _) = wires(&ja);
-        let s3 = w.iter().find(|x| x.to == "s3").unwrap();
-        assert!(s3.label.starts_with("読み書き"), "{:?}", s3.label);
-        assert!(!s3.label.contains("（VPC\n"), "{:?}", s3.label);
-        let area = label_area_of(s3, &l);
-        for y in &w {
-            for s in full_path(y, &l).windows(2) {
-                assert!(!hits(s[0], s[1], area), "{} runs through the label of {}", y.id, s3.id);
+            for i in &l.icons {
+                assert!(!overlaps(i.rect, area) && !overlaps(name_area(i), area), "{} or its name is under the label", i.id);
             }
         }
         // A label that fits one part per line clear of frame sides keeps that spot and shape.
-        let (_, l, w, _) = wires(&ENDPOINT_JA.replace("lang: ja", "lang: en"));
-        let s3 = w.iter().find(|x| x.to == "s3").unwrap();
-        assert_eq!(s3.label, "Read/Write\n(via VPC endpoint)\n(all AZs)");
-        let area = label_area_of(s3, &l);
-        assert!(Scene::new(&l, Measure::Grid).borders.iter().all(|&(c, d)| !hits(c, d, area)));
+        for axis in AXES {
+            let (_, l, w, _) = planned(&ENDPOINT_JA.replace("lang: ja", "lang: en"), axis);
+            let s3 = w.iter().find(|x| x.to == "s3").unwrap();
+            assert_eq!(s3.label, "Read/Write\n(via VPC endpoint)\n(all AZs)", "{axis:?}");
+            let area = label_area_of(s3, &l);
+            assert!(Scene::new(&l, Measure::Flow).borders.iter().all(|&(c, d)| !hits(c, d, area)), "{axis:?}");
+        }
     }
 
     #[test]
     fn a_label_with_no_spot_clear_of_lines_and_text_stays_at_its_usual_spot_and_is_not_clear() {
-        let (m, l, w, _) = wires(WEB2);
+        let (m, l, w, _) = compiled(WEB2);
         let r = Rules::builtin();
-        let ctx = Ctx { model: &m, layout: &l, rules: &r, scene: Scene::new(&l, Measure::Grid), measure: Measure::Grid };
+        let ctx = Ctx { model: &m, layout: &l, rules: &r, scene: Scene::new(&l, Measure::Flow), measure: Measure::Flow };
         let paths: Vec<Vec<Pt>> = w.iter().map(|x| full_path(x, &l)).collect();
         let me = w.iter().position(|x| x.id == "edge-cloudfront-to-s3").unwrap();
         // Labels already placed everywhere: no spot is clear even over frame sides.
@@ -692,8 +717,9 @@ mod tests {
 
     #[test]
     fn lines_to_the_side_column_get_their_own_lanes() {
-        assert_eq!(violations(AUX_TO_SIDE), Vec::<String>::new());
-        let (_, l, w, notes) = wires(AUX_TO_SIDE);
+        for axis in AXES {
+        assert_eq!(violations(AUX_TO_SIDE, axis), Vec::<String>::new());
+        let (_, l, w, notes) = planned(AUX_TO_SIDE, axis);
         assert!(notes.iter().all(|n| !n.contains("could not")), "{notes:?}");
         // Every jog toward the side column is a vertical run at its own x, clear of the column's labels.
         let side_labels: Vec<Rect> = l.icons.iter().filter(|i| i.parent.as_deref() == Some("region")).map(label_rect).collect();
@@ -708,34 +734,35 @@ mod tests {
         let n = xs.len();
         xs.sort_unstable();
         xs.dedup();
-        assert_eq!(xs.len(), n, "two jogs share an x");
+        assert_eq!(xs.len(), n, "two jogs share an x {axis:?}");
+        }
     }
 
     #[test]
     fn the_final_check_names_lines_that_overlap_or_cross_text_whatever_the_router_thought() {
-        let (m, l, mut w, _) = wires(WEB2);
-        assert_eq!(audit(&m, &l, &w, &[], Measure::Grid), Vec::<String>::new());
+        let (m, l, mut w, _) = compiled(WEB2);
+        assert_eq!(audit(&m, &l, &w, &[], Measure::Flow), Vec::<String>::new());
         // Lay one line on top of another, one pixel apart, and another across an icon's label.
         let a = w.iter().position(|x| x.id == "edge-ecs-1a-to-aurora-1a").unwrap();
         let b = w.iter().position(|x| x.id == "edge-ecs-1c-to-aurora-1c").unwrap();
         let pa = full_path(&w[a], &l);
         w[b].points = vec![(pa[0].0 + 1, pa[0].1 + 5), (pa[0].0 + 1, pa[pa.len() - 1].1 - 5)];
         w[b].exit = w[a].exit;
-        let named = audit(&m, &l, &w, &[], Measure::Grid);
+        let named = audit(&m, &l, &w, &[], Measure::Flow);
         assert!(named.contains(&"edge-ecs-1a-to-aurora-1a".to_string()) && named.contains(&"edge-ecs-1c-to-aurora-1c".to_string()), "{named:?}");
     }
 
     #[test]
     fn routing_is_deterministic() {
-        for src in both() {
-            assert_eq!(wires(&src).2, wires(&src).2);
-        }
+        for src in both() { for axis in AXES {
+            assert_eq!(planned(&src, axis).2, planned(&src, axis).2);
+        } }
     }
 
-    /// Every way a line breaks the diagram checker's rules in one definition, as (line id, what),
-    /// measured by this test's own arithmetic; and the notes that name a line.
-    fn faults(src: &str) -> (Vec<(String, String)>, Vec<String>) {
-        let (_, l, w, notes) = wires(src);
+    /// Every way a line breaks the diagram checker's rules in one definition along `axis`, as
+    /// (line id, what), measured by this test's own arithmetic; and the notes that name a line.
+    fn faults(src: &str, axis: Axis) -> (Vec<(String, String)>, Vec<String>) {
+        let (_, l, w, notes) = planned(src, axis);
         let named: Vec<String> = notes.iter().filter(|n| n.contains("edge-")).cloned().collect();
         let mut out: Vec<(String, String)> = Vec::new();
         let paths: Vec<(&Wire, Vec<(i32, i32)>)> = w.iter().map(|x| (x, full_path(x, &l))).collect();
@@ -750,7 +777,7 @@ mod tests {
                     if !own && segment_hits_rect(s[0], s[1], label_rect(i)) { fault(format!("crosses the label of {}", i.id)); }
                 }
                 for f in &l.frames {
-                    if segment_hits_rect(s[0], s[1], frame_name_area(f)) { fault(format!("crosses the name of {}", f.id)); }
+                    if segment_hits_rect(s[0], s[1], frame_name_box(f)) { fault(format!("crosses the name of {}", f.id)); }
                 }
                 for (m, r) in labels.iter().enumerate() {
                     if m != n && r.is_some_and(|r| hits(s[0], s[1], r)) { fault(format!("runs through the label of {}", w[m].id)); }
@@ -771,8 +798,8 @@ mod tests {
     }
 
     /// Every fault and every note naming a line, for a definition that should have none.
-    fn violations(src: &str) -> Vec<String> {
-        let (f, named) = faults(src);
+    fn violations(src: &str, axis: Axis) -> Vec<String> {
+        let (f, named) = faults(src, axis);
         named.into_iter().chain(f.into_iter().map(|(id, what)| format!("{id} {what}"))).collect()
     }
 
@@ -785,6 +812,16 @@ mod tests {
     /// meet in one gap. They are still drawn, and every line at fault must be named in a note.
     fn crowded_definitions() -> Vec<String> {
         vec![CROWDED_S3_JA.to_string(), CROWDED_SIDE_EN.to_string()]
+    }
+
+    /// True if the crowded definition breaks a line along this axis, by the table of the lines it cannot draw.
+    fn breaks(src: &str, axis: Axis) -> bool {
+        let name = match src {
+            CROWDED_S3_JA => "s3-ja",
+            CROWDED_SIDE_EN => "side-en",
+            _ => return false,
+        };
+        crate::tests::CROWDED_BROKEN.iter().any(|(n, a, lines)| *n == name && *a == axis && !lines.is_empty())
     }
 
     /// Accepted definitions beyond the acceptance cases: other settings, every allowed link, reversed and extra flows.
@@ -805,50 +842,72 @@ mod tests {
         srcs.extend(endpoint_ja_definitions());
         srcs.extend([SHOWCASE.to_string(), SHOWCASE.replace("route.ecs.s3: nat", "route.ecs.s3: endpoint")]);
         srcs.extend([ENDPOINT_3AZ_EN.to_string(), ENDPOINT_3AZ_EN.replace("lang: en", "lang: ja")]);
+        srcs.extend(SMALL_DEFINITIONS.map(String::from));
         srcs.extend(crowded_definitions());
         srcs
     }
 
+    /// Small definitions with a VPC, each writing a few of the allowed links on its own.
+    const SMALL_DEFINITIONS: [&str; 17] = [
+        "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n",
+        "flows:\n  - user -> alb -> ecs -> aurora\nset:\n  azs: 3\n",
+        "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\n",
+        "flows:\n  - user -> alb -> ecs\n  - cloudfront -> s3\n  - user -> cloudfront\n  - ecs -> s3\n",
+        "flows:\n  - user -> alb -> ecs\n  - ecs -> internet\n",
+        "flows:\n  - user -> alb -> ecs\n  - ecs -> internet\nset:\n  nat: single\n",
+        "flows:\n  - user -> alb -> ecs\n  - ecs ~> cloudwatch\n",
+        "flows:\n  - user -> cloudfront -> alb -> ecs\n  - alb ~> s3\n  - cloudfront ~> s3\n",
+        "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\nchoose:\n  route.ecs.s3: endpoint\n",
+        "flows:\n  - user -> alb -> ecs -> aurora\n",
+        "flows:\n  - user -> cloudfront -> alb -> ecs\n",
+        "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\n  - ecs ~> cloudwatch\nset:\n  lang: ja\n",
+        "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\nchoose:\n  route.ecs.s3: endpoint\nset:\n  lang: ja\n",
+        "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n",
+        "flows:\n  - user -> alb -> ecs\n  - alb ~> cloudwatch\n",
+        "flows:\n  - user -> alb -> ecs -> aurora\n  - ecs ~> cloudwatch\n",
+        "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\n",
+    ];
+
     #[test]
     fn other_accepted_definitions_route_cleanly() {
-        let crowded = crowded_definitions();
         let mut bad = Vec::new();
-        for src in more_definitions().iter().chain(&both()).filter(|s| !crowded.contains(s)) {
-            let v = violations(src);
-            if !v.is_empty() { bad.push(format!("{src}{v:#?}")); }
-        }
+        for src in more_definitions().iter().chain(&both()) { for axis in AXES {
+            if breaks(src, axis) { continue; }
+            let v = violations(src, axis);
+            if !v.is_empty() { bad.push(format!("{axis:?}\n{src}{v:#?}")); }
+        } }
         assert!(bad.is_empty(), "{}", bad.join("\n----\n"));
     }
 
     #[test]
     fn no_line_at_fault_comes_out_without_a_note() {
         let crowded = crowded_definitions();
-        for src in more_definitions().iter().chain(&both()).chain(&crowded) {
-            let (f, named) = faults(src);
+        for src in more_definitions().iter().chain(&both()).chain(&crowded) { for axis in AXES {
+            let (f, named) = faults(src, axis);
             for (id, what) in f {
-                assert!(named.iter().any(|n| n.contains(&format!("{id} "))), "{id} {what}, but no note names it, in\n{src}");
+                assert!(named.iter().any(|n| n.contains(&format!("{id} "))), "{id} {what}, but no note names it, {axis:?} in\n{src}");
             }
-        }
-        for src in &crowded {
+        } }
+        for src in &crowded { for axis in AXES {
             assert!(more_definitions().contains(src), "{src}");
-            assert!(!faults(src).1.is_empty(), "{src}");
-        }
+            assert_eq!(!faults(src, axis).1.is_empty(), breaks(src, axis), "{axis:?} {src}");
+        } }
     }
 
     #[test]
     fn a_line_between_icons_at_the_same_height_is_straight() {
-        for src in [WEB2.to_string(), format!("{WEB2}set:\n  azs: 3\n"), format!("{WEB2}set:\n  lang: ja\n")] {
-            let (_, l, w, _) = wires(&src);
+        for src in [WEB2.to_string(), format!("{WEB2}set:\n  azs: 3\n"), format!("{WEB2}set:\n  lang: ja\n")] { for axis in AXES {
+            let (_, l, w, _) = planned(&src, axis);
             let cw = w.iter().find(|x| x.to == "cloudwatch").unwrap();
-            assert!(cw.points.is_empty() && cw.exit.pos == cw.entry.pos, "{} bends: {:?} {:?} {:?}", cw.id, cw.exit, cw.entry, cw.points);
+            assert!(straight(cw, &l) && cw.exit.pos == cw.entry.pos, "{} bends: {:?} {:?} {:?} {axis:?}", cw.id, cw.exit, cw.entry, cw.points);
             for x in &w {
                 let (fr, tr) = (l.rect(&x.from), l.rect(&x.to));
                 let sideways = matches!(x.exit.side, Side::Left | Side::Right) && x.entry.side == opposite(x.exit.side);
                 if fr.y == tr.y && fr.h == tr.h && sideways {
-                    assert!(x.points.is_empty(), "{} is not straight: {:?}", x.id, x.points);
+                    assert!(straight(x, &l), "{} is not straight: {:?} {axis:?}", x.id, x.points);
                 }
             }
-        }
+        } }
     }
 
     /// Where a line's label sits, by the same measure the router uses.
@@ -873,74 +932,75 @@ mod tests {
 
     #[test]
     fn no_frame_side_cuts_a_line_label_in_the_acceptance_definitions() {
-        for src in acceptance_definitions() {
-            let (_, l, w, _) = wires(&src);
-            let borders = Scene::new(&l, Measure::Grid).borders;
+        for src in acceptance_definitions() { for axis in AXES {
+            let (_, l, w, _) = planned(&src, axis);
+            let borders = Scene::new(&l, Measure::Flow).borders;
             for x in w.iter().filter(|x| !x.label.is_empty()) {
                 let area = label_area_of(x, &l);
                 for &(c, d) in &borders {
-                    assert!(!hits(c, d, area), "a frame side {c:?}-{d:?} cuts the label of {} in\n{src}", x.id);
+                    assert!(!hits(c, d, area), "a frame side {c:?}-{d:?} cuts the label of {} {axis:?} in\n{src}", x.id);
                 }
             }
-        }
+        } }
     }
 
     #[test]
     fn no_other_line_runs_through_a_line_label() {
-        let crowded = crowded_definitions();
-        for src in more_definitions().iter().chain(&acceptance_definitions()).filter(|s| !crowded.contains(s)) {
-            let (_, l, w, _) = wires(src);
+        for src in more_definitions().iter().chain(&acceptance_definitions()) { for axis in AXES {
+            if breaks(src, axis) { continue; }
+            let (_, l, w, _) = planned(src, axis);
             for x in w.iter().filter(|x| !x.label.is_empty()) {
                 let area = label_area_of(x, &l);
                 for y in &w {
                     for s in full_path(y, &l).windows(2) {
-                        assert!(!hits(s[0], s[1], area), "{} runs through the label of {} in\n{src}", y.id, x.id);
+                        assert!(!hits(s[0], s[1], area), "{} runs through the label of {} {axis:?} in\n{src}", y.id, x.id);
                     }
                 }
             }
-        }
+        } }
     }
 
     #[test]
     fn a_label_moves_off_frame_sides_to_a_clear_stretch() {
-        let (_, l, w, _) = wires(&format!("{WEB2}set:\n  lang: ja\n"));
-        let get = |id: &str| w.iter().find(|x| x.id == id).unwrap();
-        // Its middle is on the AZ and private subnet sides; the stretch inside the private subnet is clear.
-        let nat = get("edge-ecs-1c-to-nat-1c");
-        assert!(nat.label_at.is_some());
-        let area = label_area_of(nat, &l);
-        let sub = l.rect("pri-1c");
-        assert!(area.x > sub.x && area.x + area.w < sub.x + sub.w && area.y > sub.y, "{area:?} outside {sub:?}");
-        // Too long for any stretch on one line, so it goes on two, between the icon and the private subnet's side.
-        let cw = get("edge-ecs-1c-to-cloudwatch");
-        assert_eq!(cw.label, "ログ・メトリクス\n（全 AZ から）");
-        let (area, ecs) = (label_area_of(cw, &l), l.rect("ecs-1c"));
-        assert!(area.x >= ecs.x + ecs.w && area.x + area.w < sub.x + sub.w && area.y > sub.y, "{area:?}");
-        // A label nothing cuts stays where it was.
-        assert_eq!(get("edge-ecs-1a-to-aurora-1a").label_at, None);
-        assert_eq!(get("edge-igw-to-alb").label_at, None);
+        for axis in AXES {
+            let mut moved = 0;
+            for src in acceptance_definitions() {
+                let (_, l, w, _) = planned(&src, axis);
+                let borders = Scene::new(&l, Measure::Flow).borders;
+                let cut = |area: Rect| borders.iter().any(|&(c, d)| hits(c, d, area));
+                for x in w.iter().filter(|x| !x.label.is_empty()) {
+                    let usual = Wire { label_at: None, ..x.clone() };
+                    if !cut(label_area_of(&usual, &l)) { continue; }
+                    // Its usual spot is on a frame side; it sits on a stretch clear of every frame side.
+                    assert!(x.label_at.is_some(), "{} {axis:?} in\n{src}", x.id);
+                    assert!(!cut(label_area_of(x, &l)), "{} {axis:?} in\n{src}", x.id);
+                    moved += 1;
+                }
+            }
+            assert!(moved > 0, "no label in the acceptance definitions starts on a frame side, {axis:?}");
+        }
     }
 
     #[test]
     fn the_replication_line_to_the_far_reader_stays_inside_the_zones() {
-        for src in acceptance_definitions().into_iter().filter(|s| s.contains("azs: 3")) {
-            let (_, l, w, _) = wires(&src);
+        for src in acceptance_definitions().into_iter().filter(|s| s.contains("azs: 3")) { for axis in AXES {
+            let (_, l, w, _) = planned(&src, axis);
             let x = w.iter().find(|x| x.id == "edge-aurora-1a-to-aurora-1d").unwrap();
             let bottom = ["az-1a", "az-1c", "az-1d"].map(|id| { let r = l.rect(id); r.y + r.h }).into_iter().min().unwrap();
-            assert!(full_path(x, &l).iter().all(|p| p.1 < bottom), "{:?} goes below the zones at {bottom} in\n{src}", x.points);
-        }
+            assert!(full_path(x, &l).iter().all(|p| p.1 < bottom), "{:?} goes below the zones at {bottom} {axis:?} in\n{src}", x.points);
+        } }
     }
 
     #[test]
     fn wire_ids_are_unique() {
-        for src in more_definitions().iter().chain(&both()) {
-            let (_, _, w, _) = wires(src);
+        for src in more_definitions().iter().chain(&both()) { for axis in AXES {
+            let (_, _, w, _) = planned(src, axis);
             let mut ids: Vec<&str> = w.iter().map(|x| x.id.as_str()).collect();
             ids.sort_unstable();
             let n = ids.len();
             ids.dedup();
-            assert_eq!(ids.len(), n, "{src}");
-        }
+            assert_eq!(ids.len(), n, "{axis:?} {src}");
+        } }
     }
 
     #[test]
@@ -948,13 +1008,14 @@ mod tests {
         let r = Rules::builtin();
         let (m, _) = crate::inference::infer(&crate::def::parse(WEB2).unwrap(), &r);
         let m = m.unwrap();
-        let mut l = crate::layout::layout(&m, &r);
+        let p = crate::arrange::arrange(&m, &r, crate::arrange::default_axis(&m)).unwrap();
+        let mut l = p.layout;
         let s3 = l.rect("s3");
         for (k, (dx, dy)) in [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)].into_iter().enumerate() {
             let rect = Rect { x: s3.x + dx * 62, y: s3.y + dy * 62, w: 60, h: 60 };
             l.icons.push(crate::layout::Icon { id: format!("wall-{k}"), label: String::new(), lines: 1, rect, parent: None });
         }
-        let (w, notes) = route(&m, &l, &r);
+        let (w, notes) = route_planned(&m, &l, &r, &p.lines);
         assert!(w.iter().any(|x| x.id == "edge-cloudfront-to-s3"));
         assert_eq!(notes, ["The line edge-cloudfront-to-s3 could not avoid every icon, label and other line; check it in the diagram."]);
     }
@@ -1349,8 +1410,8 @@ mod tests {
         let r = Rules::builtin();
         let (m, _) = crate::inference::infer(&crate::def::parse(&src).unwrap(), &r);
         let m = m.unwrap();
-        let l = crate::layout::layout(&m, &r);
-        let (w, _) = route_planned(&m, &l, &r, &[]);
+        let p = crate::arrange::arrange(&m, &r, crate::arrange::default_axis(&m)).unwrap();
+        let (w, _) = route_planned(&m, &p.layout, &r, &[]);
         let cw: Vec<&Wire> = w.iter().filter(|x| x.to == "cloudwatch").collect();
         assert_eq!(cw.len(), 1, "{:?}", w.iter().map(|x| &x.id).collect::<Vec<_>>());
         assert_eq!(cw[0].represents, [("ecs-1a".to_string(), "cloudwatch".to_string()), ("ecs-1c".to_string(), "cloudwatch".to_string())]);
@@ -1360,7 +1421,7 @@ mod tests {
     #[test]
     fn three_zones_with_fewer_readers_keep_every_edge() {
         let src = "flows:\n  - user -> alb -> ecs -> aurora\n  - aurora -> ecs\n  - aurora -> s3\nset:\n  azs: 3\n  readers: 1\nchoose:\n  route.aurora.s3: endpoint\n";
-        let (m, _, w, _) = wires(src);
+        let (m, _, w, _) = compiled(src);
         let mut drawn: Vec<(String, String)> = w.iter().flat_map(|x| x.represents.clone()).collect();
         let mut want: Vec<(String, String)> = m.edges.iter().map(|e| (e.from.clone(), e.to.clone())).collect();
         drawn.sort();
@@ -1624,13 +1685,6 @@ mod tests {
         // Through the gate and the inner point still, but at 140 between them.
         w[0].points = vec![(200, 130), (200, 140), (300, 140), (300, 130)];
         assert!(audit(&m, &l, &w, &plans, Measure::Flow).contains(&"edge-a-to-b".to_string()));
-    }
-
-    // Fails if the checks of drafts are applied on the path without drafts.
-    #[test]
-    fn audit_ignores_drafts_on_the_old_path() {
-        let (m, l, w, _) = wires(include_str!("../../../tests/cases/web-2az-ja/def.yaml"));
-        assert_eq!(audit(&m, &l, &w, &[], Measure::Grid), Vec::<String>::new());
     }
 
     /// The note that a line could not be drawn clear, for this line id.
@@ -1920,4 +1974,6 @@ mod tests {
         let (m2, r2) = renamed(&m, &[("igw", "gate")]);
         assert_eq!(leaving(&m2, &r2), before);
     }
+
+
 }

@@ -257,15 +257,16 @@ mod tests {
         FEWER_READERS.replace("  readers: 1\n", "  readers: 1\n  lang: en\n")
     }
 
-    /// The model a definition infers and the layout it goes through: the VPC layout when the model
-    /// has a part in a subnet or on the VPC's edge, the layout without a VPC otherwise.
+    /// The model a definition infers and the layout the drawing path gives it: along the direction
+    /// `compile` takes when the model has a part in a subnet or on the VPC's edge, running right otherwise.
     fn model_and_layout(src: &str, r: &Rules) -> (Model, Layout) {
         let m = crate::inference::infer(&crate::def::parse(src).unwrap(), r).0.unwrap();
-        let l = if m.nodes.iter().any(|n| matches!(n.area, Area::VpcEdge | Area::Subnet(_))) {
-            crate::layout::layout(&m, r)
+        let axis = if m.nodes.iter().any(|n| matches!(n.area, Area::VpcEdge | Area::Subnet(_))) {
+            m.direction.unwrap_or_else(|| crate::arrange::default_axis(&m))
         } else {
-            crate::place::place(&m, r).unwrap().layout
+            crate::model::Axis::Right
         };
+        let l = crate::arrange::arrange(&m, r, axis).unwrap().layout;
         (m, l)
     }
 

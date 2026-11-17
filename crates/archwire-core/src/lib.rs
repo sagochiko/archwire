@@ -101,7 +101,7 @@ mod tests {
     use super::*;
     use crate::test_inputs::{
         heavy_variants, CROWDED_SIDE_EN, CROWDED_S3_JA, ID_CLASH, LOAD_BALANCER_ALONE, MIX_LOGS, MIX_NAT, MIX_SMALLEST, MIX_WEB, ONE_FUNCTION_THREE_WAYS,
-        TWIN_APPS, TWO_WEBS, VPC_TEST_DEFINITIONS, WEB_EXAMPLES,
+        TWIN_APPS, TWO_WEBS, VPC_TEST_DEFINITIONS, WEB_CASES, WEB_EXAMPLES,
     };
 
     // Fails if a definition once stopped for mixing VPC parts with separate services stops for
@@ -333,7 +333,7 @@ mod tests {
             let rules = Rules::builtin();
             let (model, _) = inference::infer(&def::parse(src).unwrap(), &rules);
             let model = model.unwrap();
-            let p = place::place(&model, &rules).unwrap();
+            let p = arrange::arrange(&model, &rules, model::Axis::Right).unwrap();
             let (wires, notes) = route::route_planned(&model, &p.layout, &rules, &p.lines);
             assert!(notes.iter().all(|n| !n.contains("edge-")), "{notes:?}");
             if let Some((d, line, label)) = audit::closest_line_to_label(&p.layout, &wires) {
@@ -363,7 +363,7 @@ mod tests {
         let rules = Rules::builtin();
         let (model, _) = inference::infer(&def::parse(src).unwrap(), &rules);
         let model = model.unwrap();
-        let p = place::place(&model, &rules).unwrap();
+        let p = arrange::arrange(&model, &rules, model::Axis::Right).unwrap();
         let (wires, notes) = route::route_planned(&model, &p.layout, &rules, &p.lines);
         assert!(notes.iter().all(|n| !n.contains("edge-")), "{notes:?}");
         let cross = |a: (i32, i32), b: (i32, i32), c: (i32, i32), d: (i32, i32)| {
@@ -466,7 +466,7 @@ mod tests {
     /// The lines the new layout cannot draw clear in the crowded definitions, by axis. Down:
     /// CROWDED_S3_JA's side line from the load balancer to S3. Right: CROWDED_SIDE_EN's line from
     /// ECS in the second zone to S3. No more than these may break, and each is named in a note.
-    const CROWDED_BROKEN: [(&str, model::Axis, &[&str]); 4] = [
+    pub(crate) const CROWDED_BROKEN: [(&str, model::Axis, &[&str]); 4] = [
         ("s3-ja", model::Axis::Down, &["edge-alb-to-s3"]),
         ("side-en", model::Axis::Down, &[]),
         ("s3-ja", model::Axis::Right, &[]),
@@ -519,7 +519,7 @@ mod tests {
     // Fails if writing a direction changes anything but the picture, or does not change the picture.
     #[test]
     fn direction_changes_the_picture_only() {
-        let web = WEB_EXAMPLES[6];
+        let web = WEB_CASES[0].1;
         assert!(web.contains("set:\n  lang: ja\n"));
         let [right, down] = ["right", "down"].map(|way| compile(&web.replace("set:\n", &format!("set:\n  direction: {way}\n"))));
         assert_eq!(right.diagnostics.to_json(), down.diagnostics.to_json());
@@ -533,7 +533,7 @@ mod tests {
         let rules = Rules::builtin();
         let (model, _) = inference::infer(&def::parse(src).unwrap(), &rules);
         let model = model.unwrap();
-        let p = place::place(&model, &rules).unwrap();
+        let p = arrange::arrange(&model, &rules, model::Axis::Right).unwrap();
         let (wires, notes) = route::route_planned(&model, &p.layout, &rules, &p.lines);
         assert!(notes.iter().all(|n| !n.contains("edge-")), "{notes:?}");
         let mut bent = 0;
@@ -721,7 +721,7 @@ mod tests {
         let cases = [
             ("flows:\n  - user -> alb -> ecs -> aurora\n  - alb -> aurora\n", "flows[1]", "alb -> aurora"),
             ("flows:\n  - user -> cloudfront -> alb -> ecs\n  - cloudfront -> cloudwatch\n", "flows[1]", "cloudfront -> cloudwatch"),
-            (VPC_TEST_DEFINITIONS[25], "flows[1]", "alb -> aurora"),
+            ("flows:\n  - user -> alb -> ecs -> aurora\n  - alb -> aurora\n  - aurora ~> cloudwatch\n  - alb ~> s3\nset:\n  azs: 3\n", "flows[1]", "alb -> aurora"),
         ];
         for (src, at, got) in cases {
             assert_eq!(stops(src), [unsupported(at, Some(got))], "{src}");

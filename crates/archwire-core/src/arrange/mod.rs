@@ -460,4 +460,54 @@ mod tests {
         std::fs::write(dir.join("notes.tsv"), report).unwrap();
         assert!(broken_files.is_empty(), "lines broken or off their drafts in {broken_files:?}");
     }
+
+
+    const WEB2: &str = "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\n";
+
+    fn laid(src: &str, axis: Axis) -> Layout {
+        let r = Rules::builtin();
+        let m = crate::inference::infer(&crate::def::parse(src).unwrap(), &r).0.unwrap();
+        arrange(&m, &r, axis).unwrap_or_else(|e| panic!("{axis:?}: {e:?}\n{src}")).layout
+    }
+
+    // Fails if a frame loses its name or parent, or a part its name, its line count or its frame.
+    #[test]
+    fn frames_labels_and_parents_follow_the_skill_diagram() {
+        for axis in [Axis::Down, Axis::Right] {
+            let l = laid(&format!("{WEB2}  - waf -- cloudfront\n  - acm -- cloudfront\n"), axis);
+            let frames: Vec<_> = l.frames.iter().map(|f| (f.id.as_str(), f.label.as_str(), f.parent.as_deref())).collect();
+            assert_eq!(frames, [
+                ("aws-cloud", "AWS Cloud", None), ("region", "Tokyo (ap-northeast-1)", Some("aws-cloud")), ("vpc", "VPC", Some("region")),
+                ("az-1a", "ap-northeast-1a", Some("vpc")), ("pub-1a", "Public subnet", Some("az-1a")), ("pri-1a", "Private subnet", Some("az-1a")),
+                ("az-1c", "ap-northeast-1c", Some("vpc")), ("pub-1c", "Public subnet", Some("az-1c")), ("pri-1c", "Private subnet", Some("az-1c")),
+            ], "{axis:?}");
+            let icon = |id: &str| l.icons.iter().find(|i| i.id == id).unwrap();
+            assert_eq!((icon("aurora-1a").label.as_str(), icon("aurora-1a").lines), ("Amazon Aurora\nWriter", 2));
+            assert_eq!((icon("ecs-1c").label.as_str(), icon("ecs-1c").lines), ("Amazon ECS (Fargate)", 1));
+            assert_eq!(icon("user").label, "Users");
+            assert_eq!((icon("acm").label.as_str(), icon("acm").lines), ("AWS Certificate Manager\nus-east-1", 2));
+            assert_eq!((icon("waf").label.as_str(), icon("waf").lines), ("AWS WAF", 1));
+            let parents: Vec<_> = l.icons.iter().map(|i| (i.id.as_str(), i.parent.as_deref())).collect();
+            assert_eq!(parents, [
+                ("user", None), ("cloudfront", Some("aws-cloud")), ("waf", Some("aws-cloud")), ("acm", Some("aws-cloud")),
+                ("igw", Some("vpc")), ("alb", Some("vpc")), ("nat-1a", Some("pub-1a")), ("nat-1c", Some("pub-1c")),
+                ("ecs-1a", Some("pri-1a")), ("ecs-1c", Some("pri-1c")), ("aurora-1a", Some("pri-1a")), ("aurora-1c", Some("pri-1c")),
+                ("s3", Some("region")), ("cloudwatch", Some("region")),
+            ], "{axis:?}");
+            let ja = laid(&format!("{WEB2}set:\n  lang: ja\n"), axis);
+            assert_eq!(ja.frames[1].label, "東京リージョン（ap-northeast-1）");
+            assert_eq!(ja.frames[4].label, "パブリックサブネット");
+        }
+    }
+
+    // Fails if a part outside the VPC moves the VPC or anything in it.
+    #[test]
+    fn adding_a_side_service_does_not_move_the_vpc_contents() {
+        for axis in [Axis::Down, Axis::Right] {
+            let (a, b) = (laid("flows:\n  - user -> alb -> ecs -> aurora\n", axis), laid("flows:\n  - user -> alb -> ecs -> aurora\n  - ecs ~> cloudwatch\n", axis));
+            for id in ["alb", "igw", "ecs-1a", "ecs-1c", "aurora-1a", "aurora-1c", "vpc", "az-1c"] {
+                assert_eq!(a.rect(id), b.rect(id), "{id} {axis:?}");
+            }
+        }
+    }
 }

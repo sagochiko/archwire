@@ -374,37 +374,6 @@ mod tests {
     }
 
     #[test]
-    fn frames_labels_and_parents_follow_the_skill_diagram() {
-        let l = lay(&format!("{WEB2}  - waf -- cloudfront\n  - acm -- cloudfront\n"));
-        let r = |id| { let q = l.rect(id); (q.x, q.y, q.w, q.h) };
-        assert_eq!(r("aws-cloud"), (40, 130, 1200, 1015));
-        assert_eq!(r("region"), (70, 290, 1140, 830));
-        assert_eq!((r("waf"), r("acm")), ((300, 170, 60, 60), (700, 170, 60, 60)));
-        let frames: Vec<_> = l.frames.iter().map(|f| (f.id.as_str(), f.label.as_str(), f.parent.as_deref())).collect();
-        assert_eq!(frames, [
-            ("aws-cloud", "AWS Cloud", None), ("region", "Tokyo (ap-northeast-1)", Some("aws-cloud")), ("vpc", "VPC", Some("region")),
-            ("az-1a", "ap-northeast-1a", Some("vpc")), ("pub-1a", "Public subnet", Some("az-1a")), ("pri-1a", "Private subnet", Some("az-1a")),
-            ("az-1c", "ap-northeast-1c", Some("vpc")), ("pub-1c", "Public subnet", Some("az-1c")), ("pri-1c", "Private subnet", Some("az-1c")),
-        ]);
-        let icon = |id: &str| l.icons.iter().find(|i| i.id == id).unwrap();
-        assert_eq!((icon("aurora-1a").label.as_str(), icon("aurora-1a").lines), ("Amazon Aurora\nWriter", 2));
-        assert_eq!((icon("ecs-1c").label.as_str(), icon("ecs-1c").lines), ("Amazon ECS (Fargate)", 1));
-        assert_eq!(icon("user").label, "Users");
-        assert_eq!((icon("acm").label.as_str(), icon("acm").lines), ("AWS Certificate Manager\nus-east-1", 2));
-        assert_eq!((icon("waf").label.as_str(), icon("waf").lines), ("AWS WAF", 1));
-        let parents: Vec<_> = l.icons.iter().map(|i| (i.id.as_str(), i.parent.as_deref())).collect();
-        assert_eq!(parents, [
-            ("user", None), ("cloudfront", Some("aws-cloud")), ("waf", Some("aws-cloud")), ("acm", Some("aws-cloud")),
-            ("igw", Some("vpc")), ("alb", Some("vpc")), ("nat-1a", Some("pub-1a")), ("nat-1c", Some("pub-1c")),
-            ("ecs-1a", Some("pri-1a")), ("ecs-1c", Some("pri-1c")), ("aurora-1a", Some("pri-1a")), ("aurora-1c", Some("pri-1c")),
-            ("s3", Some("region")), ("cloudwatch", Some("region")),
-        ]);
-        let ja = lay(&format!("{WEB2}set:\n  lang: ja\n"));
-        assert_eq!(ja.frames[1].label, "東京リージョン（ap-northeast-1）");
-        assert_eq!(ja.frames[4].label, "パブリックサブネット");
-    }
-
-    #[test]
     fn side_services_on_the_same_y_stack_down_and_stay_in_the_region() {
         let l = lay("flows:\n  - user -> alb -> ecs\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n");
         assert_eq!((l.rect("s3").y, l.rect("cloudwatch").y), (730, 890));
@@ -436,11 +405,5 @@ mod tests {
         assert_eq!((s3.label.as_str(), s3.lines), ("Amazon S3\nweb", 2));
         let aurora = icon(&n("aurora", Some("writer")), r.service("aurora").unwrap(), &r, Lang::En, at, None);
         assert_eq!((aurora.label.as_str(), aurora.lines), ("Amazon Aurora\nweb\nWriter", 3));
-    }
-
-    #[test]
-    fn adding_a_side_service_does_not_move_the_vpc_contents() {
-        let (a, b) = (lay("flows:\n  - user -> alb -> ecs -> aurora\n"), lay("flows:\n  - user -> alb -> ecs -> aurora\n  - ecs ~> cloudwatch\n"));
-        for id in ["alb", "igw", "ecs-1a", "ecs-1c", "aurora-1a", "aurora-1c", "vpc", "az-1c"] { assert_eq!(a.rect(id), b.rect(id), "{id}"); }
     }
 }
