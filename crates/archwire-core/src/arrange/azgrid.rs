@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use super::layered::ROW_STEP;
 use super::check::failed;
-use super::{Attach, Crossing, Lane};
+use super::{Crossing, Lane};
 use crate::diag::Problem;
 use crate::ids::edge_id;
 use crate::def::Rel;
@@ -271,20 +271,12 @@ struct Grid<'a> {
     names_right: i32,
     entry_half: i32,
     reps: Vec<usize>,
-    attach: Attach,
 }
 
 /// The inside of the VPC, or LAYOUT_FAILED naming a line that no widening keeps clear of a part
 /// or a frame's name it passes.
-#[cfg(test)]
 pub(crate) fn lay_vpc(model: &Model, rules: &Rules, parts: &[usize], axis: Axis) -> Result<Placed, Vec<Problem>> {
-    lay_vpc_with(model, rules, parts, axis, Attach::Gate)
-}
-
-/// The same, with the parts attached to a part spanning the zones laid out as `attach` says.
-pub(crate) fn lay_vpc_with(model: &Model, rules: &Rules, parts: &[usize], axis: Axis, attach: Attach) -> Result<Placed, Vec<Problem>> {
-    let mut g = Grid::new(model, rules, parts, axis);
-    g.attach = attach;
+    let g = Grid::new(model, rules, parts, axis);
     // Across: widen until the lines that pass a part or a frame's name keep clear of it. A widening
     // that leaves the same line exactly as close to the same thing does not move them apart, so
     // widening cannot clear it; nor can it when the tries run out.
@@ -406,7 +398,7 @@ impl<'a> Grid<'a> {
         // With two zones, one part spanning them sits on the boundary between the zones; two or
         // more take the row above the zones, as with three zones.
         let boundary = model.azs.len() == 2 && groups.iter().filter(|g| g.place == Place::Span).count() == 1;
-        let mut g = Grid { model, rules, axis, boundary, groups, group_of, public, private, rows, col_half, names_right, entry_half, reps: Vec::new(), attach: Attach::Gate };
+        let mut g = Grid { model, rules, axis, boundary, groups, group_of, public, private, rows, col_half, names_right, entry_half, reps: Vec::new() };
         g.reps = g.drawn_inside();
         g
     }
@@ -566,7 +558,9 @@ impl<'a> Grid<'a> {
             if pf.is_none() && pt.is_none() {
                 continue;
             }
-            let flipped = matches!(self.attach, Attach::Side(_)) && e.rel == Rel::Assoc && pf.is_none() && pt == Some(Place::Span);
+            // A part outside attached to a part spanning the zones: its line is laid out from that part
+            // out, as a side line out of it would be.
+            let flipped = e.rel == Rel::Assoc && pf.is_none() && pt == Some(Place::Span);
             if flipped {
                 (f, t, pf, pt) = (t, f, pt, pf);
             }
@@ -2718,7 +2712,7 @@ pub(in crate::arrange) mod tests {
         x1 < v.0 .0 && v.0 .0 < x2 && y1 < h.0 .1 && h.0 .1 < y2
     }
 
-    /// What a way to attach gives on a model along an axis, counted from the routed lines.
+    /// What the layout gives on a model along an axis, counted from the routed lines.
     pub(in crate::arrange) struct Measures {
         /// The layout's own check: None if it passes, else its errors.
         pub(in crate::arrange) failed: Option<String>,
@@ -2739,9 +2733,9 @@ pub(in crate::arrange) mod tests {
         pub(in crate::arrange) drawio: Option<String>,
     }
 
-    pub(in crate::arrange) fn attachment_measures(m: &Model, axis: Axis, attach: Attach) -> Measures {
+    pub(in crate::arrange) fn attachment_measures(m: &Model, axis: Axis) -> Measures {
         let r = Rules::builtin();
-        let p = match super::super::arrange_with(m, &r, axis, attach) {
+        let p = match arrange(m, &r, axis) {
             Err(e) => {
                 let failed = Some(e.iter().map(|x| format!("{} {}", x.code, x.message)).collect::<Vec<_>>().join("; "));
                 return Measures { failed, named: Vec::new(), faults: Vec::new(), crossings: 0, attach_crossings: 0, attach_main_crossings: 0, turns: 0, attach_turns: Vec::new(), reach: Vec::new(), drawio: None };
@@ -2791,38 +2785,77 @@ pub(in crate::arrange) mod tests {
     // crossing an icon, a name or another line, or a note naming a line, with one or two load
     // balancers, with two or three zones, in either direction.
     #[test]
-    fn attachments_run_as_side_lines_lay_out_cleanly() {
-        let bad = side_line_faults(Attach::Side(TRACK_STEP));
-        assert!(bad.is_empty(), "{}", bad.join("\n"));
-    }
-
-    /// Every shape and direction where `attach` stops the layout, or leaves a fault or a note naming a line.
-    fn side_line_faults(attach: Attach) -> Vec<String> {
+    fn attachments_of_a_balancer_lay_out_cleanly() {
         let mut bad = Vec::new();
         for (name, m) in attachment_shapes() {
             for axis in [Axis::Down, Axis::Right] {
-                let x = attachment_measures(&m, axis, attach);
+                let x = attachment_measures(&m, axis);
                 if x.failed.is_some() || !x.named.is_empty() || !x.faults.is_empty() {
                     bad.push(format!("{name} {}: {:?} {:?} {:?}", axis_name(axis), x.failed, x.named, x.faults));
                 }
             }
         }
-        bad
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
     }
 
-    // Fails if the side lines of attached parts lay out cleanly only at the one distance apart
-    // they turn at, not at two smaller and two larger.
+    /// Where an attached part sits against the VPC and the part it attaches to: whether it is right
+    /// of the VPC and inside the Region, and the side of the part its line leaves by.
+    fn attached_place(p: &Placement, w: &[crate::route::Wire], part: &str, to: &str) -> (bool, bool, Side) {
+        let (vpc, region) = (p.layout.rect(VPC_FRAME), p.layout.rect(super::super::layered::REGION_FRAME));
+        let r = icon(p, part).rect;
+        let right = r.x >= vpc.x + vpc.w;
+        let inside = r.x >= region.x && r.x + r.w <= region.x + region.w && r.y >= region.y && r.y + r.h <= region.y + region.h;
+        let x = w.iter().find(|x| x.from == part && x.to == to).unwrap_or_else(|| panic!("no line {part} to {to}"));
+        (right, inside, x.entry.side)
+    }
+
+    // Fails if a load balancer's attached parts leave the Region or stop sitting right of the VPC,
+    // if their lines stop leaving the load balancer by its right side (or by its bottom when a part
+    // of its row stands right of it), if they come out of the column right
+    // of the VPC in another order than their lines' gates, or if with two load balancers the parts
+    // of one are joined to the other.
     #[test]
-    #[ignore]
-    fn attachments_run_as_side_lines_lay_out_cleanly_at_other_steps() {
-        for step in [15, 20, 30, 35] {
-            let bad = side_line_faults(Attach::Side(step));
-            assert!(bad.is_empty(), "{step}: {}", bad.join("\n"));
+    fn attachments_of_a_balancer_sit_where_chosen() {
+        let r = Rules::builtin();
+        for (name, m) in attachment_shapes() {
+            for axis in [Axis::Down, Axis::Right] {
+                let p = arrange(&m, &r, axis).unwrap_or_else(|e| panic!("{name} {}: {e:?}", axis_name(axis)));
+                let (w, _) = crate::route::route_planned(&m, &p.layout, &r, &p.lines);
+                let attached: Vec<&Edge> = m.edges.iter().filter(|e| e.rel == Rel::Assoc && (e.to == "alb" || e.to.starts_with("alb."))).collect();
+                assert!(attached.len() >= 2, "{name}");
+                for e in &attached {
+                    // Each attached part keeps its own load balancer.
+                    let tag = |id: &str| id.split_once('.').map(|(_, t)| t.to_string());
+                    if let (Some(a), Some(b)) = (tag(&e.from), tag(&e.to)) {
+                        assert_eq!(a, b, "{name}: {} is attached to {}", e.from, e.to);
+                    }
+                    // Its right side, unless a part of its row inside the VPC stands right of it.
+                    let alb = icon(&p, &e.to).rect;
+                    let vpc = p.layout.rect(VPC_FRAME);
+                    let blocked = p.layout.icons.iter().any(|o| o.rect.y == alb.y && o.rect.x > alb.x && o.rect.x < vpc.x + vpc.w);
+                    let side = if blocked { Side::Bottom } else { Side::Right };
+                    assert_eq!(attached_place(&p, &w, &e.from, &e.to), (true, true, side), "{name} {} {} to {}", axis_name(axis), e.from, e.to);
+                }
+                // One column, in the order of the gates the lines leave the VPC by, top to bottom.
+                let mut parts: Vec<&str> = attached.iter().map(|e| e.from.as_str()).collect();
+                parts.dedup();
+                let x0 = icon(&p, parts[0]).rect.x;
+                assert!(parts.iter().all(|id| icon(&p, id).rect.x == x0), "{name} {}", axis_name(axis));
+                let vpc = p.layout.rect(VPC_FRAME);
+                let gate = |id: &str| {
+                    w.iter().filter(|x| x.from == id).map(|x| crate::route::tests::full_path(x, &p.layout).into_iter().find(|q| q.0 == vpc.x + vpc.w).expect("through the VPC's right side").1).min().expect("a line")
+                };
+                let mut by_gate = parts.clone();
+                by_gate.sort_by_key(|id| gate(id));
+                let mut by_place = parts.clone();
+                by_place.sort_by_key(|id| icon(&p, id).rect.y);
+                assert_eq!(by_place, by_gate, "{name} {}", axis_name(axis));
+            }
         }
     }
 
-    // Fails if a shape cannot be written out. With ARCHWIRE_ATTACH_OUT set, writes every shape with
-    // every way to attach, both directions, as diagrams and notes, and a table of what each gives.
+    // Fails if a shape cannot be written out. With ARCHWIRE_ATTACH_OUT set, writes every shape in
+    // both directions as diagrams and notes, and a table of what each gives.
     #[test]
     #[ignore]
     fn attachment_candidates_for_the_checker() {
@@ -2831,9 +2864,9 @@ pub(in crate::arrange) mod tests {
         let mut table = String::from("shape\tdirection\tattach\tlayout\tnamed\tfaults\tcrossings\tattach_crossings\tattach_main_crossings\tturns\tattach_turns\treach\n");
         for (name, m) in attachment_shapes() {
             for axis in [Axis::Down, Axis::Right] {
-                for attach in [Attach::Gate, Attach::Side(TRACK_STEP)] {
-                    let x = attachment_measures(&m, axis, attach);
-                    let way = if attach == Attach::Gate { "gate" } else { "side" };
+                {
+                    let x = attachment_measures(&m, axis);
+                    let way = "side";
                     table.push_str(&format!(
                         "{name}\t{}\t{way}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:?}\t{:?}\n",
                         axis_name(axis),
@@ -2849,7 +2882,7 @@ pub(in crate::arrange) mod tests {
                     ));
                     if let (Some(d), Some(drawio)) = (&dir, &x.drawio) {
                         std::fs::create_dir_all(d).unwrap();
-                        let stem = format!("{name}-{}-{way}", axis_name(axis));
+                        let stem = format!("{name}-{}", axis_name(axis));
                         std::fs::write(d.join(format!("{stem}.drawio")), drawio).unwrap();
                         let faults: Vec<String> = x.faults.iter().map(|(id, what)| format!("{id} {what}")).collect();
                         std::fs::write(d.join(format!("{stem}.notes.txt")), format!("{}\n{}\n", x.named.join("\n"), faults.join("\n"))).unwrap();
@@ -2869,7 +2902,7 @@ pub(in crate::arrange) mod tests {
         }
         for (name, m) in bases {
             for axis in [Axis::Down, Axis::Right] {
-                let x = attachment_measures(&m, axis, Attach::Gate);
+                let x = attachment_measures(&m, axis);
                 table.push_str(&format!("{name}\t{}\tnone\t{}\t{}\t{}\t{}\t-\t-\t{}\t-\t-\n", axis_name(axis), x.failed.clone().unwrap_or_else(|| "ok".into()), x.named.len(), x.faults.len(), x.crossings, x.turns));
             }
         }

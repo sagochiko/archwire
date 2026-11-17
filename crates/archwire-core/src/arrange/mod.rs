@@ -96,25 +96,12 @@ pub fn default_axis(_model: &Model) -> Axis {
 ///
 /// A part spanning the zones sits on the boundary between them when there are two, else in a row
 /// of its own above them; the VPC comes first among the parts of its rank.
+///
+/// A part attached to a part spanning the zones (a certificate or a web ACL on a load balancer)
+/// sits right of the VPC, and its line runs as a side line out of that part would: out of the
+/// part's right side, or down to the band above the private tier when a part of its row stands
+/// right of it, and out of the VPC's right side.
 pub fn arrange(model: &Model, rules: &Rules, axis: Axis) -> Result<Placement, Vec<Problem>> {
-    arrange_with(model, rules, axis, Attach::Gate)
-}
-
-/// Where the parts attached to a part spanning the zones go, and the way their lines come in. The
-/// tests choose among these to compare them; `arrange` takes the first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) enum Attach {
-    /// Right of the VPC; the line comes in through a gate on the side the main lines come in by,
-    /// onto the part.
-    Gate,
-    /// Right of the VPC; the line runs as a side line out of the part would, out of the VPC's right
-    /// side, and turns toward its part this many apart from the other such lines.
-    Side(i32),
-}
-
-/// The same, with the parts attached to a part spanning the zones laid out as `attach` says.
-pub(crate) fn arrange_with(model: &Model, rules: &Rules, axis: Axis, attach: Attach) -> Result<Placement, Vec<Problem>> {
     let mut inside: Vec<usize> = Vec::new();
     for item in tree::tree(model) {
         if let Item::Frame(f) = item {
@@ -125,9 +112,9 @@ pub(crate) fn arrange_with(model: &Model, rules: &Rules, axis: Axis, attach: Att
     }
     let placed = match inside.is_empty() {
         true => None,
-        false => Some(azgrid::lay_vpc_with(model, rules, &inside, axis, attach)?),
+        false => Some(azgrid::lay_vpc(model, rules, &inside, axis)?),
     };
-    let piece = placed.as_ref().map(|p| layered::Piece { placed: p, attach });
+    let piece = placed.as_ref().map(|p| layered::Piece { placed: p });
     let mut placement = layered::layered(model, rules, axis, piece.as_ref());
     let mut problems = Vec::new();
     if placed.is_some() {

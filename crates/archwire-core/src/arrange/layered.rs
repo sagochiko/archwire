@@ -15,7 +15,7 @@
 //! margin on each side.
 
 use super::azgrid::Placed;
-use super::{Attach, Crossing, Lane, Placement};
+use super::{Crossing, Lane, Placement};
 use crate::def::Rel;
 use crate::layout::{icon, Frame, FrameKind, Icon, Layout, Rect};
 use crate::measure::{frame_name_box, name_area, name_text_width, wire_label_area, wire_text_size, wire_text_width};
@@ -97,7 +97,6 @@ struct Block {
 /// The inside of a VPC laid out as one piece. It comes first among the parts of its rank.
 pub(super) struct Piece<'a> {
     pub(super) placed: &'a Placed,
-    pub(super) attach: Attach,
 }
 
 /// The Region's parts on a main flow and the main lines between them.
@@ -496,11 +495,14 @@ fn attached_places(model: &Model, rules: &Rules, attached: &[usize], placed: &[I
     try_way(true).or_else(|| try_way(false)).unwrap_or_else(|| attached.iter().map(|&i| gate_y(i).expect("attached") - ICON / 2).collect())
 }
 
+/// How far apart the lines of attached parts turn toward their parts right of the VPC.
+const ATTACHED_STEP: i32 = super::azgrid::TRACK_STEP;
+
 /// For the lines run as side lines out of the part they attach to: each one's edge and how far
-/// right of its gate it turns toward its part, in steps of the way's own, by the first order of
+/// right of its gate it turns toward its part, in steps of `ATTACHED_STEP`, by the first order of
 /// steps (1 nearest the VPC) that keeps the lines' outer parts from crossing one another.
 fn stagger(model: &Model, layout: &Layout, p: &Piece, at: impl Fn((i32, i32)) -> (i32, i32)) -> Vec<(usize, i32)> {
-    let Attach::Side(step) = p.attach else { return Vec::new() };
+    let step = ATTACHED_STEP;
     // (edge, gate, the part's centre across)
     let lines: Vec<(usize, (i32, i32), i32)> = p
         .placed
@@ -712,7 +714,7 @@ fn lay_region(model: &Model, rules: &Rules, axis: Axis, piece: Option<&Piece>) -
         // Run as side lines out of the part they attach to, the attached parts come before the
         // others, in a column in the order of their gates.
         let gate_y = |i: usize| attached_gates(model, p, i).into_iter().min().map(|g| g + oy);
-        let mut attached: Vec<usize> = lone.iter().copied().filter(|&i| matches!(p.attach, Attach::Side(_)) && gate_y(i).is_some()).collect();
+        let mut attached: Vec<usize> = lone.iter().copied().filter(|&i| gate_y(i).is_some()).collect();
         attached.sort_by_key(|&i| gate_y(i));
         let at_gates = attached_places(model, rules, &attached, &icons, x, oy, &gate_y);
         let order: Vec<usize> = attached.iter().copied().chain(lone.iter().copied().filter(|i| !attached.contains(i))).collect();
