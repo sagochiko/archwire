@@ -200,7 +200,7 @@ mod tests {
     /// coordinates and label spots the writer's output is checked against.
     fn grid_drawio(src: &str) -> String {
         let rules = crate::rules::Rules::builtin();
-        let (model, d) = crate::infer::infer(&crate::def::parse(src).unwrap(), &rules);
+        let (model, d) = crate::inference::infer(&crate::def::parse(src).unwrap(), &rules);
         let model = model.unwrap();
         let layout = crate::layout::layout(&model, &rules);
         let (wires, _) = crate::route::route(&model, &layout, &rules);

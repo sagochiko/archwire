@@ -391,7 +391,7 @@ mod tests {
     fn web_along(axis: Axis) -> (Model, Placement) {
         let r = crate::rules::Rules::builtin();
         let src = include_str!("../../../../tests/cases/web-2az-ja/def.yaml");
-        let m = crate::infer::infer(&crate::def::parse(src).unwrap(), &r).0.unwrap();
+        let m = crate::inference::infer(&crate::def::parse(src).unwrap(), &r).0.unwrap();
         let p = super::super::arrange(&m, &r, axis).unwrap();
         (m, p)
     }

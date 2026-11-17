@@ -66,21 +66,10 @@ pub struct Service {
     #[serde(default)]
     pub options: BTreeMap<String, ServiceOption>,
     #[serde(default)]
-    pub in_label: Option<String>,
-    #[serde(default)]
     pub derived_only: bool,
-    /// A global service that may start a main or auxiliary flow.
-    #[serde(default)]
-    pub flow_source: bool,
-    /// For an attachment, the services it may be associated with; empty for every other service.
-    #[serde(default)]
-    pub attach_to: Vec<String>,
     /// A part of this service written without a kind is a hole.
     #[serde(default)]
     pub kind_hole: bool,
-    /// Cannot be written in one definition together with parts placed in a VPC yet.
-    #[serde(default)]
-    pub separate_from_vpc: bool,
     /// Main flows start here: every main flow must be reachable from a part of such a service.
     #[serde(default)]
     pub origin: bool,
@@ -652,13 +641,6 @@ mod tests {
     }
 
     #[test]
-    fn in_label_is_set_for_connected_services_only() {
-        let r = Rules::builtin();
-        assert_eq!(r.service("s3").unwrap().in_label.as_deref(), Some("read_write"));
-        assert_eq!(r.service("aurora").unwrap().in_label, None);
-    }
-
-    #[test]
     fn derived_only_marks_igw_and_nat() {
         let r = Rules::builtin();
         let only: Vec<_> = r.service_keys().into_iter().filter(|k| r.service(k).unwrap().derived_only).collect();
@@ -714,15 +696,13 @@ mod tests {
     fn the_api_services_carry_their_properties() {
         let r = Rules::builtin();
         let api = r.service("apigateway").unwrap();
-        assert!(api.kind_hole && api.separate_from_vpc && !api.origin);
+        assert!(api.kind_hole && !api.origin);
         assert_eq!(api.options.keys().collect::<Vec<_>>(), ["http", "rest"]);
         assert_eq!(api.options["http"].label, "Amazon API Gateway\nHTTP API");
         assert_eq!(r.service("cognito").unwrap().place_rule.as_deref(), Some("cognito-user-pool-in-one-region"));
         assert!(r.service("user").unwrap().origin);
         let origins: Vec<_> = r.service_keys().into_iter().filter(|k| r.service(k).unwrap().origin).collect();
         assert_eq!(origins, ["user"]);
-        let separate: Vec<_> = r.service_keys().into_iter().filter(|k| r.service(k).unwrap().separate_from_vpc).collect();
-        assert_eq!(separate, ["apigateway", "cognito", "dynamodb", "lambda"]);
         assert!(!r.service("ecs").unwrap().kind_hole);
     }
 
@@ -800,7 +780,7 @@ mod tests {
             (0, "\nmax_from = 1", "\nmax_form = 1", "LINKS_PARSE"),
             (1, "\nkind_hole = true", "\nkind_holes = true", "SERVICES_PARSE"),
             (1, "\nplace_rule =", "\nplace_rules =", "SERVICES_PARSE"),
-            (1, "\nseparate_from_vpc = true", "\nseparate_from_vpcs = true", "SERVICES_PARSE"),
+            (1, "\nderived_only = true", "\nderived_onlys = true", "SERVICES_PARSE"),
             (1, "\norigin = true", "\norigins = true", "SERVICES_PARSE"),
             (2, "\nreason_en =", "\nreason_eng =", "RULES_PARSE"),
             (3, "ja = \"利用者\"", "jp = \"利用者\"", "LABELS_PARSE"),
@@ -899,7 +879,7 @@ mod tests {
         let [services, rules, labels, links] = builtin_files();
         let alb = "from = \"alb\"\nto = \"ecs\"\nrel = \"main\"\nlabel = \"http\"\n";
         let tier = "from_subnet = \"private\"\nfrom_subnet_rule = \"private-subnet-per-az\"\nfrom_copies_rule = \"public-and-private-subnet-per-az\"\n";
-        let ecs = "label = \"Amazon ECS\"\nin_label = \"http\"\n";
+        let ecs = "label = \"Amazon ECS\"\n";
         assert!(links.contains(alb) && services.contains(ecs));
         let links = links.replacen(alb, &format!("{alb}{tier}"), 1);
         let services = services.replacen(ecs, &format!("{ecs}nat_rule = \"private-egress-through-nat\"\n"), 1);
@@ -933,8 +913,8 @@ mod tests {
         let derived = |from: &str, to: &str, rel: &str, label: &str| {
             format!("{links}\n[[derived_link]]\nfrom = \"{from}\"\nto = \"{to}\"\nrel = \"{rel}\"\nlabel = \"{label}\"\n")
         };
-        let s3 = "label = \"Amazon S3\"\nin_label = \"read_write\"\n";
-        let ecs = "label = \"Amazon ECS\"\nin_label = \"http\"\n";
+        let s3 = "label = \"Amazon S3\"\n";
+        let ecs = "label = \"Amazon ECS\"\n";
         // Only the subnet tier fields at these places (0 `from_subnet`, 1 `from_subnet_rule`, 2 `from_copies_rule`).
         let half = |keep: &[usize]| tier.lines().enumerate().filter(|(i, _)| keep.contains(i)).map(|(_, l)| format!("{l}\n")).collect::<String>();
         let reasons = "vpc_reasons = { vpc = \"load-balancer-in-vpc\", az = [\"alb-spans-two-azs\"], default_azs = \"default-two-azs\" }\n";

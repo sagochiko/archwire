@@ -316,123 +316,6 @@ pub(crate) const ONE_FUNCTION_THREE_WAYS: [&str; 3] = [
 /// A load balancer with nothing behind it.
 pub(crate) const LOAD_BALANCER_ALONE: &str = "flows:\n  - user -> alb\n";
 
-/// Definitions written in the tests of the inference without a VPC, as written there, each once:
-/// those of `flow_infer.rs` in the order written, then those of `infer.rs` without a VPC part.
-pub(crate) const FLOW_INFER_TEST_DEFINITIONS: [&str; 43] = [
-    "flows:\n  - user -> cloudfront -> s3\n  - user -> apigateway(http) -> lambda -> dynamodb\n  - cognito -- apigateway\n  - lambda ~> cloudwatch\nset:\n  lang: ja\n",
-    "flows:\n  - user -> apigateway(http) -> lambda\n",
-    "flows:\n  - user -> apigateway(http) -> lambda\n  - user -> apigateway.admin(rest) -> lambda.admin\n  - cognito -- apigateway.admin\n",
-    "flows:\n  - user -> apigateway(rest) -> lambda\n  - cognito -- apigateway\n",
-    "flows:\n  - user -> apigateway(http) -> lambda\nset:\n  region: ap-northeast-1\n",
-    "flows:\n  - user -> apigateway(http) -> lambda\n  - user -> s3\n",
-    "flows:\n  - user -> apigateway(http) -> lambda\n  - cloudfront -> lambda\n",
-    "flows:\n  - user -> apigateway(http) -> lambda\n  - dynamodb -> lambda\n",
-    "flows:\n  - user -> apigateway(http) -> lambda\n  - lambda -> internet\n",
-    "flows:\n  - user -> apigateway(http) -> lambda\n  - apigateway -- cognito\n",
-    "flows:\n  - user -> apigateway(http) -> lambda\n  - waf -- apigateway\n",
-    "flows:\n  - user -> apigateway(http) -> lambda\n  - cloudfront ~> cloudwatch\n",
-    "flows:\n  - user -> cloudfront -> s3\n  - cloudfront ~> cloudwatch\n",
-    "flows:\n  - lambda -> dynamodb\n",
-    "flows:\n  - cognito -- apigateway(http)\n",
-    "flows:\n  - user -> cloudfront -> s3\n  - cognito -- apigateway(http)\n  - apigateway ~> cloudwatch\n",
-    "flows:\n  - user -> cloudfront -> s3\n  - waf.front -- cloudfront\n  - waf.extra -- cloudfront\n",
-    "flows:\n  - user -> cloudfront.a -> s3.a\n  - user -> cloudfront.b -> s3.b\n  - waf -- cloudfront.a\n  - waf -- cloudfront.b\n",
-    "flows:\n  - user -> apigateway -> lambda\n  - cognito -- apigateway\n",
-    "flows:\n  - user -> apigateway -> lambda\n  - cognito -- apigateway\nchoose:\n  kind.apigateway: rest\n",
-    "flows:\n  - user -> apigateway -> lambda\n  - cognito -- apigateway\nchoose:\n  kind.apigateway: soap\n",
-    "flows:\n  - user -> apigateway(http) -> lambda\nchoose:\n  kind.apigateway: http\n",
-    "flows:\n  - user -> apigateway(http) -> lambda\n  - user -> apigateway.admin -> lambda.admin\n",
-    "flows:\n  - user -> apigateway(http) -> lambda\n  - user -> apigateway.admin -> lambda.admin\nchoose:\n  kind.apigateway.adm: http\n",
-    "flows:\n  - user -> cloudfront -> s3.web\n  - user -> apigateway(http) -> lambda -> s3.uploads\n",
-    "flows:\n  - user -> apigateway(http) -> lambda\nset:\n  azs: 2\n",
-    "flows:\n  - user -> apigateway(http) -> lambda\nset:\n  nat: 2\n",
-    "flows:\n  - user -> apigateway(http) -> lambda\nset:\n  readers: 2\n",
-    "flows:\n  - user -> apigateway(http) -> lambda\nset:\n  colour: 2\n",
-    "flows:\n  - user -> apigateway(http) -> lambda\nset:\n  region: us-east-1\n",
-    "flows:\n  - user -> apigateway(http) -> lambda\nset:\n  direction: right\n",
-    "flows:\n  - user -> apigateway(http) -> lambda\nset:\n  direction: down\n",
-    "flows:\n  - user -> apigateway(http) -> lambda\nset:\n  direction: left\n",
-    "flows:\n  - user -> apigateway(http) -> lambda\nset:\n  direction: Right\n",
-    "flows:\n  - user -> apigateway(http) -> lambda\nset:\n  direction: up\n",
-    "flows:\n  - user -> apigateway(http) -> lambda\nset:\n  colour: red\n",
-    "flows:\n  - user -> apigateway(http) -> lambda\nset:\n  direction: up\n  lang: fr\n  region: us-east-1\n  azs: 2\n",
-    "flows:\n  - user -> cloudfront -> s3\n  - acm -- cloudfront\n",
-    "flows:\n  - user -> apigatway -> lambda\n",
-    "flows:\n  - user -> apigateway(http) -> lambda -> s3\n  - apigateway -> lambda.1a -> s3.lambda-to-s3\n  - apigateway -> lambda.a-to-b -> dynamodb\n  - apigateway -> lambda.a -> s3.to-dynamodb\n  - lambda.a -> dynamodb.b-to-s3\n  - lambda.a-to-b ~> cloudwatch\n  - lambda.1a ~> cloudwatch.to-x\n",
-    "flows:\n  - user -> s3\n",
-    "flows:\n  - user -> cloudfront -> s3\n",
-    "flows:\n  - user -> lambda.1a -> lambda\n  - lambda.a-to-b -> s3\n  - lambda.a -> b\n  - lambda.a -> b.to-s3\n  - s3.x-to-y -> lambda.a-to-b\n  - lambda.a-to-s3 -> s3.x\n",
-];
-
-/// Definitions with a VPC part written in the tests of the inference with a VPC, each once:
-/// those of `infer.rs` in the order written, then the one with a VPC part in `flow_infer.rs`.
-pub(crate) const GRID_INFER_TEST_DEFINITIONS: [&str; 64] = [
-    "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n",
-    "flows:\n  - user -> alb -> ecs -> aurora\nset:\n  azs: 3\n",
-    "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\n",
-    "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\nchoose:\n  route.ecs.s3: nat\n",
-    "flows:\n  - user -> alb -> ecs\n  - cloudfront -> s3\n  - user -> cloudfront\n  - ecs -> s3\n",
-    "flows:\n  - user -> alb -> ecs\n  - ecs -> internet\n",
-    "flows:\n  - user -> alb -> ecs\n  - ecs -> internet\nset:\n  nat: single\n",
-    "flows:\n  - user -> alb -> ecs\n  - ecs ~> cloudwatch\n",
-    "flows:\n  - user -> alb -> aurora\n",
-    "flows:\n  - user -> cloudfrnt -> alb -> ecs\n",
-    "flows:\n  - user -> alb -> ecs\nset:\n  azs: 4\n",
-    "flows:\n  - user -> alb -> ecs\nset:\n  azs: two\n",
-    "flows:\n  - user -> alb -> ecs\nset:\n  lang: fr\n",
-    "flows:\n  - user -> alb -> ecs\nset:\n  region: us-east-1\n",
-    "flows:\n  - user -> alb -> ecs\nset:\n  nat: none\n",
-    "flows:\n  - user -> alb -> ecs\nset:\n  colour: red\n",
-    "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\nchoose:\n  route.ecs.s3: tunnel\n",
-    "flows:\n  - user -> alb -> ecs\nchoose:\n  route.ecs.rds: nat\n",
-    "flows:\n  - user -> alb -> ecs(lambda)\n",
-    "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - cloudfront -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\n  - acm -- cloudfront\n",
-    "flows:\n  - user -> cloudfront -> alb -> ecs\n  - alb ~> s3\n  - cloudfront ~> s3\n",
-    "flows:\n  - user -> alb -> ecs -> aurora\n  - ecs -> internet\nset:\n  azs: 3\n  region: ap-northeast-1\n  nat: per-az\n  readers: 1\n  lang: ja\n",
-    include_str!("../../../tests/cases/web-2az-ja/def.yaml"),
-    "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\nset:\n  region: ap-northeast-1\n  lang: ja\n",
-    "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\nchoose:\n  route.ecs.s3: endpoint\n",
-    "flows:\n  - user -> alb -> ecs\nset:\n  readers: 2\n",
-    "flows:\n  - user -> alb -> ecs\n  - internet -> alb\n",
-    "flows:\n  - user -> alb -> ecs -> nat\nset:\n  azs: 5\n  lang: fr\n",
-    "flows:\n  - user -> alb -> ecs -> aurora\n  - cloudfront -> ecs\n",
-    "flows:\n  - user -> alb -> ecs -> aurora\n  - user -> aurora\n",
-    "flows:\n  - user -> alb -> ecs -> aurora\n  - user ~> cloudfront\n",
-    "flows:\n  - user -> alb -> ecs -> aurora\n  - ecs -> user\n",
-    "flows:\n  - user -> alb -> ecs -> aurora\n  - ecs -> cloudfront\n",
-    "flows:\n  - user -> alb -> ecs -> aurora\n  - alb -> s3\n",
-    "flows:\n  - user -> alb -> ecs -> aurora\n  - user -> s3\n",
-    "flows:\n  - user -> alb -> ecs -> aurora\n  - aurora -> ecs\n",
-    "flows:\n  - user -> cloudfront -> alb -> ecs\n  - waf -- alb\n",
-    "flows:\n  - user -> cloudfront -> alb -> ecs\n  - acm -- alb\n",
-    "flows:\n  - user -> cloudfront -> alb -> ecs\n  - waf -- acm\n",
-    "flows:\n  - user -> cloudfront -> alb -> ecs\n  - acm -- waf\n",
-    "flows:\n  - user -> cloudfront -> alb -> ecs\n  - cloudfront -- waf\n",
-    "flows:\n  - user -> cloudfront -> alb -> ecs\n  - cloudfront -- acm\n",
-    "flows:\n  - user -> cloudfront -> alb -> ecs\n  - alb -- acm\n",
-    "flows:\n  - user -> cloudfront -> alb -> ecs\n  - user -- alb\n",
-    "flows:\n  - user -> cloudfront -> alb -> ecs\n  - alb -- cloudfront\n",
-    "flows:\n  - user -> cloudfront -> alb -> ecs\n  - waf -> alb\n",
-    "flows:\n  - user -> cloudfront -> alb -> ecs\n  - acm -> s3\n",
-    "flows:\n  - user -> cloudfront -> alb -> ecs\n  - waf ~> cloudwatch\n",
-    "flows:\n  - user -> cloudfront -> alb -> ecs\n  - user -> waf\n",
-    "flows:\n  - user -> cloudfront -> alb -> ecs\n  - cloudfront -> acm\n",
-    "flows:\n  - user -> cloudfront -> alb -> ecs\n  - waf -- cloudfront\n  - acm -- cloudfront\n",
-    "flows:\n  - user -> cloudfront -> alb -> ecs\n  - user ~> alb\n",
-    "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - user -> alb\n  - cloudfront -> s3\n  - cloudfront ~> cloudwatch\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - alb ~> cloudwatch\n  - ecs -> internet\n  - waf -- cloudfront\n  - acm -- cloudfront\nchoose:\n  route.ecs.s3: endpoint\n",
-    "flows:\n  - user -> cloudfront -> alb -> ecs\n  - cloudfront -> s3.web\n",
-    "flows:\n  - user -> alb -> ecs\n",
-    "flows:\n  - user -> alb -> ecs\nset:\n  direction: right\n",
-    "flows:\n  - user -> alb -> ecs\nset:\n  direction: down\n",
-    "flows:\n  - user -> alb -> ecs\nset:\n  direction: left\n",
-    "flows:\n  - user -> alb -> ecs\nset:\n  direction: Right\n",
-    "flows:\n  - user -> alb -> ecs\nset:\n  direction: up\n",
-    "flows:\n  - user -> alb -> ecs\n  - ecs -> internet\nset:\n  nat: none\n  direction: up\n  lang: fr\n",
-    "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\n  - ecs ~> cloudwatch\nset:\n  lang: ja\n",
-    "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\nchoose:\n  route.ecs.s3: endpoint\nset:\n  lang: ja\n",
-    "flows:\n  - user -> alb -> ecs -> aurora\n  - ecs -> internet\n",
-];
-
 /// The definitions of the mixed shapes the diagrams aim at. The smallest: one function behind an
 /// HTTP API reaching a database in a VPC, a bucket and logs.
 pub(crate) const MIX_SMALLEST: &str = "flows:\n  - user -> apigateway(http) -> lambda -> aurora\n  - lambda -> s3\n  - lambda ~> cloudwatch\nset:\n  lang: ja\n";
@@ -446,14 +329,6 @@ pub(crate) const MIX_LOGS: &str = "flows:\n  - user -> apigateway(http) -> lambd
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rules::{Rules, Scope};
-
-    /// Whether a definition writes a part of a service that lives in a VPC.
-    fn has_a_vpc_part(src: &str, rules: &Rules) -> bool {
-        let def = crate::def::parse(src).unwrap_or_else(|e| panic!("{e:?}\n{src}"));
-        let vpc = def.links.iter().flat_map(|l| [&l.from, &l.to]).any(|r| rules.service(&r.service).is_some_and(|s| s.scope == Scope::Vpc));
-        vpc
-    }
 
     // Fails if an input silently drops out of a shared list.
     #[test]
@@ -466,14 +341,11 @@ mod tests {
         assert_eq!(API_CASES.len(), 7);
         assert_eq!(generated().len(), GENERATED_COUNT);
         assert_eq!(ONE_FUNCTION_THREE_WAYS.len(), 3);
-        assert_eq!(FLOW_INFER_TEST_DEFINITIONS.len(), 43);
-        assert_eq!(GRID_INFER_TEST_DEFINITIONS.len(), 64);
     }
 
-    // Fails if a definition no longer parses, is listed twice in one list, or is put in the wrong one of the two inference lists.
+    // Fails if a definition no longer parses or is listed twice in one list.
     #[test]
     fn the_shared_inputs_parse_and_appear_once() {
-        let rules = Rules::builtin();
         let lists: Vec<(&str, Vec<String>)> = vec![
             ("WEB_EXAMPLES", WEB_EXAMPLES.iter().map(|s| s.to_string()).collect()),
             ("VPC_TEST_DEFINITIONS", VPC_TEST_DEFINITIONS.iter().map(|s| s.to_string()).collect()),
@@ -486,8 +358,6 @@ mod tests {
             ("generated", generated()),
             ("stops", vec![ID_CLASH.to_string(), TWO_WEBS.to_string(), TWIN_APPS.to_string(), LOAD_BALANCER_ALONE.to_string()]),
             ("ONE_FUNCTION_THREE_WAYS", ONE_FUNCTION_THREE_WAYS.iter().map(|s| s.to_string()).collect()),
-            ("FLOW_INFER_TEST_DEFINITIONS", FLOW_INFER_TEST_DEFINITIONS.iter().map(|s| s.to_string()).collect()),
-            ("GRID_INFER_TEST_DEFINITIONS", GRID_INFER_TEST_DEFINITIONS.iter().map(|s| s.to_string()).collect()),
             ("MIX", vec![MIX_SMALLEST.to_string(), MIX_NAT.to_string(), MIX_WEB.to_string(), MIX_LOGS.to_string()]),
         ];
         for (name, list) in &lists {
@@ -495,12 +365,6 @@ mod tests {
                 assert!(crate::def::parse(src).is_ok(), "{name}[{i}] does not parse:\n{src}");
                 assert!(!list[..i].contains(src), "{name}[{i}] is listed twice:\n{src}");
             }
-        }
-        for src in FLOW_INFER_TEST_DEFINITIONS {
-            assert!(!has_a_vpc_part(src, &rules), "a VPC part in FLOW_INFER_TEST_DEFINITIONS:\n{src}");
-        }
-        for src in GRID_INFER_TEST_DEFINITIONS {
-            assert!(has_a_vpc_part(src, &rules), "no VPC part in GRID_INFER_TEST_DEFINITIONS:\n{src}");
         }
     }
 

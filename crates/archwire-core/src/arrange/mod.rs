@@ -220,7 +220,7 @@ mod tests {
         let r = Rules::builtin();
         let mut models: Vec<Model> = inputs().into_iter().map(|(_, m, _)| m).collect();
         for (_, src) in API_CASES {
-            models.push(crate::flow_infer::infer(&crate::def::parse(src).unwrap(), &r).0.unwrap());
+            models.push(crate::inference::infer(&crate::def::parse(src).unwrap(), &r).0.unwrap());
         }
         for m in &models {
             assert_eq!(default_axis(m), Axis::Down);
@@ -330,7 +330,7 @@ mod tests {
         let defs: Vec<(String, Model)> = generated_with_a_vpc()
             .into_iter()
             .filter_map(|src| {
-                let (m, d) = crate::infer::infer(&crate::def::parse(&src).unwrap(), &r);
+                let (m, d) = crate::inference::infer(&crate::def::parse(&src).unwrap(), &r);
                 assert!(d.errors.is_empty(), "{:?}\n{src}", d.errors);
                 m.map(|m| (src, m))
             })
@@ -433,7 +433,7 @@ mod tests {
         let r = Rules::builtin();
         let mut models: Vec<(String, Model, Diagnostics)> = inputs();
         for (name, src) in API_CASES {
-            let (m, d) = crate::flow_infer::infer(&crate::def::parse(src).unwrap(), &r);
+            let (m, d) = crate::inference::infer(&crate::def::parse(src).unwrap(), &r);
             models.push((name.to_string(), m.unwrap_or_else(|| panic!("{name}: {:?}", d.errors)), d));
         }
         for (name, src) in vpc_samples() {

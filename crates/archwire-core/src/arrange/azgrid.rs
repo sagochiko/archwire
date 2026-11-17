@@ -1454,7 +1454,7 @@ pub(in crate::arrange) mod tests {
     use std::sync::OnceLock;
 
     pub(in crate::arrange) fn grid(src: &str) -> (Model, Diagnostics) {
-        let (m, d) = crate::infer::infer(&crate::def::parse(src).unwrap(), &Rules::builtin());
+        let (m, d) = crate::inference::infer(&crate::def::parse(src).unwrap(), &Rules::builtin());
         (m.unwrap_or_else(|| panic!("{:?}\n{src}", d.errors)), d)
     }
 
@@ -2235,7 +2235,7 @@ pub(in crate::arrange) mod tests {
     fn many_long_named_functions_lay_out_cleanly_down() {
         let src = "flows:\n  - user -> apigateway(http) -> lambda.resize-images-fast -> dynamodb.images\n  - apigateway -> lambda.thumbnails-generator -> dynamodb.images\n  - apigateway -> lambda.metadata-extractor -> dynamodb.meta\n  - apigateway -> lambda.notification-sender -> dynamodb.meta\n  - lambda.resize-images-fast ~> cloudwatch.app\n  - lambda.thumbnails-generator ~> cloudwatch.app\n  - lambda.metadata-extractor ~> cloudwatch.app\n  - lambda.metadata-extractor ~> cloudwatch.audit\n  - lambda.notification-sender ~> cloudwatch.audit\nset:\n  direction: down\n";
         let r = Rules::builtin();
-        let (m, d) = crate::flow_infer::infer(&crate::def::parse(src).unwrap(), &r);
+        let (m, d) = crate::inference::infer(&crate::def::parse(src).unwrap(), &r);
         let m = m.unwrap_or_else(|| panic!("{:?}", d.errors));
         assert_eq!(m.nodes.iter().filter(|n| n.service == "lambda").count(), 4);
         lays_out_cleanly("long names", &m, &d, Axis::Down);

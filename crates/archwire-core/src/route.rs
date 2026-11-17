@@ -361,7 +361,7 @@ mod tests {
 
     fn wires(src: &str) -> (Model, Layout, Vec<Wire>, Vec<String>) {
         let r = Rules::builtin();
-        let (m, _) = crate::infer::infer(&crate::def::parse(src).unwrap(), &r);
+        let (m, _) = crate::inference::infer(&crate::def::parse(src).unwrap(), &r);
         let m = m.unwrap(); let l = crate::layout::layout(&m, &r); let (w, n) = route(&m, &l, &r);
         (m, l, w, n)
     }
@@ -800,7 +800,6 @@ mod tests {
             "flows:\n  - user -> alb -> ecs\n",
             "flows:\n  - user -> alb -> ecs -> aurora\n  - aurora -> ecs\n",
             "flows:\n  - user -> alb -> ecs -> aurora\n  - ecs -> s3\nchoose:\n  route.ecs.s3: nat\n",
-            "flows:\n  - user -> alb -> ecs -> aurora\n  - alb -> aurora\n  - aurora ~> cloudwatch\n  - alb ~> s3\nset:\n  azs: 3\n",
             "flows:\n  - user -> cloudfront -> alb -> ecs\n  - acm -- cloudfront\n  - waf -- cloudfront\n  - cloudfront -> s3\n  - cloudfront ~> cloudwatch\n",
         ].map(String::from));
         srcs.extend(endpoint_ja_definitions());
@@ -947,7 +946,7 @@ mod tests {
     #[test]
     fn a_line_no_route_can_place_is_kept_and_named_in_a_note() {
         let r = Rules::builtin();
-        let (m, _) = crate::infer::infer(&crate::def::parse(WEB2).unwrap(), &r);
+        let (m, _) = crate::inference::infer(&crate::def::parse(WEB2).unwrap(), &r);
         let m = m.unwrap();
         let mut l = crate::layout::layout(&m, &r);
         let s3 = l.rect("s3");
@@ -1348,7 +1347,7 @@ mod tests {
     fn web_lines_merged_across_azs_survive_bundling() {
         let src = format!("{WEB2}set:\n  lang: ja\n");
         let r = Rules::builtin();
-        let (m, _) = crate::infer::infer(&crate::def::parse(&src).unwrap(), &r);
+        let (m, _) = crate::inference::infer(&crate::def::parse(&src).unwrap(), &r);
         let m = m.unwrap();
         let l = crate::layout::layout(&m, &r);
         let (w, _) = route_planned(&m, &l, &r, &[]);

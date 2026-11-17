@@ -320,7 +320,7 @@ mod tests {
 
     fn lay(src: &str) -> Layout {
         let r = Rules::builtin();
-        let (m, _) = crate::infer::infer(&crate::def::parse(src).unwrap(), &r);
+        let (m, _) = crate::inference::infer(&crate::def::parse(src).unwrap(), &r);
         layout(&m.unwrap(), &r)
     }
     const WEB2: &str = "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\n";
@@ -428,7 +428,7 @@ mod tests {
             region: None,
             part: format!("{service}.web"),
             tag: Some("web".into()),
-            area: crate::infer::area_of(r.service(service).unwrap()),
+            area: crate::inference::area_of(r.service(service).unwrap()),
             undecided: false,
         };
         let at = Rect { x: 0, y: 0, w: ICON, h: ICON };

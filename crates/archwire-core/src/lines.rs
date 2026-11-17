@@ -227,7 +227,6 @@ fn last_two(name: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{pick, Engine};
     use crate::layout::{Icon, Layout, Rect};
     use crate::model::{Area, Edge, Node, Tier};
     use crate::rules::{Lang, Rules};
@@ -258,21 +257,16 @@ mod tests {
         FEWER_READERS.replace("  readers: 1\n", "  readers: 1\n  lang: en\n")
     }
 
-    /// The model and layout a definition goes through, by the layout it picks.
+    /// The model a definition infers and the layout it goes through: the VPC layout when the model
+    /// has a part in a subnet or on the VPC's edge, the layout without a VPC otherwise.
     fn model_and_layout(src: &str, r: &Rules) -> (Model, Layout) {
-        let def = crate::def::parse(src).unwrap();
-        match pick(&def, r).unwrap() {
-            Engine::Grid => {
-                let m = crate::infer::infer(&def, r).0.unwrap();
-                let l = crate::layout::layout(&m, r);
-                (m, l)
-            }
-            Engine::Flow => {
-                let m = crate::flow_infer::infer(&def, r).0.unwrap();
-                let l = crate::place::place(&m, r).unwrap().layout;
-                (m, l)
-            }
-        }
+        let m = crate::inference::infer(&crate::def::parse(src).unwrap(), r).0.unwrap();
+        let l = if m.nodes.iter().any(|n| matches!(n.area, Area::VpcEdge | Area::Subnet(_))) {
+            crate::layout::layout(&m, r)
+        } else {
+            crate::place::place(&m, r).unwrap().layout
+        };
+        (m, l)
     }
 
     fn gathered(src: &str) -> (Model, Vec<Line>, Vec<String>) {

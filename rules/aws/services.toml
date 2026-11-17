@@ -3,12 +3,8 @@
 #
 # `origin = true` marks where main flows start: in the layout without a VPC every main flow must be
 # reachable from such a part. `kind_hole = true` makes a part written without a kind a hole.
-# `separate_from_vpc = true` marks a service that cannot be written together with VPC services yet.
 # `place_rule` names the rule that explains where the part is drawn; without it the scope decides.
 #
-# `flow_source = true` marks a global service that may start a main (->) or auxiliary (~>) flow.
-# `attach_to` makes a service an attachment: it carries no flows and may only be associated
-# (--) with the services listed there, written attachment first.
 # `derived_role` names the part a service inference adds plays at the VPC's edge: `entry_gateway`
 # where traffic from outside comes in, `egress_nat` where private traffic goes out.
 # `egress = true` marks where traffic leaving the VPC goes: a main flow to it is not drawn as a part.
@@ -44,8 +40,6 @@ icon = "service"
 shape = "cloudfront"
 color = "#8C4FFF"
 label = "Amazon CloudFront"
-in_label = "https"
-flow_source = true
 
 [[service]]
 key = "waf"
@@ -55,7 +49,6 @@ icon = "service"
 shape = "waf"
 color = "#DD344C"
 label = "AWS WAF"
-attach_to = ["cloudfront"]
 
 [[service]]
 key = "acm"
@@ -65,7 +58,6 @@ icon = "service"
 shape = "certificate_manager_3"
 color = "#DD344C"
 label = "AWS Certificate Manager"
-attach_to = ["cloudfront"]
 
 [[service]]
 key = "igw"
@@ -75,7 +67,6 @@ icon = "resource"
 shape = "internet_gateway"
 color = "#8C4FFF"
 label = "Internet Gateway"
-in_label = "https"
 derived_only = true
 derived_role = "entry_gateway"
 
@@ -88,7 +79,6 @@ icon = "service"
 shape = "elastic_load_balancing"
 color = "#8C4FFF"
 label = "Application Load Balancer"
-in_label = "https"
 vpc_reasons = { vpc = "load-balancer-in-vpc", az = ["alb-spans-two-azs"], default_azs = "default-two-azs" }
 
 [[service]]
@@ -100,7 +90,6 @@ icon = "resource"
 shape = "nat_gateway"
 color = "#8C4FFF"
 label = "NAT Gateway"
-in_label = "outbound"
 derived_only = true
 derived_role = "egress_nat"
 
@@ -113,7 +102,6 @@ icon = "service"
 shape = "ecs"
 color = "#ED7100"
 label = "Amazon ECS"
-in_label = "http"
 
 [service.options.fargate]
 shape = "fargate"
@@ -138,7 +126,6 @@ icon = "service"
 shape = "s3"
 color = "#7AA116"
 label = "Amazon S3"
-in_label = "read_write"
 
 [[service]]
 key = "cloudwatch"
@@ -148,7 +135,6 @@ icon = "service"
 shape = "cloudwatch_2"
 color = "#E7157B"
 label = "Amazon CloudWatch"
-in_label = "logs_metrics"
 
 [[service]]
 key = "apigateway"
@@ -159,7 +145,6 @@ shape = "api_gateway"
 color = "#8C4FFF"
 label = "Amazon API Gateway"
 kind_hole = true
-separate_from_vpc = true
 
 [service.options.http]
 shape = "api_gateway"
@@ -177,7 +162,6 @@ icon = "service"
 shape = "lambda"
 color = "#ED7100"
 label = "AWS Lambda"
-separate_from_vpc = true
 nat_rule = "attached-function-internet-through-nat"
 
 [[service]]
@@ -188,7 +172,6 @@ icon = "service"
 shape = "dynamodb"
 color = "#C925D1"
 label = "Amazon DynamoDB"
-separate_from_vpc = true
 
 [[service]]
 key = "cognito"
@@ -198,5 +181,4 @@ icon = "service"
 shape = "cognito"
 color = "#DD344C"
 label = "Amazon Cognito"
-separate_from_vpc = true
 place_rule = "cognito-user-pool-in-one-region"

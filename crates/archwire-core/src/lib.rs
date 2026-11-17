@@ -4,8 +4,6 @@ pub mod diag;
 pub mod drawio;
 pub mod edit;
 pub mod engine;
-pub mod flow_infer;
-pub mod infer;
 pub mod inference;
 pub mod layout;
 pub mod model;
@@ -101,7 +99,6 @@ pub(crate) fn arranged_drawio(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::Engine;
     use crate::test_inputs::{
         heavy_variants, CROWDED_SIDE_EN, CROWDED_S3_JA, ID_CLASH, LOAD_BALANCER_ALONE, MIX_LOGS, MIX_NAT, MIX_SMALLEST, MIX_WEB, ONE_FUNCTION_THREE_WAYS,
         TWIN_APPS, TWO_WEBS, VPC_TEST_DEFINITIONS, WEB_EXAMPLES,
@@ -273,7 +270,7 @@ mod tests {
     #[test]
     fn a_layout_failure_is_an_error_without_a_diagram() {
         let rules = Rules::builtin();
-        let (model, diagnostics) = flow_infer::infer(&def::parse(HOLE).unwrap(), &rules);
+        let (model, diagnostics) = inference::infer(&def::parse(HOLE).unwrap(), &rules);
         let (derived, holes) = (diagnostics.derived.clone(), diagnostics.holes.clone());
         assert!(!derived.is_empty() && !holes.is_empty());
         let failed = diag::Problem {
@@ -334,7 +331,7 @@ mod tests {
         );
         for src in [src.as_str(), API, MERGED, HOLE] {
             let rules = Rules::builtin();
-            let (model, _) = flow_infer::infer(&def::parse(src).unwrap(), &rules);
+            let (model, _) = inference::infer(&def::parse(src).unwrap(), &rules);
             let model = model.unwrap();
             let p = place::place(&model, &rules).unwrap();
             let (wires, notes) = route::route_planned(&model, &p.layout, &rules, &p.lines);
@@ -364,7 +361,7 @@ mod tests {
     /// Main lines that cross a side line they share no part with, as "main x side".
     fn main_lines_across_side_lines(src: &str) -> Vec<String> {
         let rules = Rules::builtin();
-        let (model, _) = flow_infer::infer(&def::parse(src).unwrap(), &rules);
+        let (model, _) = inference::infer(&def::parse(src).unwrap(), &rules);
         let model = model.unwrap();
         let p = place::place(&model, &rules).unwrap();
         let (wires, notes) = route::route_planned(&model, &p.layout, &rules, &p.lines);
@@ -403,27 +400,40 @@ mod tests {
     }
 
     /// How many definitions the old and the new layout are compared on: the web examples, the test
-    /// definitions and the heavy variants.
-    const KEPT: usize = 47;
+    /// definitions and the heavy variants, less the one test definition that writes `alb -> aurora`
+    /// (`VPC_TEST_DEFINITIONS[25]`), which the inference does not accept.
+    const KEPT: usize = 46;
 
     /// The definitions whose diagnostics must not change with the layout, with their models: the
     /// fixed lists above, none of which writes a direction or has three zones with fewer Readers.
-    /// Each must go to the grid layout and give a model; one that no longer does fails here by name.
+    /// Each must write a VPC part and give a model, but `VPC_TEST_DEFINITIONS[25]`, which must stop
+    /// on `alb -> aurora` and is left out; one that no longer does fails here by name.
     fn kept_definitions() -> Vec<(String, Model, Diagnostics)> {
         let rules = Rules::builtin();
         let all: Vec<String> = WEB_EXAMPLES.iter().chain(VPC_TEST_DEFINITIONS.iter()).map(|s| s.to_string()).chain(heavy_variants()).collect();
-        assert_eq!(all.len(), KEPT);
+        assert_eq!(all.len(), KEPT + 1);
         let mut out: Vec<(String, Model, Diagnostics)> = Vec::new();
+        let mut stopped = Vec::new();
         for src in all {
             assert!(!out.iter().any(|(s, _, _)| *s == src), "listed twice:\n{src}");
             let def = def::parse(&src).unwrap();
-            assert!(matches!(engine::pick(&def, &rules), Ok(Engine::Grid)), "not taken to the grid layout:\n{src}");
+            let vpc = def.links.iter().flat_map(|l| [&l.from, &l.to]).any(|r| rules.service(&r.service).is_some_and(|s| s.scope == rules::Scope::Vpc));
+            assert!(vpc, "writes no VPC part:\n{src}");
             assert!(!def.set.contains_key("direction"), "writes a direction:\n{src}");
             assert!(!(def.set.get("azs").map(String::as_str) == Some("3") && def.set.contains_key("readers")), "fewer Readers:\n{src}");
-            let (model, d) = infer::infer(&def, &rules);
-            let m = model.unwrap_or_else(|| panic!("no model: {:?}\n{src}", d.errors));
-            out.push((src, m, d));
+            let (model, d) = inference::infer(&def, &rules);
+            match model {
+                Some(m) => out.push((src, m, d)),
+                None => {
+                    assert_eq!(src, VPC_TEST_DEFINITIONS[25], "no model: {:?}\n{src}", d.errors);
+                    let got: Vec<_> = d.errors.iter().map(|e| (e.code.as_str(), e.at.as_deref(), e.got.as_deref())).collect();
+                    assert_eq!(got, [("UNSUPPORTED", Some("flows[1]"), Some("alb -> aurora"))], "{src}");
+                    stopped.push(src);
+                }
+            }
         }
+        assert_eq!(stopped.len(), 1);
+        assert_eq!(out.len(), KEPT);
         out
     }
 
@@ -469,7 +479,7 @@ mod tests {
         let rules = Rules::builtin();
         for (name, axis, want) in CROWDED_BROKEN {
             let src = if name == "s3-ja" { CROWDED_S3_JA } else { CROWDED_SIDE_EN };
-            let (model, d) = infer::infer(&def::parse(src).unwrap(), &rules);
+            let (model, d) = inference::infer(&def::parse(src).unwrap(), &rules);
             let model = model.unwrap();
             let (_, notes) = arranged_drawio(&model, &d, &rules, axis).unwrap_or_else(|e| panic!("{name} {axis:?}: {e:?}"));
             let mut named: Vec<String> = notes
@@ -521,7 +531,7 @@ mod tests {
     fn a_bent_main_line_carries_its_label_where_it_leaves_its_source() {
         let src = "flows:\n  - user -> apigateway(http) -> lambda.orders -> dynamodb.orders\n  - apigateway -> lambda.users -> dynamodb.users\n  - apigateway -> lambda.search -> dynamodb.orders\n  - lambda.orders ~> cloudwatch\n  - lambda.users ~> cloudwatch\n  - lambda.search ~> cloudwatch\nset:\n  lang: ja\n";
         let rules = Rules::builtin();
-        let (model, _) = flow_infer::infer(&def::parse(src).unwrap(), &rules);
+        let (model, _) = inference::infer(&def::parse(src).unwrap(), &rules);
         let model = model.unwrap();
         let p = place::place(&model, &rules).unwrap();
         let (wires, notes) = route::route_planned(&model, &p.layout, &rules, &p.lines);

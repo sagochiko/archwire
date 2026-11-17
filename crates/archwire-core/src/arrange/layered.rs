@@ -1077,7 +1077,7 @@ pub(super) mod tests {
     /// The model of a definition without a VPC, and its layout with lines running along `axis`.
     pub(in crate::arrange) fn arranged(src: &str, axis: Axis) -> (Model, Placement) {
         let r = Rules::builtin();
-        let (m, d) = crate::flow_infer::infer(&crate::def::parse(src).unwrap(), &r);
+        let (m, d) = crate::inference::infer(&crate::def::parse(src).unwrap(), &r);
         let m = m.unwrap_or_else(|| panic!("{:?}", d.errors));
         let p = arrange(&m, &r, axis).unwrap_or_else(|e| panic!("{e:?}\n{src}"));
         (m, p)
@@ -1148,7 +1148,7 @@ set:
     #[test]
     fn two_functions_sharing_two_tables_follow_the_hand_trace() {
         let r = Rules::builtin();
-        let (m, _) = crate::flow_infer::infer(&crate::def::parse(SHARED).unwrap(), &r);
+        let (m, _) = crate::inference::infer(&crate::def::parse(SHARED).unwrap(), &r);
         let m = m.unwrap();
         let rs = cross_step(&m, &r, Axis::Right);
         let f = flow(&m);
@@ -1576,7 +1576,7 @@ set:
         assert!(defs.len() > 1000, "{}", defs.len());
         let mut failed: Vec<String> = Vec::new();
         for src in &defs {
-            let (m, d) = crate::flow_infer::infer(&crate::def::parse(src).unwrap(), &r);
+            let (m, d) = crate::inference::infer(&crate::def::parse(src).unwrap(), &r);
             let Some(m) = m.filter(|_| d.errors.is_empty() && d.holes.is_empty()) else {
                 failed.push(format!("inference: {:?} {:?}\n{src}", d.errors, d.holes));
                 continue;
@@ -1677,7 +1677,7 @@ set:
         let r = Rules::builtin();
         let defs = API_CASES.iter().map(|(_, s)| s.to_string()).chain(generated());
         defs.map(|src| {
-            let (m, d) = crate::flow_infer::infer(&crate::def::parse(&src).unwrap(), &r);
+            let (m, d) = crate::inference::infer(&crate::def::parse(&src).unwrap(), &r);
             let m = m.unwrap_or_else(|| panic!("{:?}\n{src}", d.errors));
             (src, m)
         })
@@ -1755,7 +1755,7 @@ set:
         }
         let r = Rules::builtin();
         for (name, src) in API_CASES {
-            let (m, d) = crate::flow_infer::infer(&crate::def::parse(src).unwrap(), &r);
+            let (m, d) = crate::inference::infer(&crate::def::parse(src).unwrap(), &r);
             let (x, _) = crate::arranged_drawio(&m.unwrap(), &d, &r, Axis::Down).unwrap();
             let shapes: Vec<&str> = x.lines().filter(|l| l.contains("mxgraph.aws4.") && l.contains("vertex=\"1\"") && !l.contains("mxgraph.aws4.group")).collect();
             assert!(!shapes.is_empty(), "{name}");

@@ -23,17 +23,14 @@ mod tests {
     use super::*;
     use crate::rules::Rules;
 
-    fn model(src: &str, grid: bool) -> Model {
-        let r = Rules::builtin();
-        let def = crate::def::parse(src).unwrap();
-        let m = if grid { crate::infer::infer(&def, &r).0 } else { crate::flow_infer::infer(&def, &r).0 };
-        m.unwrap()
+    fn model(src: &str) -> Model {
+        crate::inference::infer(&crate::def::parse(src).unwrap(), &Rules::builtin()).0.unwrap()
     }
 
     // Fails if a part outside the VPC is left out of the tree, or put in a frame item.
     #[test]
     fn without_a_vpc_the_tree_is_every_part_in_model_order() {
-        let m = model("flows:\n  - user -> cloudfront -> s3\n  - user -> apigateway(http) -> lambda\n  - cognito -- apigateway\n", false);
+        let m = model("flows:\n  - user -> cloudfront -> s3\n  - user -> apigateway(http) -> lambda\n  - cognito -- apigateway\n");
         let want: Vec<Item> = (0..m.nodes.len()).map(Item::Part).collect();
         assert_eq!(tree(&m), want);
     }
@@ -41,7 +38,7 @@ mod tests {
     // Fails if a part inside the VPC is left outside the VPC frame item, or one outside is put in it.
     #[test]
     fn parts_inside_the_vpc_go_into_one_vpc_frame_item() {
-        let m = model("flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - ecs ~> cloudwatch\n", true);
+        let m = model("flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - ecs ~> cloudwatch\n");
         let got = tree(&m);
         let outside: Vec<&str> = got.iter().filter_map(|it| match it { Item::Part(i) => Some(m.nodes[*i].id.as_str()), _ => None }).collect();
         let frames: Vec<&FrameItem> = got.iter().filter_map(|it| match it { Item::Frame(f) => Some(f), _ => None }).collect();

@@ -19,8 +19,6 @@ These fields decide more of what happens to a part:
 | `vpc_reasons` | for a VPC service, the rules that give the VPC (`vpc`), its zones (`az`) and their default number (`default_azs`) their reasons, taken from the first part in the definition that has them | `alb` and `aurora` |
 | `nat_rule` | the rule a part gets when its traffic leaves the VPC through a NAT gateway | `lambda` uses `attached-function-internet-through-nat` |
 
-The file also carries `in_label`, `flow_source`, `attach_to` and `separate_from_vpc`. `compile` does not read them: the accepted connections and their labels come from `links.toml`.
-
 ## rules.toml and labels.toml
 
 `rules.toml` holds the reasons. Each rule has an `id`, a `kind`, an optional `source`, and a reason in English (`reason_en`) and Japanese (`reason_ja`). The file also carries `version`, which is printed in every report as `versions.rules`.

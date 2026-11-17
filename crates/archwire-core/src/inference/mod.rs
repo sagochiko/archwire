@@ -13,7 +13,6 @@ mod links;
 mod reasons;
 
 pub(crate) use links::check_names;
-pub(crate) use reasons::derived;
 
 use crate::def::{Definition, Link, Ref};
 use crate::diag::{Diagnostics, Problem, Versions};
@@ -238,6 +237,7 @@ pub(crate) fn area_of(service: &Service) -> Area {
 
 #[cfg(test)]
 mod tests {
+    use super::reasons::derived;
     use super::*;
     use crate::def::Rel::{self, Aux, Main};
 
@@ -308,8 +308,7 @@ mod tests {
         type Infer = fn(&Definition, &Rules) -> (Option<Model>, Diagnostics);
         let api = crate::def::parse(API).unwrap();
         let web = crate::def::parse("flows:\n  - user -> alb -> ecs -> aurora\n  - ecs -> internet\n").unwrap();
-        // Every rule the inference with a VPC names is named here too, or by the data.
-        let runs: [(&[&str], &Definition, Infer); 3] = [(&RULES, &api, infer), (&RULES, &web, infer), (&crate::infer::RULES, &web, infer)];
+        let runs: [(&[&str], &Definition, Infer); 2] = [(&RULES, &api, infer), (&RULES, &web, infer)];
         // The rules the data names too, so loading already stops: by where in the data they are named.
         let named_by_links = ["cloudfront-certificate-in-us-east-1"];
         let named_by_services = ["load-balancer-in-vpc", "alb-spans-two-azs", "default-two-azs"];
