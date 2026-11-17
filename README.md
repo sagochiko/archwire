@@ -183,11 +183,11 @@ The reasons are not only in the report. Every element with a reason carries it i
 
 ## What this version draws
 
-These services: users, the internet (outbound only), CloudFront, WAF and Certificate Manager (both attached to CloudFront or to the load balancer), the Application Load Balancer, ECS, Aurora, S3, CloudWatch, API Gateway as an HTTP API or a REST API, Lambda, DynamoDB, and Cognito (only attached to API Gateway). The Internet Gateway and NAT gateways are added by archwire and cannot be written in a definition.
+These services: users, the internet (outbound only), CloudFront, WAF and Certificate Manager (both attached to CloudFront or to the load balancer), the Application Load Balancer, ECS, Aurora, S3, CloudWatch, API Gateway as an HTTP API or a REST API, Lambda, DynamoDB, Cognito (only attached to API Gateway), and the services of a flow from detection to notification: GuardDuty, Inspector, Security Hub, Config, CloudTrail, EventBridge, SNS, Step Functions and Systems Manager. The Internet Gateway and NAT gateways are added by archwire and cannot be written in a definition.
 
 A definition that writes `alb`, `ecs` or `aurora` is drawn with one VPC with two or three Availability Zones, with public and private subnets as its parts need. The VPC can hold more than one load balancer, such as `alb.web` and `alb.admin`; two or more stand in one row above the Availability Zones. A Lambda function with a main flow to Aurora is attached to that VPC and drawn in its private subnets, one copy per zone; any other function stays outside the VPC. So one definition can hold a Web architecture behind a load balancer, an API whose functions reach Aurora, and functions and tables outside the VPC, side by side. A definition without those three services is drawn without a VPC.
 
-Every main flow must be reachable from `user` along main flows. Which connections are accepted is listed pair by pair in `rules/aws/links.toml` and in [docs/definition.md](docs/definition.md#which-connections-are-accepted). Parts of one service can be told apart with a name after a dot, such as `s3.web` and `s3.uploads`, or `ecs.web` and `ecs.admin` behind one load balancer.
+Every main flow must be reachable along main flows from `user` or from a service that starts a flow by itself: GuardDuty, Inspector, Security Hub, Config, CloudTrail, EventBridge or CloudWatch. So a definition can describe a flow with no users, such as GuardDuty findings going through Security Hub and EventBridge to SNS. Which connections are accepted is listed pair by pair in `rules/aws/links.toml` and in [docs/definition.md](docs/definition.md#which-connections-are-accepted). Parts of one service can be told apart with a name after a dot, such as `s3.web` and `s3.uploads`, or `ecs.web` and `ecs.admin` behind one load balancer.
 
 The diagram runs from top to bottom, or from left to right with `set.direction`. The only Region is `ap-northeast-1`, and labels are in English, or in Japanese with `set.lang`. A connection or shape not described here stops with the error `UNSUPPORTED` instead of producing a diagram that is wrong.
 
@@ -203,7 +203,7 @@ A Lambda function is drawn in a VPC only in its private subnets, and only when i
 
 It does not draw the endpoint types of API Gateway (edge-optimized, Regional, private) or WebSocket APIs. It does not attach WAF to API Gateway; `waf` attaches only to `cloudfront` and `alb`. Which API types support AWS WAF is in the AWS comparison [Choose between REST APIs and HTTP APIs](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-vs-rest.html). It does not draw a sign-in line from users to Cognito; Cognito is drawn only attached to API Gateway.
 
-It does not draw queues, topics, event buses, workflows or AI services, more than one VPC, Transit Gateway, on-premises networks, several accounts, or other clouds. It does not simulate failures, show migration stages, compare a diagram with Terraform, or read a `.drawio` file back into a definition.
+It does not draw queues, the kinds of SNS topics (standard or FIFO), Lambda functions invoked by EventBridge or SNS, or AI services, more than one VPC, Transit Gateway, on-premises networks, several accounts, or other clouds. It does not simulate failures, show migration stages, compare a diagram with Terraform, or read a `.drawio` file back into a definition.
 
 A diagram that compiles means it is consistent under these rules. It does not mean the architecture is guaranteed to work in AWS.
 

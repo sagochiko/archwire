@@ -12,7 +12,7 @@ These fields decide more of what happens to a part:
 
 | Field | Meaning | Set on |
 |---|---|---|
-| `origin = true` | main flows start here; every main flow must be reachable from such a part | `user` |
+| `origin = true` | main flows start here; every main flow must be reachable from such a part. A service gets it when the sender of its flow is outside the diagram or when it starts a flow by detecting or recording something itself. Services that only receive, such as `sns`, `stepfunctions` and `ssm`, do not. This is archwire's choice, not an AWS rule | `user`, `cloudwatch`, `guardduty`, `inspector`, `securityhub`, `config`, `cloudtrail`, `eventbridge` |
 | `egress = true` | where traffic leaving the VPC goes. A main flow to it is not drawn as a part: archwire adds NAT gateways and the lines through them instead. The part the flow comes from must be in a private subnet | `internet` |
 | `kind_hole = true` | a part written without a kind is a hole | `apigateway`, whose kinds are `http` and `rest` |
 | `place_rule` | the rule that explains where the part is drawn, instead of the rule its `scope` gives | `cognito` uses `cognito-user-pool-in-one-region` |

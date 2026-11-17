@@ -53,6 +53,15 @@ The other services can be written in either. In a definition with a VPC, a Lambd
 | `lambda` | AWS Lambda | | in the Region, or in each private subnet of the VPC when it sends a main flow to `aurora` |
 | `dynamodb` | Amazon DynamoDB | | in the Region |
 | `cognito` | Amazon Cognito. Only as `cognito -- apigateway` | | in the Region |
+| `guardduty` | Amazon GuardDuty | | in the Region |
+| `inspector` | Amazon Inspector | | in the Region |
+| `securityhub` | AWS Security Hub | | in the Region |
+| `config` | AWS Config | | in the Region |
+| `cloudtrail` | AWS CloudTrail | | in the Region |
+| `eventbridge` | Amazon EventBridge | | in the Region |
+| `sns` | Amazon SNS | | in the Region |
+| `stepfunctions` | AWS Step Functions | | in the Region |
+| `ssm` | AWS Systems Manager | | in the Region |
 
 The Internet Gateway and the NAT gateways are added by archwire and cannot be written. Writing `nat` is `UNKNOWN_SERVICE`.
 
@@ -145,13 +154,34 @@ The accepted connections are listed pair by pair in `rules/aws/links.toml`, and 
 | `aurora` | `->` | `internet` | Outbound |
 | `aurora` | `~>` | `s3` | Logs and metrics |
 | `aurora` | `~>` | `cloudwatch` | Logs and metrics |
+| `guardduty` | `->` | `eventbridge` | Findings |
+| `guardduty` | `->` | `securityhub` | Findings |
+| `inspector` | `->` | `eventbridge` | Findings |
+| `inspector` | `->` | `securityhub` | Findings |
+| `securityhub` | `->` | `eventbridge` | Findings |
+| `config` | `->` | `eventbridge` | Compliance changes |
+| `config` | `->` | `securityhub` | Findings |
+| `config` | `->` | `sns` | Notifications |
+| `config` | `->` | `ssm` | Remediation |
+| `cloudtrail` | `->` | `s3` | Log files |
+| `cloudtrail` | `->` | `cloudwatch` | Logs |
+| `cloudtrail` | `->` | `eventbridge` | API calls |
+| `cloudwatch` | `->` | `sns` | Alarms |
+| `eventbridge` | `->` | `sns` | Rule |
+| `eventbridge` | `->` | `stepfunctions` | Rule |
+| `eventbridge` | `->` | `ssm` | Rule |
+| `stepfunctions` | `->` | `sns` | Publish |
+| `stepfunctions` | `->` | `lambda` | Invoke |
+| `stepfunctions` | `->` | `ssm` | Call |
 
 A pair means the services, whatever the parts are named: `lambda.resize -> s3.uploads` is the pair `lambda -> s3`.
 
+`config -> securityhub` is drawn as one line. AWS Config sends its rule evaluations to Security Hub through EventBridge, but that is a link between the two services, not an EventBridge rule the definition writes.
+
 Besides the list, archwire checks the following, and stops with `UNSUPPORTED` when one does not hold:
 
-- There is at least one main flow (`at` `flows`), and every main flow can be reached from `user` along main flows (`at` the line that cannot be reached).
-- The source of an auxiliary flow and the target of an association are on a main flow reached from `user`.
+- There is at least one main flow (`at` `flows`), and every main flow can be reached along main flows from a starting point (`at` the line that cannot be reached). The starting points are `user` and the services that start a flow by themselves: `guardduty`, `inspector`, `securityhub`, `config`, `cloudtrail`, `eventbridge` and `cloudwatch`. `sns`, `stepfunctions`, `ssm` and the other services only receive, so a definition cannot start with them.
+- The source of an auxiliary flow and the target of an association are on a main flow reached from a starting point.
 - A main flow to `internet` comes from a part in a private subnet of the VPC: ECS, Aurora, or a function attached to the VPC.
 
 One CloudFront distribution or one load balancer takes one WAF. With `- user -> cloudfront -> s3`, `- waf.front -- cloudfront` and `- waf.extra -- cloudfront`, the third line stops with `TOO_MANY_ATTACHED`, `got` `waf.extra`, and `rule` `one-web-acl-per-resource`; the reason is in [docs/rules.md](rules.md). `- user -> alb -> ecs`, `- waf.a -- alb` and `- waf.b -- alb` stop the same way, at `flows[2]` with `got` `waf.b`. One WAF attached to two distributions is accepted, and so is one WAF attached to two load balancers, such as `- waf -- alb.web` and `- waf -- alb.admin`.
@@ -168,9 +198,10 @@ For example, each of these stops with `UNSUPPORTED`:
 | `- user -> alb -> ecs -> aurora` and `- alb -> aurora` | `flows[1]` | ``"`alb -> aurora` is not a supported connection"`` |
 | `- user -> cloudfront -> alb -> ecs` and `- cloudfront -> cloudwatch` | `flows[1]` | ``"`cloudfront -> cloudwatch` is not a supported connection"`` |
 | `- user -> cloudfront -> alb -> ecs` and `- alb -- acm` | `flows[1]` | ``"`alb -- acm` is not a supported connection"`` |
-| `- lambda -> dynamodb` alone | `flows[0]` | ``"`lambda -> dynamodb` is not reached by main flows (->) from `user`"`` |
-| `- user -> alb -> ecs` and `- aurora -> s3` | `flows[1]` | ``"`aurora -> s3` is not reached by main flows (->) from `user`"`` |
-| `- user -> cloudfront -> s3` and `- cognito -- apigateway` | `flows[1]` | ``"`cognito -- apigateway` needs `apigateway` on a main flow (->) from `user`"`` |
+| `- stepfunctions -> sns` alone | `flows[0]` | ``"`stepfunctions -> sns` is not reached by main flows (->) from `cloudtrail`, `cloudwatch`, `config`, `eventbridge`, `guardduty`, `inspector`, `securityhub`, `user`"`` |
+| `- lambda -> dynamodb` alone | `flows[0]` | ``"`lambda -> dynamodb` is not reached by main flows (->) from `cloudtrail`, `cloudwatch`, `config`, `eventbridge`, `guardduty`, `inspector`, `securityhub`, `user`"`` |
+| `- user -> alb -> ecs` and `- aurora -> s3` | `flows[1]` | ``"`aurora -> s3` is not reached by main flows (->) from `cloudtrail`, `cloudwatch`, `config`, `eventbridge`, `guardduty`, `inspector`, `securityhub`, `user`"`` |
+| `- user -> cloudfront -> s3` and `- cognito -- apigateway` | `flows[1]` | ``"`cognito -- apigateway` needs `apigateway` on a main flow (->) from `cloudtrail`, `cloudwatch`, `config`, `eventbridge`, `guardduty`, `inspector`, `securityhub`, `user`"`` |
 | `- user -> apigateway(http) -> lambda -> internet` | `flows[0]` | ``"`lambda -> internet` needs `lambda` in a VPC; connect it to a part in a private subnet"`` |
 
 `alb -- waf` stops the same way as `alb -- acm`: write the attached part first. So do `user -> aurora`, `alb -> s3`, `user ~> alb`, `internet -> alb`, `ecs -> user` and `waf -> alb` in a definition with a VPC. The auxiliary flows `cloudfront ~> s3` and `cloudfront ~> cloudwatch` are accepted in every definition, and so is `- user -> alb` alone.
@@ -438,7 +469,7 @@ The errors come in the order of the checks. Within a check on the flows, they co
 
 1. names: `UNKNOWN_SERVICE`, `UNKNOWN_OPTION`
 2. settings, by key in the order `azs`, `region`, `lang`, `direction`, `nat`, `readers`, then the keys that are not settings
-3. connections: those not in the list, then a main flow to `internet` from outside a private subnet, then the main flows not reached from `user` and the auxiliary flows and associations hanging off them, then `TOO_MANY_ATTACHED`, then a part attached to both CloudFront and a load balancer
+3. connections: those not in the list, then a main flow to `internet` from outside a private subnet, then the main flows not reached from a starting point and the auxiliary flows and associations hanging off them, then `TOO_MANY_ATTACHED`, then a part attached to both CloudFront and a load balancer
 4. the answers in `choose`: `BAD_CHOICE`, `UNKNOWN_HOLE`
 
 When a name is unknown, the connections are not checked. For example, this definition gives five errors:
@@ -464,7 +495,7 @@ Here is a full report for a misspelled name, from `- user -> cloudfrnt -> alb ->
 {
   "versions": {
     "archwire": "0.1.0",
-    "rules": "2026.11.5"
+    "rules": "2026.11.6"
   },
   "derived": [],
   "holes": [],
@@ -479,13 +510,22 @@ Here is a full report for a misspelled name, from `- user -> cloudfrnt -> alb ->
         "apigateway",
         "aurora",
         "cloudfront",
+        "cloudtrail",
         "cloudwatch",
         "cognito",
+        "config",
         "dynamodb",
         "ecs",
+        "eventbridge",
+        "guardduty",
+        "inspector",
         "internet",
         "lambda",
         "s3",
+        "securityhub",
+        "sns",
+        "ssm",
+        "stepfunctions",
         "user",
         "waf"
       ],
