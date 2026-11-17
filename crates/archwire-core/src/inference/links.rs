@@ -155,7 +155,9 @@ fn check_places(rules: &Rules, accepted: &[(&Link, &LinkRule)], errors: &mut Vec
             None => first.push((&l.from.name, place, l)),
             Some((_, seen, earlier)) if *seen != place => {
                 let part = &l.from.name;
-                let split = |to: &Ref| format!("`{}.{} -- {}`", l.from.service, to.name.split_once('.').map_or(to.service.as_str(), |(_, t)| t), to.name);
+                // The part's service with the whole name of the part it is attached to, which differ
+                // between the two connections.
+                let split = |to: &Ref| format!("`{}.{} -- {}`", l.from.service, to.name.replace(['.', '_'], "-"), to.name);
                 let message = format!(
                     "`{part}` is attached to both `{}` and `{}`, which need it in different places; write them as two parts, such as {} and {}",
                     earlier.to.name,

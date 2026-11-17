@@ -638,6 +638,11 @@ mod tests {
         let message = &d.errors[0].message;
         assert!(message.contains(&format!("`{part}` is attached to both `{one}` and `{other}`")), "{message}");
         assert!(message.contains(&format!("`{part}.cloudfront -- cloudfront`")) && message.contains(&format!("`{part}.alb -- alb`")), "{message}");
+        // The definition written with the suggested names passes.
+        let split = src.replacen(&format!("  - {part} -- {one}\n"), &format!("  - {part}.{one} -- {one}\n"), 1).replacen(&format!("  - {part} -- {other}\n"), &format!("  - {part}.{other} -- {other}\n"), 1);
+        assert_ne!(split, src);
+        let (m, d) = run(&split);
+        assert!(m.is_some() && d.exit_code() == 0, "{split}: {:?}", d.errors);
     }
 
     // Fails if one certificate attached to CloudFront and to a load balancer is silently drawn as one.
@@ -658,6 +663,25 @@ mod tests {
     fn the_stop_comes_at_the_second_line_whatever_the_order() {
         stopped_on_both(&web_with("  - acm -- alb\n  - acm -- cloudfront\n"), "acm", "flows[5]", "alb", "cloudfront");
         stopped_on_both(&web_with("  - waf -- alb\n  - waf -- cloudfront\n"), "waf", "flows[5]", "alb", "cloudfront");
+    }
+
+    // Fails if the two names the error suggests for parts attached to named parts are the same
+    // name, or a definition written with them does not pass.
+    #[test]
+    fn the_names_suggested_for_a_split_differ_and_pass() {
+        let base = "flows:\n  - user -> cloudfront.web -> alb.web -> ecs\n";
+        for part in ["acm", "waf"] {
+            let src = format!("{base}  - {part} -- cloudfront.web\n  - {part} -- alb.web\n");
+            let (m, d) = run(&src);
+            assert!(m.is_none(), "{src}");
+            assert_eq!(first(&d), ("UNSUPPORTED", Some("flows[2]"), Some(part)), "{src}");
+            let message = &d.errors[0].message;
+            let (one, other) = (format!("{part}.cloudfront-web"), format!("{part}.alb-web"));
+            assert!(message.contains(&format!("`{one} -- cloudfront.web`")) && message.contains(&format!("`{other} -- alb.web`")), "{message}");
+            let split = format!("{base}  - {one} -- cloudfront.web\n  - {other} -- alb.web\n");
+            let (m, d) = run(&split);
+            assert!(m.is_some() && d.exit_code() == 0, "{split}: {:?}", d.errors);
+        }
     }
 
     // Fails if a load balancer may have two web ACLs.
