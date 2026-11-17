@@ -42,8 +42,8 @@ The other services can be written in either. In a definition with a VPC, a Lambd
 | `user` | Users | | outside the AWS Cloud frame |
 | `internet` | The internet. Only as the target of `->`, see below | | not drawn |
 | `cloudfront` | Amazon CloudFront | | in the AWS Cloud frame, outside the Region |
-| `waf` | AWS WAF. Only as `waf -- cloudfront` | | in the AWS Cloud frame, outside the Region |
-| `acm` | AWS Certificate Manager. Only as `acm -- cloudfront` | | in the AWS Cloud frame, outside the Region |
+| `waf` | AWS WAF. Only as `waf -- cloudfront` or `waf -- alb` | | in the AWS Cloud frame, outside the Region, when attached to `cloudfront`; in the Region, right of the VPC, when attached to `alb` |
+| `acm` | AWS Certificate Manager. Only as `acm -- cloudfront` or `acm -- alb` | | in the AWS Cloud frame, outside the Region, when attached to `cloudfront`; in the Region, right of the VPC, when attached to `alb` |
 | `alb` | Application Load Balancer | | in the VPC, spanning the public subnets |
 | `ecs` | Amazon ECS | `fargate` | in the VPC, in each private subnet |
 | `aurora` | Amazon Aurora | | in the VPC, the writer and readers in the private subnets |
@@ -59,6 +59,8 @@ The Internet Gateway and the NAT gateways are added by archwire and cannot be wr
 A kind is written once or on every mention of the part. `ecs(fargate)` on one line and plain `ecs` on another are the same part, and both get the kind. Two different kinds for one part are the error `CONFLICTING_OPTION`. `fargate` changes the icon's label to Amazon ECS (Fargate). `http` and `rest` change the label of API Gateway to Amazon API Gateway with HTTP API or REST API on the next line. Leaving out the kind of `apigateway` leaves a hole, see [The kind of API Gateway](#the-kind-of-api-gateway).
 
 A certificate used with CloudFront lives in US East (N. Virginia), whatever Region the diagram shows, so archwire draws `acm` outside the Region frame with `us-east-1` on the line under its name, and records the reason with its AWS source.
+
+A certificate attached to a load balancer, `acm -- alb`, is drawn inside the Region frame, because certificates in Certificate Manager are Regional resources; its reason is `alb-certificate-in-load-balancer-region`. A web ACL attached to a load balancer, `waf -- alb`, is drawn inside the Region frame too, because a web ACL is in the same Region as the resources it protects; its reason is `regional-web-acl-in-resource-region`. One part is drawn in one place, so one `acm` or `waf` cannot be attached to both CloudFront and a load balancer, see [Which connections are accepted](#which-connections-are-accepted).
 
 ### Naming parts
 
@@ -87,15 +89,17 @@ set:
 
 This draws two services and two databases behind one load balancer, and is the acceptance case `tests/cases/web-named-ja`. A part drawn once in each zone gets one id per zone. For a part without a name the id is the name, a hyphen and the zone, such as `ecs-1a`; for a named part it is the name, `@` and the zone, such as `ecs.web@1a` and `aurora.admin@1c`. `@` cannot be written in a name, so these ids cannot collide with another part's id. A route hole puts a named part in square brackets, such as `route.ecs.[s3.web]` or `route.[lambda.api].s3`; see [choose](#choose). The hole for the kind of a named API Gateway has no brackets: `apigateway.public` gives `kind.apigateway.public`.
 
-A VPC holds one part that spans the Availability Zones, the load balancer. A second one stops with `UNSUPPORTED` at its first mention. For example,
+A VPC can hold more than one load balancer, each with a name:
 
 ```yaml
 flows:
-  - user -> cloudfront -> alb.web -> ecs.web
-  - user -> alb.admin -> ecs.admin
+  - user -> cloudfront -> alb.web -> ecs.web -> aurora.web
+  - user -> alb.admin -> ecs.admin -> aurora.admin
+set:
+  lang: ja
 ```
 
-gives `at` `flows[1][1]`, `got` `alb.admin` and the message ``"`alb.admin` is a second part spanning the Availability Zones, after `alb.web`; this version draws one such part in a VPC"``. This check runs before every other check on connections and settings, and is then the only error reported.
+This draws two load balancers, each with its own service and database, and is the acceptance case `tests/cases/web-two-albs-ja`. Where the load balancers go is described under [How the parts are laid out with a VPC](#how-the-parts-are-laid-out-with-a-vpc).
 
 The name after the dot is made of `a-z`, `0-9` and `-`. It may not start or end with `-`, and a part has at most one dot. It is at most 24 characters long; a longer one is the error `NAME_TOO_LONG`, for example `lambda.resize-images-for-the-web` in `- user -> apigateway(http) -> lambda.resize-images-for-the-web` gives `at` `flows[0][2]` and `got` `resize-images-for-the-web`. `--` is always read as the association symbol, even inside a name, so `s3.foo--bar` is read as `s3.foo -- bar`; in `- user -> cloudfront -> s3.foo--bar` that gives `UNKNOWN_SERVICE` for `bar` at `flows[0][3]`. Write the kind after the name: `apigateway.public(http)`.
 
@@ -115,6 +119,8 @@ The accepted connections are listed pair by pair in `rules/aws/links.toml`, and 
 | `cloudfront` | `~>` | `cloudwatch` | Logs and metrics |
 | `waf` | `--` | `cloudfront` | Web ACL |
 | `acm` | `--` | `cloudfront` | Certificate |
+| `acm` | `--` | `alb` | Certificate |
+| `waf` | `--` | `alb` | Web ACL |
 | `apigateway` | `->` | `lambda` | Invoke |
 | `apigateway` | `~>` | `cloudwatch` | Logs and metrics |
 | `cognito` | `--` | `apigateway` | JWT authorizer for `http`, Cognito authorizer for `rest`, Verify tokens while the kind is undecided |
@@ -148,7 +154,9 @@ Besides the list, archwire checks the following, and stops with `UNSUPPORTED` wh
 - The source of an auxiliary flow and the target of an association are on a main flow reached from `user`.
 - A main flow to `internet` comes from a part in a private subnet of the VPC: ECS, Aurora, or a function attached to the VPC.
 
-One CloudFront distribution takes one WAF. With `- user -> cloudfront -> s3`, `- waf.front -- cloudfront` and `- waf.extra -- cloudfront`, the third line stops with `TOO_MANY_ATTACHED`, `got` `waf.extra`, and `rule` `one-web-acl-per-resource`; the reason is in [docs/rules.md](rules.md). One WAF attached to two distributions is accepted.
+One CloudFront distribution or one load balancer takes one WAF. With `- user -> cloudfront -> s3`, `- waf.front -- cloudfront` and `- waf.extra -- cloudfront`, the third line stops with `TOO_MANY_ATTACHED`, `got` `waf.extra`, and `rule` `one-web-acl-per-resource`; the reason is in [docs/rules.md](rules.md). `- user -> alb -> ecs`, `- waf.a -- alb` and `- waf.b -- alb` stop the same way, at `flows[2]` with `got` `waf.b`. One WAF attached to two distributions is accepted, and so is one WAF attached to two load balancers, such as `- waf -- alb.web` and `- waf -- alb.admin`.
+
+A certificate or web ACL attached to CloudFront is drawn outside the Region frame, and one attached to a load balancer inside it, so one part cannot be attached to both. With `- user -> cloudfront -> alb -> ecs`, `- acm -- cloudfront` and `- acm -- alb`, the third line stops with `UNSUPPORTED`, `at` `flows[2]`, `got` `acm`, and the message ``"`acm` is attached to both `cloudfront` and `alb`, which need it in different places; write them as two parts, such as `acm.cloudfront -- cloudfront` and `acm.alb -- alb`"``. `waf` attached to both stops the same way. The message names the two parts after what they are attached to; for a named part it uses the whole name with the dot written as `-`, so `acm -- cloudfront.web` with `acm -- alb.web` suggests `acm.cloudfront-web -- cloudfront.web` and `acm.alb-web -- alb.web`. Any two names will do.
 
 For example, each of these stops with `UNSUPPORTED`:
 
@@ -159,13 +167,13 @@ For example, each of these stops with `UNSUPPORTED`:
 | `- user -> cloudfront -> ecs` | `flows[0]` | ``"`cloudfront -> ecs` is not a supported connection"`` |
 | `- user -> alb -> ecs -> aurora` and `- alb -> aurora` | `flows[1]` | ``"`alb -> aurora` is not a supported connection"`` |
 | `- user -> cloudfront -> alb -> ecs` and `- cloudfront -> cloudwatch` | `flows[1]` | ``"`cloudfront -> cloudwatch` is not a supported connection"`` |
-| `- user -> cloudfront -> alb -> ecs` and `- acm -- alb` | `flows[1]` | ``"`acm -- alb` is not a supported connection"`` |
+| `- user -> cloudfront -> alb -> ecs` and `- alb -- acm` | `flows[1]` | ``"`alb -- acm` is not a supported connection"`` |
 | `- lambda -> dynamodb` alone | `flows[0]` | ``"`lambda -> dynamodb` is not reached by main flows (->) from `user`"`` |
 | `- user -> alb -> ecs` and `- aurora -> s3` | `flows[1]` | ``"`aurora -> s3` is not reached by main flows (->) from `user`"`` |
 | `- user -> cloudfront -> s3` and `- cognito -- apigateway` | `flows[1]` | ``"`cognito -- apigateway` needs `apigateway` on a main flow (->) from `user`"`` |
 | `- user -> apigateway(http) -> lambda -> internet` | `flows[0]` | ``"`lambda -> internet` needs `lambda` in a VPC; connect it to a part in a private subnet"`` |
 
-`waf -- alb` stops the same way as `acm -- alb`. So do `user -> aurora`, `alb -> s3`, `user ~> alb`, `internet -> alb`, `ecs -> user` and `waf -> alb` in a definition with a VPC. The auxiliary flows `cloudfront ~> s3` and `cloudfront ~> cloudwatch` are accepted in every definition, and so is `- user -> alb` alone.
+`alb -- waf` stops the same way as `alb -- acm`: write the attached part first. So do `user -> aurora`, `alb -> s3`, `user ~> alb`, `internet -> alb`, `ecs -> user` and `waf -> alb` in a definition with a VPC. The auxiliary flows `cloudfront ~> s3` and `cloudfront ~> cloudwatch` are accepted in every definition, and so is `- user -> alb` alone.
 
 A main flow from a part in a private subnet to a part in the Region outside the VPC leaves a hole for its route, see [choose](#choose). With the list above that is `ecs` to `s3`, `dynamodb` or `cloudwatch`, `aurora` to `s3` or `cloudwatch`, and a function attached to the VPC to `s3` or `dynamodb`.
 
@@ -212,7 +220,20 @@ The inside of the VPC is the same in both directions. The Availability Zones sta
 
 The Internet Gateway sits inside the VPC on the side where the traffic comes in: the top side in a top-to-bottom diagram, the left side in a left-to-right one. A part that sends a main flow to the Internet Gateway, such as CloudFront, is lined up with it, so CloudFront, the Internet Gateway and the load balancer stand on one straight line, and a line from CloudFront to S3 bends on its way.
 
-The load balancer spans the zones. With two zones it sits in the public tier on the border between them, level with the NAT gateways in a top-to-bottom diagram. With three zones it sits above the zone frames.
+The load balancer spans the zones. With two zones it sits in the public tier on the border between them, level with the NAT gateways in a top-to-bottom diagram. With three zones it sits above the zone frames. Two or more load balancers stand in one row above the zone frames, with two zones or three and in both directions, in the order the definition first mentions them. The line from the Internet Gateway goes straight to the first one; the lines to the others leave the Internet Gateway at separate points on the side facing the flow (the bottom side in a top-to-bottom diagram, the right side in a left-to-right one) and enter each load balancer from the top.
+
+Certificate Manager and WAF attached to a load balancer stand one under the other to the right of the VPC, inside the Region frame, in both directions. Their dashed lines leave the load balancer from its right side, or from its bottom side when another part stands to its right in the same row. This definition and its expected output are the acceptance case `tests/cases/web-alb-attach-en`:
+
+```yaml
+flows:
+  - user -> cloudfront -> alb -> ecs(fargate) -> aurora
+  - cloudfront -> s3
+  - ecs -> internet
+  - ecs ~> cloudwatch
+  - acm.cdn -- cloudfront
+  - acm.alb -- alb
+  - waf -- alb
+```
 
 A line's label says which zones it stands for. With two zones, archwire draws the lines between parts in different zones. With three zones it draws no line between copies of two different services in different zones: the line inside the target's zone stands for the lines from every zone into the same part, and a note in the report says so. Two kinds of line still cross zones: the replication line from Aurora's writer to each reader, and a line from another zone when the target's zone has no sender, described below. A label ends with "(all AZs)" when the sender has a copy in every zone, and names the zones otherwise. For example, with `azs: 3` and `readers: 1`, Aurora has a copy in two zones only, and `aurora ~> cloudwatch` is labelled "Logs and metrics (from 1a, 1c)". When a target in one zone has no sender in the same zone, the line comes from a sender in another zone, and a note names it. With the same settings, `aurora -> ecs` gives the note "In ap-northeast-1d, ecs-1d has no aurora in its own zone, so the line from aurora-1a in another zone is drawn."
 
@@ -401,7 +422,7 @@ When a definition has errors, `compile` writes no diagram, removes a diagram lef
 | `UNKNOWN_SETTING` | a key that is not a setting | `colour: red` gives `at` `set.colour`, `allowed` lists the six keys; without a VPC, `azs: 3` gives `at` `set.azs`, `allowed` `direction`, `lang` and `region` | No. `set` can change only the value; delete the line in the file |
 | `BAD_CHOICE` | an answer that is not one of the hole's choices | `route.ecs.s3: tunnel` gives `at` `choose.route.ecs.s3`, `allowed` `endpoint` and `nat`; `kind.apigateway: websocket` gives `allowed` `http` and `rest` | Yes, with a value from `allowed` |
 | `UNKNOWN_HOLE` | an answer for a hole that does not exist | `route.ecs.rds: nat` gives `at` `choose.route.ecs.rds`; so does `kind.apigateway: http` when the definition already says `apigateway(http)` | No. `set` can change only the value; delete the line in the file, and answer a hole from `allowed` with `archwire set <definition> choose.<hole> <value>` |
-| `UNSUPPORTED` | a connection or shape this version does not draw | `- user -> s3` gives `at` `flows[0]`; `- user -> alb.a -> ecs` and `- user -> alb.b -> ecs` give `at` `flows[1][1]`; more under [Which connections are accepted](#which-connections-are-accepted) | Sometimes. `at` is a flow line (`flows[i]`), a part (`flows[i][j]`) or `flows`; change a part with `flows[i][j]`, or edit or remove the line in the file |
+| `UNSUPPORTED` | a connection or shape this version does not draw | `- user -> s3` gives `at` `flows[0]`; `- acm -- cloudfront` and `- acm -- alb` after `- user -> cloudfront -> alb -> ecs` give `at` `flows[2]`, `got` `acm`; more under [Which connections are accepted](#which-connections-are-accepted) | Sometimes. `at` is a flow line (`flows[i]`) or `flows`; change a part with `flows[i][j]`, or edit or remove the line in the file |
 | `TOO_MANY_ATTACHED` | more parts attached to one part than AWS allows | `- user -> cloudfront -> s3`, `- waf.front -- cloudfront` and `- waf.extra -- cloudfront` give `at` `flows[2]`, `got` `waf.extra`, `rule` `one-web-acl-per-resource` | No. Remove the extra line in the file |
 | `LAYOUT_FAILED` | archwire could not lay out the definition; the message names the parts or lines involved | 34 named services behind one load balancer with `azs: 3`, see [Services behind one load balancer](#services-behind-one-load-balancer) | No. Write fewer parts, or report the definition. Fewer parts is a way around a limit of the layout, not a limit of AWS |
 | `BAD_PATH` | the place given to `set` does not exist | `archwire set web.yaml 'flows[9][0]' x`, on a file with fewer flow lines | Run `set` again with an existing place |
@@ -413,11 +434,11 @@ The reports that `set` prints (for `BAD_PATH`, `BAD_VALUE`, `CANNOT_READ` and `C
 
 ### The order of errors
 
-The errors come in the order of the checks. Within a check on the flows, they come in the order of the lines. Keys that are not settings, and the answers in `choose`, are checked in the alphabetical order of their keys, whatever order they are written in: `choose` with `z.hole` and then `a.hole` gives `UNKNOWN_HOLE` at `choose.a.hole` first. A file that cannot be read as a definition gives only its reading errors (`EMPTY_DEFINITION`, `BAD_SYNTAX`, `UNKNOWN_SECTION`, `NAME_TOO_LONG`, `SELF_LINK`, `CONFLICTING_OPTION`, `CONFLICTING_RELATION`, `DUPLICATE_KEY`). A definition with a VPC that writes more than one part spanning the zones gives only those `UNSUPPORTED` errors, one for each such part after the first: `alb.a`, `alb.b` and `alb.c` give two, at the first mentions of `alb.b` and `alb.c`. Otherwise the checks run in this order:
+The errors come in the order of the checks. Within a check on the flows, they come in the order of the lines. Keys that are not settings, and the answers in `choose`, are checked in the alphabetical order of their keys, whatever order they are written in: `choose` with `z.hole` and then `a.hole` gives `UNKNOWN_HOLE` at `choose.a.hole` first. A file that cannot be read as a definition gives only its reading errors (`EMPTY_DEFINITION`, `BAD_SYNTAX`, `UNKNOWN_SECTION`, `NAME_TOO_LONG`, `SELF_LINK`, `CONFLICTING_OPTION`, `CONFLICTING_RELATION`, `DUPLICATE_KEY`). Otherwise the checks run in this order:
 
 1. names: `UNKNOWN_SERVICE`, `UNKNOWN_OPTION`
 2. settings, by key in the order `azs`, `region`, `lang`, `direction`, `nat`, `readers`, then the keys that are not settings
-3. connections: those not in the list, then a main flow to `internet` from outside a private subnet, then the main flows not reached from `user` and the auxiliary flows and associations hanging off them, then `TOO_MANY_ATTACHED`
+3. connections: those not in the list, then a main flow to `internet` from outside a private subnet, then the main flows not reached from `user` and the auxiliary flows and associations hanging off them, then `TOO_MANY_ATTACHED`, then a part attached to both CloudFront and a load balancer
 4. the answers in `choose`: `BAD_CHOICE`, `UNKNOWN_HOLE`
 
 When a name is unknown, the connections are not checked. For example, this definition gives five errors:
@@ -443,7 +464,7 @@ Here is a full report for a misspelled name, from `- user -> cloudfrnt -> alb ->
 {
   "versions": {
     "archwire": "0.1.0",
-    "rules": "2026.11.4"
+    "rules": "2026.11.5"
   },
   "derived": [],
   "holes": [],

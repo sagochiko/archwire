@@ -37,7 +37,7 @@ These fields decide more of what happens to a part:
 | `to_kind.<kind>` | for each kind of `to`, the `label` used instead of `label`, and the `rule` whose reason is given to `to`. While the kind of `to` is a hole, the line keeps `label` |
 | `to_role.<role>` | for each role of the `to` part (`writer`, `reader`), the label used instead of `label` |
 | `max_from`, `max_rule` | how many `from` parts one `to` part may have, and the rule that says why. More is `TOO_MANY_ATTACHED` |
-| `from_region`, `from_rule` | the Region the `from` part is drawn in, and the rule that says why |
+| `from_region`, `from_scope`, `from_rule` | the Region the `from` part is drawn in, or the scope (`regional` or `global`) it takes instead of its service's `scope`, and the rule that says why. `from_rule` is written with one of the other two |
 | `from_subnet`, `from_subnet_rule`, `from_copies_rule` | the subnet tier of the VPC the `from` part is drawn in, one copy per Availability Zone; the rule that says why it is in the VPC, and the rule that says why there is one copy per zone. The three are written together |
 
 For example, the entry for Cognito and API Gateway, and the one that puts a Lambda function connected to Aurora into the VPC:
@@ -63,7 +63,7 @@ from_subnet_rule = "function-attaches-to-resource-vpc"
 from_copies_rule = "attached-function-per-az"
 ```
 
-A part is placed by `from_subnet` when any of its accepted connections has it, whatever the order of the lines.
+A part is placed by `from_subnet` when any of its accepted connections has it, whatever the order of the lines. Otherwise `from_scope` places it, and then its service's `scope`. `acm -- alb` and `waf -- alb` carry `from_scope = "regional"`, so a certificate or web ACL attached to a load balancer is drawn in the Region, while `acm` and `waf` are `global` services. When the connections of one part would place it in two different scopes or Regions, such as `acm -- cloudfront` and `acm -- alb`, `compile` stops with `UNSUPPORTED` at the second of the two lines.
 
 The same file lists, as `[[derived_link]]`, the lines archwire adds between parts by their roles. A role is `private` (a part in a private subnet), `egress_nat` (the NAT gateway), `entry_gateway` (the Internet Gateway), `writer` or `reader` (Aurora's writer and readers). Each entry has `from`, `to`, `rel` and `label`, one per pair of roles: today `private` to `egress_nat` and `egress_nat` to `entry_gateway` as main flows labelled Outbound, and `writer` to `reader` as an auxiliary flow labelled Replication.
 
@@ -71,7 +71,7 @@ The same file lists, as `[[derived_link]]`, the lines archwire adds between part
 
 A rule's `kind` is `constraint` or `default`, and the difference is the point of the file.
 
-A constraint states something AWS requires or does, and it must have a `source`, the URL of the AWS documentation page that says so. A constraint without a source is rejected when the rules are loaded. A reason claims no more than its source says; where the reason also says how archwire draws the fact, that part is written as archwire's choice. The eleven constraints today are the following.
+A constraint states something AWS requires or does, and it must have a `source`, the URL of the AWS documentation page that says so. A constraint without a source is rejected when the rules are loaded. A reason claims no more than its source says; where the reason also says how archwire draws the fact, that part is written as archwire's choice. The thirteen constraints today are the following.
 
 | Rule | What it says |
 |---|---|
@@ -81,7 +81,9 @@ A constraint states something AWS requires or does, and it must have a `source`,
 | `internet-facing-alb-in-vpc-with-igw` | an internet-facing Application Load Balancer can only use a VPC that has an Internet Gateway |
 | `private-egress-through-nat` | resources in a private subnet can connect to the internet through a NAT device in a public subnet, which replaces their source IPv4 addresses with its own |
 | `cognito-user-pool-in-one-region` | an Amazon Cognito user pool is created in one AWS Region; archwire draws it inside the Region frame |
-| `one-web-acl-per-resource` | a resource can be associated with only one web ACL, and one web ACL can be associated with more than one CloudFront distribution; archwire stops a definition that attaches two WAFs to one CloudFront |
+| `alb-certificate-in-load-balancer-region` | certificates in Certificate Manager are Regional resources: to use a certificate with Elastic Load Balancing in more than one Region, one is requested or imported for each Region, and a certificate cannot be copied between Regions; archwire draws the certificate attached to an Application Load Balancer inside the Region frame |
+| `regional-web-acl-in-resource-region` | a web ACL and the AWS WAF resources it uses are in the same Region as the resources it protects, and an Application Load Balancer is one of the Regional resources AWS WAF can protect; archwire draws the web ACL attached to an Application Load Balancer inside the Region frame |
+| `one-web-acl-per-resource` | one web ACL can be associated with one or more resources, but each resource can be associated with only one web ACL; archwire stops a definition that attaches two WAFs to one CloudFront distribution or one load balancer, and accepts one WAF attached to several |
 | `function-attaches-to-resource-vpc` | a Lambda function can be given access to resources in a VPC by attaching it to the VPC through the private subnets that contain the resources; archwire draws a function that connects to a part in a VPC in that VPC's private subnets |
 | `attached-function-internet-through-nat` | a function attached to a VPC can reach only resources in that VPC unless the VPC has internet access, and a private subnet can reach the internet for IPv4 through a NAT gateway; archwire adds a NAT gateway in a public subnet for the attached function's internet access over IPv4 |
 | `aurora-cluster-in-vpc` | an Amazon Aurora DB cluster can be created only in a VPC |
@@ -117,7 +119,8 @@ The rules are checked when archwire starts. The built-in rules are valid, so a u
 | `LINK_KIND_AND_ROLE` | a link has both `to_kind` and `to_role` |
 | `LINK_UNKNOWN_RULE` | a `to_kind` `rule`, `max_rule`, `from_rule`, `from_subnet_rule` or `from_copies_rule` is not in `rules.toml` |
 | `LINK_DUPLICATE` | two links have the same `from`, `to` and `rel` |
-| `LINK_BAD_LIMIT` | a link has only one of `max_from` and `max_rule`, or only one of `from_region` and `from_rule`, or some but not all of `from_subnet`, `from_subnet_rule` and `from_copies_rule` |
+| `LINK_BAD_LIMIT` | a link has only one of `max_from` and `max_rule`, or `from_region` or `from_scope` without `from_rule`, or `from_rule` without either, or some but not all of `from_subnet`, `from_subnet_rule` and `from_copies_rule` |
+| `LINK_BAD_SCOPE` | a link's `from_scope` is not `regional` or `global`, or is written together with `from_subnet` |
 | `LINK_SUBNET_WITHOUT_VPC` | a link has `from_subnet`, but its `to` is not a VPC service |
 | `DERIVED_LINK_BAD_ROLE` | a `[[derived_link]]` names a role that is not one of the five above |
 | `DERIVED_LINK_DUPLICATE` | two `[[derived_link]]` entries have the same pair of roles |
