@@ -245,7 +245,7 @@ pub(crate) const API_CASES: [(&str, &str); 7] = [
 
 /// A named function next to a part named like the zone copy of another function.
 pub(crate) const ID_CLASH: &str = "flows:\n  - user -> apigateway(http) -> lambda.api -> aurora\n  - apigateway -> lambda.api-1a -> dynamodb\n";
-/// Two web stacks of named VPC parts.
+/// Two web stacks of named VPC parts, each behind a load balancer of its own.
 pub(crate) const TWO_WEBS: &str = "flows:\n  - user -> cloudfront -> alb.web -> ecs.web -> aurora.web\n  - user -> alb.admin -> ecs.admin -> aurora.admin\n";
 /// Two named services behind one unnamed load balancer.
 pub(crate) const TWIN_APPS: &str = "flows:\n  - user -> cloudfront -> alb -> ecs.web -> aurora.web\n  - alb -> ecs.admin -> aurora.admin\n";
@@ -292,7 +292,7 @@ mod tests {
             ("generated_with_a_vpc", generated_with_a_vpc()),
             ("API_CASES", API_CASES.iter().map(|(_, s)| s.to_string()).collect()),
             ("generated", generated()),
-            ("stops", vec![ID_CLASH.to_string(), TWO_WEBS.to_string(), TWIN_APPS.to_string(), LOAD_BALANCER_ALONE.to_string()]),
+            ("named and small shapes", vec![ID_CLASH.to_string(), TWO_WEBS.to_string(), TWIN_APPS.to_string(), LOAD_BALANCER_ALONE.to_string()]),
             ("ONE_FUNCTION_THREE_WAYS", ONE_FUNCTION_THREE_WAYS.iter().map(|s| s.to_string()).collect()),
             ("MIX", vec![MIX_SMALLEST.to_string(), MIX_NAT.to_string(), MIX_WEB.to_string(), MIX_LOGS.to_string()]),
         ];
