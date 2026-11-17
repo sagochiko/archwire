@@ -3,7 +3,6 @@ pub mod def;
 pub mod diag;
 pub mod drawio;
 pub mod edit;
-pub mod engine;
 pub mod inference;
 pub mod layout;
 pub mod model;
@@ -45,15 +44,7 @@ pub fn compile(def_text: &str) -> Output {
         Ok(d) => d,
         Err(errors) => return stop(errors),
     };
-    // One shape is not drawn yet and stops before the inference: a definition with a VPC that
-    // writes two or more parts spanning its zones. Every other definition, with a VPC or without,
-    // goes through the one inference.
-    let vpc = def.links.iter().flat_map(|l| [&l.from, &l.to]).any(|r| rules.service(&r.service).is_some_and(|s| s.scope == rules::Scope::Vpc));
-    if vpc {
-        if let Err(errors) = engine::spanning_parts(&def, &rules) {
-            return stop(errors);
-        }
-    }
+    // Every definition, with a VPC or without, goes through the one inference.
     let (model, diagnostics) = inference::infer(&def, &rules);
     let Some(model) = model else {
         return Output { drawio: None, diagnostics };
@@ -509,12 +500,72 @@ mod tests {
         assert_eq!(x.matches("<object id=\"lambda.api-1a\"").count(), 1);
     }
 
-    // Fails if a second part spanning the zones is let through, so a broken diagram or LAYOUT_FAILED comes out.
+    /// A definition drawn in full: exit code 0, a diagram, and no note naming a line.
+    fn drawn_cleanly(src: &str) -> String {
+        let out = compile(src);
+        assert_eq!(out.diagnostics.exit_code(), 0, "{src}: {:?}", out.diagnostics.errors);
+        assert!(out.diagnostics.notes.iter().all(|n| !n.contains("edge-")), "{src}: {:?}", out.diagnostics.notes);
+        out.drawio.unwrap_or_else(|| panic!("no diagram for {src}"))
+    }
+
+    /// `src` with its direction and zones set, in every combination drawn.
+    fn every_shape(src: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for direction in ["down", "right"] {
+            for azs in [2, 3] {
+                out.push(format!("{src}set:\n  direction: {direction}\n  azs: {azs}\n"));
+            }
+        }
+        out
+    }
+
+    // Fails if a definition with two named load balancers is stopped, or a line joins a part behind
+    // one load balancer to a part behind the other, in either direction with two or three zones.
     #[test]
-    fn two_spanning_parts_stop() {
-        assert_eq!(stops(TWO_WEBS), [unsupported("flows[1][1]", Some("alb.admin"))]);
-        let e = &compile(TWO_WEBS).diagnostics.errors[0];
-        assert_eq!(e.message, "`alb.admin` is a second part spanning the Availability Zones, after `alb.web`; this version draws one such part in a VPC");
+    fn balancers_are_drawn() {
+        for src in every_shape(TWO_WEBS) {
+            let x = drawn_cleanly(&src);
+            object(&x, "alb.web");
+            object(&x, "alb.admin");
+            for (from, to) in [("web", "admin"), ("admin", "web")] {
+                let wrong = format!("id=\"edge-aurora.{from}@");
+                let joined = x.lines().filter(|l| l.contains(&wrong) && l.contains(&format!("-to-aurora.{to}@"))).count();
+                assert_eq!(joined, 0, "{src}: a line joins aurora.{from} to aurora.{to}");
+            }
+        }
+    }
+
+    // Fails if a third load balancer runs out of places beside the others, in either direction
+    // with two or three zones.
+    #[test]
+    fn three_balancers_are_drawn() {
+        let three = "flows:\n  - user -> cloudfront -> alb.a -> ecs.a\n  - user -> alb.b -> ecs.b\n  - user -> alb.c -> ecs.c\n";
+        for src in every_shape(three) {
+            let x = drawn_cleanly(&src);
+            for alb in ["alb.a", "alb.b", "alb.c"] {
+                object(&x, alb);
+            }
+        }
+    }
+
+    // Fails if the number of load balancers is still checked, or the way the lines are written
+    // decides whether a definition with several of them is drawn.
+    #[test]
+    fn balancers_written_in_any_way_are_drawn() {
+        let drawn = [
+            "flows:\n  - user -> alb.a -> ecs\n  - user -> alb.b -> ecs\n  - user -> alb.c -> ecs\n",
+            "flows:\n  - user -> alb -> ecs\n  - user -> alb.admin -> ecs.admin\n",
+            "flows:\n  - user -> alb.a -> ecs.a\n  - user -> alb.b -> ecs.b\n  - alb.b -> ecs.c\n",
+            "flows:\n  - user -> alb.a -> ecs\n  - alb.b ~> cloudwatch\n  - user -> alb.b -> ecs\n",
+            "flows:\n  - user -> alb.a -> ecs.a\n  - alb.a -> ecs.b\n",
+        ];
+        for src in drawn {
+            drawn_cleanly(src);
+        }
+        let attached = "flows:\n  - user -> alb.a -> ecs\n  - waf -- alb.b\n  - user -> alb.b -> ecs\n";
+        assert_eq!(stops(attached), [unsupported("flows[1]", Some("waf -- alb.b"))]);
+        let misspelt = "flows:\n  - user -> alb.a -> ecs\n  - user -> albb.b -> ecs\n";
+        assert_eq!(stops(misspelt), [("UNKNOWN_SERVICE".to_string(), Some("flows[1][1]".to_string()), Some("albb".to_string()))]);
     }
 
     // Fails if named VPC parts are still stopped, a database loses its replication line, or a line

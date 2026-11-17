@@ -147,10 +147,16 @@ enum Kind {
     /// between the zones, up to a track of the band above the private tier, along it, and up
     /// into the copy.
     NatAcross,
+    /// From the entry gateway to a part spanning the zones beside the first one, which the entry
+    /// gateway's straight line goes to: running down, out of the entry gateway's side facing it,
+    /// one corner, into its top; running right, out of the entry gateway's top, along a track of
+    /// the band above, into its top.
+    Beside,
 }
 
-/// A band kept for lines: above the zones for the NAT gateways' lines when lines run right, above
-/// the private tier, and below each private row.
+/// A band kept for lines: above the zones for the NAT gateways' lines and the entry gateway's
+/// lines to the parts spanning the zones beside the first when lines run right, above the private
+/// tier, and below each private row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Band {
     Nat,
@@ -381,8 +387,9 @@ impl<'a> Grid<'a> {
             names_right = names_right.max(SUB_INSET + frame_w(FrameKind::PrivateSubnet, rules.text("private_subnet", model.lang)));
         }
         let entry_half = groups.iter().filter(|g| g.place == Place::Entry).map(|g| g.half).max().unwrap_or(ICON / 2);
-        // With two zones, the parts spanning them sit on the boundary between the zones.
-        let boundary = model.azs.len() == 2;
+        // With two zones, one part spanning them sits on the boundary between the zones; two or
+        // more take the row above the zones, as with three zones.
+        let boundary = model.azs.len() == 2 && groups.iter().filter(|g| g.place == Place::Span).count() == 1;
         let mut g = Grid { model, rules, axis, boundary, groups, group_of, public, private, rows, col_half, names_right, entry_half, reps: Vec::new() };
         g.reps = g.drawn_inside();
         g
@@ -402,6 +409,12 @@ impl<'a> Grid<'a> {
     }
     fn spans(&self) -> impl Iterator<Item = &Group> {
         self.groups.iter().filter(|g| g.place == Place::Span)
+    }
+    /// Whether the parts spanning the zones stand over one zone's columns and move with them: with
+    /// an odd number of zones over the middle one, and with two or more of them over the zone right
+    /// of the middle; else the one part sits on the boundary between the zones.
+    fn over_a_zone(&self) -> bool {
+        self.zones() % 2 == 1 || self.spans().count() > 1
     }
     /// Whether the parts spanning the zones get a row of their own above them.
     fn above(&self) -> bool {
@@ -429,13 +442,22 @@ impl<'a> Grid<'a> {
     fn across(&self, extra: i32, gap: i32, shift: i32) -> Across {
         let n = self.zones() as i32;
         let pubs_g: Vec<&Group> = self.groups.iter().filter(|g| g.place == Place::Public).collect();
-        let span_half = self.spans().map(|g| g.half).max().unwrap_or(0);
+        let span_g: Vec<&Group> = self.spans().collect();
+        // How far right of the first one each part spanning the zones sits.
+        let mut span_off = Vec::new();
+        for (k, s) in span_g.iter().enumerate() {
+            span_off.push(if k == 0 { 0 } else { span_off[k - 1] + COL_MIN.max(span_g[k - 1].half + s.half + NAME_ROOM) });
+        }
+        // A public part keeps as far right of every part spanning the zones as of the zone's first
+        // column, those parts taken as standing from that column on: its line up to the entry
+        // gateway passes them.
+        let clear_of_spans = span_g.iter().zip(&span_off).map(|(g, off)| off + NAT_SHIFT.max(g.half + ROOM + 1)).max().unwrap_or(0);
         let c0_half = self.col_half.first().copied().unwrap_or(ICON / 2);
         let col0 = (SUB_INSET + PAD + c0_half).max(self.names_right + ROOM + 1) + shift;
         let mut pubs: Vec<i32> = Vec::new();
         for (k, p) in pubs_g.iter().enumerate() {
             let at = match k {
-                0 => col0 + NAT_SHIFT.max(p.half + ROOM + 1).max(if span_half > 0 { span_half + ROOM + 1 } else { 0 }),
+                0 => col0 + NAT_SHIFT.max(p.half + ROOM + 1).max(clear_of_spans),
                 _ => pubs[k - 1] + COL_MIN.max(pubs_g[k - 1].half + p.half + NAME_ROOM),
             };
             pubs.push(at);
@@ -457,17 +479,19 @@ impl<'a> Grid<'a> {
             .chain(pubs.iter().zip(&pubs_g).map(|(c, p)| c + p.half))
             .max()
             .unwrap_or(col0 + ICON / 2);
-        let w = (right + PAD + SUB_INSET).max(self.names_right + PAD) + extra;
+        // Two or more parts spanning the zones stand in a row over the zone they start over,
+        // which holds them all.
+        let span_room = match (span_g.last(), span_off.last()) {
+            (Some(g), Some(off)) if span_g.len() > 1 => col0 + off + g.half + PAD + SUB_INSET,
+            _ => 0,
+        };
+        let w = (right + PAD + SUB_INSET).max(self.names_right + PAD).max(span_room) + extra;
         let has_entry = self.groups.iter().any(|g| g.place == Place::Entry);
         let left = if self.axis == Axis::Right && has_entry { FRAME_ROOM + 2 * self.entry_half + IGW_GAP } else { VPC_SIDE };
         let mut a = Across { left, w, gap, cols, pubs, spans: Vec::new(), entry: 0, vpc_w: 0, extra, shift };
         let zones_end = a.az_x(n as usize - 1) + w;
-        let base = if n % 2 == 0 { a.az_x(n as usize / 2) - gap / 2 } else { a.az_x(n as usize / 2) + a.cols[0] };
-        let span_g: Vec<&Group> = self.spans().collect();
-        for (k, s) in span_g.iter().enumerate() {
-            let at = if k == 0 { base } else { a.spans[k - 1] + COL_MIN.max(span_g[k - 1].half + s.half + NAME_ROOM) };
-            a.spans.push(at);
-        }
+        let base = if self.over_a_zone() { a.az_x(n as usize / 2) + a.cols[0] } else { a.az_x(n as usize / 2) - gap / 2 };
+        a.spans = span_off.iter().map(|off| base + off).collect();
         a.entry = match (self.axis, a.spans.first()) {
             (Axis::Right, _) => FRAME_ROOM + self.entry_half,
             (Axis::Down, Some(&s)) => s,
@@ -533,10 +557,19 @@ impl<'a> Grid<'a> {
                     r.drawn = self.reps.contains(&edge);
                     let same_col = self.az(f) == self.az(t) && self.group(f).col == self.group(t).col;
                     match (x, y) {
-                        (Place::Entry, Place::Span) => {
+                        // The entry gateway stands in line with the first part spanning the zones, in
+                        // the order the definition first names them; the others sit right of it.
+                        (Place::Entry, Place::Span) if self.group(t).col == 0 => {
                             (r.exit, r.entry) = if self.axis == Axis::Down { (Side::Bottom, Side::Top) } else { (Side::Right, Side::Left) };
                             r.kind = Kind::Direct;
                             r.pin = Some(50);
+                        }
+                        (Place::Entry, Place::Span) => {
+                            r.kind = Kind::Beside;
+                            (r.exit, r.entry) = if self.axis == Axis::Down { (side_to(f, t).0, Side::Top) } else { (Side::Top, Side::Top) };
+                            if self.axis == Axis::Right {
+                                r.band = Some(Band::Nat);
+                            }
                         }
                         (Place::Span, Place::Private) if self.cx(a, f) == self.cx(a, t) => {
                             r.kind = Kind::Direct;
@@ -617,7 +650,8 @@ impl<'a> Grid<'a> {
                     if x == Place::Private && r.drawn && self.blocked(f) {
                         (r.kind, r.exit, r.band) = (Kind::OutTrack, Side::Bottom, Some(Band::Below(self.group(f).row)));
                     }
-                    if x == Place::Span && self.shares_row() && self.public_right_of(a, f) {
+                    let span_right = self.private && self.spans().any(|g| a.spans[g.col] > self.cx(a, f));
+                    if x == Place::Span && (span_right || self.shares_row() && self.public_right_of(a, f)) {
                         (r.kind, r.exit, r.band) = (Kind::OutFan, Side::Bottom, Some(Band::Fan));
                     }
                 }
@@ -772,7 +806,10 @@ impl<'a> Grid<'a> {
             (Kind::InTrack, _) => -1_000_000,
             (Kind::OutTrack | Kind::OutFan, _) => 1_000_000,
             (Kind::NatIn, _) if at_exit => -1_000_000,
+            // Lines from the entry gateway's side toward parts further away keep further out on
+            // it, so none crosses another on the way.
             (Kind::NatOut, _) if !at_exit => -((self.cx(a, r.from) - self.cx(a, r.to)).abs() as i64),
+            (Kind::Beside, _) if at_exit => -((self.cx(a, r.from) - self.cx(a, r.to)).abs() as i64),
             (Kind::Out, _) => r.edge as i64,
             (Kind::InGate, _) => self.cx(a, me) as i64,
             (_, Side::Top | Side::Bottom) => other_x(),
@@ -821,12 +858,16 @@ impl<'a> Grid<'a> {
                 _ => None,
             };
             // A line coming down into a part beside one straight line takes the middle, away
-            // from where the straight line comes down.
-            let into_top = shared == 0 && side == Side::Top as usize && pinned == 1 && ends.len() == 2;
+            // from where the straight line comes down, unless the straight line takes the middle.
+            let into_top = shared == 0 && side == Side::Top as usize && pinned == 1 && ends.len() == 2 && ends.iter().all(|e| runs[e.2].pin != Some(50));
             let mut free = spots(ends.len());
-            for &(_, _, k, _) in &ends {
+            for (order, &(_, _, k, _)) in ends.iter().enumerate() {
                 if let Some(p) = runs[k].pin {
-                    let at = free.remove(nearest(&free, p));
+                    // A straight line keeping the middle of a part's side between two spots gives up
+                    // the one on its side in the order of the ends, so the line beside it leaves on
+                    // its own side instead of across it.
+                    let tie = shared == 0 && pinned == 1 && free.len() == 2 && free[1] as i32 - p as i32 == p as i32 - free[0] as i32;
+                    let at = free.remove(if tie { order.min(1) } else { nearest(&free, p) });
                     // In a shared gap a straight line takes the spot itself, so the spots stay evenly apart.
                     if shared == 1 {
                         (runs[k].exit_pos, runs[k].entry_pos) = (at, at);
@@ -949,7 +990,7 @@ impl<'a> Grid<'a> {
                 return Some((Fix::Wider, clash(r, it.clone(), short(x, *c, *h))));
             }
         }
-        let fix = || if n.is_multiple_of(2) { Fix::Gap } else { Fix::Shift };
+        let fix = || if self.over_a_zone() { Fix::Shift } else { Fix::Gap };
         let pubs: Vec<(i32, i32, String)> = self
             .groups
             .iter()
@@ -959,6 +1000,18 @@ impl<'a> Grid<'a> {
             .collect();
         let frame_w = |kind: FrameKind, label: String| frame_name_box(&Frame { id: String::new(), kind, label, rect: Rect { x: 0, y: 0, w: 0, h: 0 }, parent: None }).w;
         let sfx = |k: usize| self.model.azs[k][self.model.azs[k].len() - 2..].to_string();
+        // A line from a part spanning the zones coming down beside the middle of a private copy
+        // keeps clear of the private subnet's name: the columns move right.
+        if self.private {
+            let w = frame_w(FrameKind::PrivateSubnet, self.rules.text("private_subnet", self.model.lang));
+            for r in runs.iter().filter(|r| r.drawn && r.kind == Kind::Track && self.place(r.from) == Some(Place::Span) && self.place(r.to) == Some(Place::Private)) {
+                let x = self.cx(a, r.to) - ICON / 2 + ICON * r.entry_pos as i32 / 100;
+                let right = a.az_x(self.az(r.to)) + SUB_INSET + w + ROOM;
+                if x < right {
+                    return Some((Fix::Shift, clash(r, format!("pri-{}", sfx(self.az(r.to))), right - x)));
+                }
+            }
+        }
         for r in runs.iter().filter(|r| r.drawn) {
             let spanning = self.place(r.from) == Some(Place::Span) && self.place(r.to) == Some(Place::Private);
             let into_span = self.axis == Axis::Down && self.boundary && self.place(r.from) == Some(Place::Entry) && self.place(r.to) == Some(Place::Span);
@@ -1201,6 +1254,13 @@ impl<'a> Grid<'a> {
                     let e = e.expect("inside");
                     let y = ty.unwrap_or_else(|| self.middle_of(d, r));
                     vec![base(vec![(e.0, y)], Some((a.vpc_w, y)))]
+                }
+                Kind::Beside => {
+                    let (e, n) = (e.expect("inside"), n.expect("inside"));
+                    match ty {
+                        Some(y) => vec![base(vec![(e.0, y), (n.0, y)], None)],
+                        None => vec![base(vec![(n.0, e.1)], None)],
+                    }
                 }
                 Kind::NatAcross => {
                     let (e, n) = (e.expect("inside"), n.expect("inside"));
@@ -1563,9 +1623,10 @@ pub(in crate::arrange) mod tests {
     }
 
     /// The web example with WAF and ACM, which has no NAT gateway beside the load balancer, with
-    /// a second load balancer beside the first, both reached from the entry gateway.
-    fn two_balancers() -> Model {
-        let (mut m, _) = grid(WEB_CASES[9].1);
+    /// a second load balancer beside the first, both reached from the entry gateway, in `azs` zones.
+    fn two_balancers(azs: usize) -> Model {
+        let (mut m, _) = grid(&format!("{}set:\n  azs: {azs}\n", WEB_CASES[9].1));
+        assert_eq!(m.azs.len(), azs);
         let alb = m.nodes.iter().find(|n| n.id == "alb").unwrap().clone();
         let at = m.nodes.iter().position(|n| n.id == "alb").unwrap();
         m.nodes.insert(at + 1, Node { id: "alb.b".into(), part: "alb.b".into(), tag: Some("b".into()), ..alb });
@@ -1768,16 +1829,122 @@ pub(in crate::arrange) mod tests {
         draws_cleanly("both-to-the-internet", &representative("both-to-the-internet"));
     }
 
-    // Fails if two fixed ends are left on one spot of one side.
+    /// The draft of the line between two parts.
+    fn draft<'a>(p: &'a Placement, m: &Model, from: &str, to: &str) -> &'a LinePlan {
+        let k = m.edges.iter().position(|e| e.from == from && e.to == to).unwrap_or_else(|| panic!("no edge {from} -> {to}"));
+        p.lines.iter().find(|l| l.edge == k).unwrap_or_else(|| panic!("no draft for {from} -> {to}"))
+    }
+
+    // Fails if a second load balancer gets a straight line from the same spot of the entry
+    // gateway as the first, or sits on the zones' boundary among the NAT gateways' row, or leaves
+    // the row above the zones, or the entry gateway stops standing over the first one running down.
     #[test]
-    fn two_fixed_ends_on_one_spot_fail_the_layout() {
+    fn two_balancers_sit_side_by_side() {
         let r = Rules::builtin();
-        let m = two_balancers();
-        for axis in [Axis::Right, Axis::Down] {
-            let e = arrange(&m, &r, axis).unwrap_err();
-            assert!(e.iter().any(|p| p.code == "LAYOUT_FAILED" && p.message.contains("edge-igw-to-alb") && p.message.contains("edge-igw-to-alb.b")), "{axis:?} {e:?}");
+        for azs in [2, 3] {
+            let m = two_balancers(azs);
+            for axis in [Axis::Down, Axis::Right] {
+                let p = arrange(&m, &r, axis).unwrap_or_else(|e| panic!("{azs} {axis:?}: {e:?}"));
+                let (a, b, igw) = (icon(&p, "alb").rect, icon(&p, "alb.b").rect, icon(&p, "igw").rect);
+                assert_eq!(a.y, b.y, "{azs} {axis:?}");
+                assert!(a.x + a.w < b.x, "{azs} {axis:?}: {a:?} {b:?}");
+                for k in 0..azs {
+                    let z = frame(&p, &format!("az-{}", suffix(&m, k)));
+                    assert!(a.y + a.h < z.y, "{azs} {axis:?}: {a:?} is not above {z:?}");
+                }
+                match axis {
+                    Axis::Down => assert_eq!(centre(igw).0, centre(a).0, "{azs} {axis:?}"),
+                    Axis::Right => {
+                        let first = frame(&p, &format!("az-{}", suffix(&m, 0)));
+                        assert!(igw.x + igw.w < first.x && igw.y == a.y, "{azs} {axis:?}: {igw:?} {first:?}");
+                    }
+                }
+                let (straight, other) = (draft(&p, &m, "igw", "alb"), draft(&p, &m, "igw", "alb.b"));
+                assert_eq!((&straight.bend, straight.exit_pos, straight.entry_pos), (&Bend::Straight, Some(50), Some(50)), "{azs} {axis:?}");
+                assert_ne!(other.bend, Bend::Straight, "{azs} {axis:?}");
+                assert_ne!((other.exit, other.exit_pos), (straight.exit, straight.exit_pos), "{azs} {axis:?}");
+            }
         }
     }
+
+    // Fails if the line from the entry gateway to the second load balancer runs over the first
+    // one's icon or name.
+    #[test]
+    fn a_second_balancer_line_does_not_run_through_the_first() {
+        let r = Rules::builtin();
+        for azs in [2, 3] {
+            let m = two_balancers(azs);
+            for axis in [Axis::Right, Axis::Down] {
+                let p = arrange(&m, &r, axis).unwrap_or_else(|e| panic!("{azs} {axis:?}: {e:?}"));
+                let first = icon(&p, "alb");
+                let pts = kept_points(&p, draft(&p, &m, "igw", "alb.b"));
+                for s in pts.windows(2) {
+                    for r in [first.rect, name_area(first)] {
+                        assert!(!hits(s[0], s[1], grow(r, ROOM)), "{azs} {axis:?}: {s:?} runs over {r:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    // Fails if the entry gateway's lines to the load balancers beside the first cross each other:
+    // the line to the one further away has to keep further out on the entry gateway's side.
+    #[test]
+    fn lines_to_balancers_beside_the_first_do_not_cross() {
+        let r = Rules::builtin();
+        for azs in [2, 3] {
+            let src = format!("flows:\n  - user -> cloudfront -> alb.a -> ecs.a\n  - user -> alb.b -> ecs.b\n  - user -> alb.c -> ecs.c\nset:\n  azs: {azs}\n");
+            let (m, _) = grid(&src);
+            for axis in [Axis::Down, Axis::Right] {
+                let p = arrange(&m, &r, axis).unwrap_or_else(|e| panic!("{azs} {axis:?}: {e:?}"));
+                let (b, c) = (kept_points(&p, draft(&p, &m, "igw", "alb.b")), kept_points(&p, draft(&p, &m, "igw", "alb.c")));
+                assert!(!cross(&b, &c), "{azs} {axis:?}: {b:?} crosses {c:?}");
+            }
+        }
+    }
+
+    /// Whether two drafts cross: a horizontal stretch of one meets a vertical stretch of the
+    /// other strictly inside both.
+    fn cross(a: &[Pt], b: &[Pt]) -> bool {
+        let meet = |h: &[Pt], v: &[Pt]| {
+            let (x0, x1) = (h[0].0.min(h[1].0), h[0].0.max(h[1].0));
+            let (y0, y1) = (v[0].1.min(v[1].1), v[0].1.max(v[1].1));
+            h[0].1 == h[1].1 && v[0].0 == v[1].0 && x0 < v[0].0 && v[0].0 < x1 && y0 < h[0].1 && h[0].1 < y1
+        };
+        a.windows(2).any(|s| b.windows(2).any(|t| meet(s, t) || meet(t, s)))
+    }
+
+    // Fails if a load balancer standing over one copy of the part behind it, whose straight line
+    // to that copy takes the middle of its bottom, sends its line to another copy out of the
+    // spot on the far side, across the straight line.
+    #[test]
+    fn a_balancer_over_a_copy_sends_its_other_line_out_on_that_side() {
+        let r = Rules::builtin();
+        let src = format!("{}set:\n  lang: ja\n", crate::test_inputs::TWO_WEBS);
+        let (m, _) = grid(&src);
+        for axis in [Axis::Down, Axis::Right] {
+            let p = arrange(&m, &r, axis).unwrap_or_else(|e| panic!("{axis:?}: {e:?}"));
+            for name in ["web", "admin"] {
+                let (alb, near, far) = (format!("alb.{name}"), format!("ecs.{name}@1c"), format!("ecs.{name}@1a"));
+                let straight = draft(&p, &m, &alb, &near);
+                assert_eq!((&straight.bend, straight.exit_pos), (&Bend::Straight, Some(50)), "{axis:?} {alb}");
+                let (s, o) = (kept_points(&p, straight), kept_points(&p, draft(&p, &m, &alb, &far)));
+                assert!(!cross(&s, &o), "{axis:?}: {o:?} crosses {s:?}");
+            }
+        }
+    }
+
+    // Fails if one load balancer with two zones leaves the NAT gateways' row on the boundary
+    // between the zones when the entry gateway's line comes into it from above.
+    #[test]
+    fn one_balancer_keeps_the_boundary_row() {
+        let p = on_the_boundary(Axis::Down);
+        let y = |id: &str| icon(&p, id).rect.y;
+        assert_eq!((y("alb"), y("nat-1c")), (y("nat-1a"), y("nat-1a")));
+    }
+
+
+
 
     pub(in crate::arrange) const LONG: &str = "lambda.resize-images-for-the-we";
 
@@ -1798,6 +1965,14 @@ pub(in crate::arrange) mod tests {
         let (m, d) = shared_targets();
         out.push(("mix-shared".into(), m, d));
         out.push(("mix-long".into(), smallest_mix(LONG), Diagnostics::default()));
+        for azs in [2, 3] {
+            let src = format!("{}  - ecs.web -> internet\nset:\n  azs: {azs}\n  lang: ja\n", crate::test_inputs::TWO_WEBS);
+            let (m, d) = grid(&src);
+            out.push((format!("two-balancers-{azs}az"), m, d));
+            let src = format!("flows:\n  - user -> alb.a -> ecs\n  - user -> alb.b -> ecs\n  - user -> alb.c -> ecs\nset:\n  azs: {azs}\n");
+            let (m, d) = grid(&src);
+            out.push((format!("three-balancers-one-service-{azs}az"), m, d));
+        }
         out
     }
 
@@ -1965,8 +2140,10 @@ pub(in crate::arrange) mod tests {
                 let c = centre(icon(p, id).rect);
                 if axis == Axis::Right { c.1 } else { c.0 }
             };
+            // The first part spanning the zones in model order: the one the entry gateway lines up with.
+            let first = m.nodes.iter().find(|n| matches!(n.area, Area::Subnet(_)) && n.az.is_none()).expect("a part spanning the zones");
             assert_eq!(across("cloudfront"), across("igw"), "{label}");
-            assert_eq!(across("alb"), across("igw"), "{label}");
+            assert_eq!(across(&first.id), across("igw"), "{label}");
         }
         assert!(seen > 0);
     }

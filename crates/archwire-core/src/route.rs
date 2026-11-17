@@ -851,6 +851,38 @@ mod tests {
         named.into_iter().chain(f.into_iter().map(|(id, what)| format!("{id} {what}"))).collect()
     }
 
+
+    // Fails if a definition with two or three load balancers, with NAT gateways, side lines from
+    // either load balancer, or load balancers sharing one service behind them, stops or comes out
+    // with a line crossing an icon, a name or another line, in either direction with two or three zones.
+    #[test]
+    fn definitions_with_several_balancers_route_cleanly() {
+        let two = "flows:\n  - user -> cloudfront -> alb.web -> ecs.web -> aurora.web\n  - user -> alb.admin -> ecs.admin -> aurora.admin\n";
+        let mut srcs = Vec::new();
+        for extra in ["", "  - ecs.web -> internet\n", "  - alb.web ~> cloudwatch\n", "  - alb.admin ~> cloudwatch\n", "  - ecs.web -> internet\n  - ecs.admin -> internet\n  - cloudfront -> s3\n  - ecs.web ~> cloudwatch\n"] {
+            for azs in [2, 3] {
+                for lang in ["ja", "en"] {
+                    srcs.push(format!("{two}{extra}set:\n  azs: {azs}\n  lang: {lang}\n"));
+                }
+            }
+        }
+        for azs in [2, 3] {
+            srcs.push(format!("flows:\n  - user -> alb.a -> ecs\n  - user -> alb.b -> ecs\n  - user -> alb.c -> ecs\nset:\n  azs: {azs}\n"));
+            srcs.push(format!("flows:\n  - user -> cloudfront -> alb.a -> ecs.a\n  - user -> alb.b -> ecs.b\n  - user -> alb.c -> ecs.c\n  - ecs.a -> internet\nset:\n  azs: {azs}\n"));
+        }
+        let mut bad = Vec::new();
+        for src in &srcs {
+            for axis in AXES {
+                match std::panic::catch_unwind(|| violations(src, axis)) {
+                    Ok(v) if v.is_empty() => {}
+                    Ok(v) => bad.push(format!("{axis:?} {src:?} {v:?}")),
+                    Err(_) => bad.push(format!("{axis:?} {src:?} stops")),
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
+
     /// The example at the top of the definition guide.
     const SHOWCASE: &str = "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> s3\n  - ecs -> internet\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\nset:\n  azs: 3\n  lang: ja\nchoose:\n  route.ecs.s3: nat\n";
 

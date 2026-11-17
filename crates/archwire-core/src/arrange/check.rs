@@ -387,6 +387,28 @@ mod tests {
         let id = edge_id(&m.edges[e].from, &m.edges[e].to);
         assert!(got.iter().any(|x| x.at.as_deref() == Some(id.as_str()) && x.message.contains("a band to run along")), "{got:?}");
     }
+    // Fails if the check lets two drawn lines keep their fixed ends at one spot of one side of a
+    // part, or names the wrong lines.
+    #[test]
+    fn fixed_ends_on_one_spot_fail_the_check() {
+        let (m, p, reps) = with_a_vpc();
+        assert_eq!(fixed_ends_apart(&m, &p, &reps), Vec::new());
+        let k = |from: &str, to: &str| m.edges.iter().position(|e| e.from == from && e.to == to).unwrap();
+        let (gate, other) = (k("igw", "alb"), k("alb", "ecs-1a"));
+        assert!(reps.contains(&gate) && reps.contains(&other));
+        let at = p.lines.iter().find(|l| l.edge == gate).unwrap().clone();
+        assert_eq!(at.fixed().0, Some(50));
+        let mut moved = p.clone();
+        let pl = moved.lines.iter_mut().find(|l| l.edge == other).unwrap();
+        assert_eq!(pl.keep, Keep::Whole);
+        (pl.from, pl.exit, pl.exit_pos) = (at.from.clone(), at.exit, at.exit_pos);
+        let got = fixed_ends_apart(&m, &moved, &reps);
+        assert_eq!(got.len(), 1, "{got:?}");
+        let message = &got[0].message;
+        assert!(message.contains("edge-igw-to-alb and edge-alb-to-ecs-1a") || message.contains("edge-alb-to-ecs-1a and edge-igw-to-alb"), "{message}");
+        assert!(message.contains("a side of igw"), "{message}");
+    }
+
     /// The web example with two zones, laid out along `axis`.
     fn web_along(axis: Axis) -> (Model, Placement) {
         let r = crate::rules::Rules::builtin();
