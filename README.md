@@ -54,9 +54,32 @@ The exit code is 0. This is the diagram:
 
 The line from Cognito is labelled "Cognito authorizer" because the API is a REST API; with `apigateway(http)` it reads "JWT authorizer". Certificate Manager carries `us-east-1` under its name. The report gives the reasons for the AWS Cloud and Region frames, the Region, the place of each part, and the authorizer.
 
+### A function in a VPC
+
+A Lambda function that sends a main flow to Aurora is attached to the VPC Aurora is in. Save this as `mix.yaml`:
+
+```yaml
+flows:
+  - user -> apigateway(http) -> lambda -> aurora
+  - lambda -> s3
+  - lambda ~> cloudwatch
+set:
+  lang: ja
+```
+
+```sh
+archwire compile mix.yaml -o mix.drawio
+```
+
+The exit code is 2, because the route from the function to S3 is left open (see [Holes](#holes)). This is the diagram, with labels in Japanese:
+
+![The diagram archwire writes for mix.yaml, from top to bottom: users, and inside the Tokyo Region frame API Gateway (HTTP API), then a VPC with two Availability Zones side by side, each with a private subnet holding a copy of Lambda above Aurora, the writer in the first zone and the reader in the second, and S3 and CloudWatch to the right of the VPC. The line to S3 is grey and dashed and labelled as an undecided route](assets/mix-vpc.png)
+
+The function is drawn once in the private subnet of each zone, and each copy reads and writes the writer and reads the reader. API Gateway, S3 and CloudWatch stay outside the VPC. The VPC has only private subnets, because no part here is placed in a public subnet. The report gives the reasons: the VPC because an Aurora DB cluster can be created only in a VPC, two zones because its DB subnet group covers at least two, and the function in the private subnets because it is attached to the VPC to reach Aurora. This definition and its expected output are the acceptance case `tests/cases/mix-vpc-ja`.
+
 ### Direction
 
-Both diagrams above run from top to bottom, which is what you get when the definition says nothing about direction. To draw the main flows from left to right instead, add `direction: right` under `set`. The inside of a VPC stays the same either way: the Availability Zones side by side, the public subnets above the private ones. `api.yaml` with `direction: right` is the acceptance case `tests/cases/api-rest-en`, and `tests/cases/web-2az-ja-right` shows a VPC drawn from left to right. Where each part goes is described in [docs/definition.md](docs/definition.md#how-the-parts-are-laid-out-with-a-vpc).
+The diagrams above run from top to bottom, which is what you get when the definition says nothing about direction. To draw the main flows from left to right instead, add `direction: right` under `set`. The inside of a VPC stays the same either way: the Availability Zones side by side, the public subnets above the private ones. `api.yaml` with `direction: right` is the acceptance case `tests/cases/api-rest-en`, and `tests/cases/web-2az-ja-right` and `tests/cases/mix-vpc-ja-right` show a VPC drawn from left to right. Where each part goes is described in [docs/definition.md](docs/definition.md#how-the-parts-are-laid-out-with-a-vpc).
 
 ## Install
 
@@ -95,7 +118,7 @@ The definition language is described in [docs/definition.md](docs/definition.md)
 
 A hole is a decision the connections alone cannot make. In this version there are two kinds.
 
-The first is the route out of a VPC. When a main flow goes from a part inside the VPC's private subnets to a Regional service outside the VPC, such as `ecs -> s3`, the traffic can leave through a VPC endpoint or through a NAT gateway, and archwire does not pick. Save this as `hole.yaml` and compile it:
+The first is the route out of a VPC. When a main flow goes from a part in the VPC's private subnets (ECS, Aurora, or a function attached to the VPC) to a Regional service outside the VPC, such as `ecs -> s3` or `lambda -> s3` in `mix.yaml`, the traffic can leave through a VPC endpoint or through a NAT gateway, and archwire does not pick. Save this as `hole.yaml` and compile it:
 
 ```yaml
 flows:
@@ -131,6 +154,12 @@ archwire set hole.yaml choose.route.ecs.s3 endpoint
 
 This adds a `choose:` section to the definition with `route.ecs.s3: endpoint`. Compile again and the exit code is 0. With `nat` instead, archwire adds NAT gateways. With `endpoint` it adds no icon and notes that endpoint icons are not drawn, and the line's label says "(via VPC endpoint)".
 
+A part with a name after a dot is written in square brackets in a route hole. With `lambda.api` in place of `lambda` on every line of `mix.yaml`, the hole is `route.[lambda.api].s3`. Quote the place when you give it to `set`, because shells such as zsh read the brackets as a file pattern and stop with `no matches found` before archwire runs:
+
+```sh
+archwire set mix.yaml 'choose.route.[lambda.api].s3' endpoint
+```
+
 The second is the kind of API Gateway. `apigateway` written without `(http)` or `(rest)` leaves the hole `kind.apigateway`, with the choices `http` and `rest`. Save this as `api-hole.yaml`:
 
 ```yaml
@@ -154,19 +183,21 @@ The reasons are not only in the report. Every element with a reason carries it i
 
 ## What this version draws
 
-Two shapes. Which one is drawn follows from the services the definition writes.
+These services: users, the internet (outbound only), CloudFront, WAF and Certificate Manager (both only attached to CloudFront), the Application Load Balancer, ECS, Aurora, S3, CloudWatch, API Gateway as an HTTP API or a REST API, Lambda, DynamoDB, and Cognito (only attached to API Gateway). The Internet Gateway and NAT gateways are added by archwire and cannot be written in a definition.
 
-The first is a Web architecture with one VPC with two or three Availability Zones, an Application Load Balancer in the public subnets, ECS in private subnets, and optionally Aurora, with the other services in `rules/aws/services.toml`: users, the internet (outbound only), CloudFront, WAF and Certificate Manager (both only attached to CloudFront), S3 and CloudWatch. The Internet Gateway and NAT gateways are added by archwire and cannot be written in a definition.
+A definition that writes `alb`, `ecs` or `aurora` is drawn with one VPC with two or three Availability Zones, with public and private subnets as its parts need. A Lambda function with a main flow to Aurora is attached to that VPC and drawn in its private subnets, one copy per zone; any other function stays outside the VPC. So one definition can hold a Web architecture behind a load balancer, an API whose functions reach Aurora, and functions and tables outside the VPC, side by side. A definition without those three services is drawn without a VPC.
 
-Such a definition must have a main flow from `user` or `cloudfront` into `alb`, and from `alb` into `ecs`. Which other connections are accepted is listed in [docs/definition.md](docs/definition.md#which-connections-are-accepted-with-a-vpc).
+Every main flow must be reachable from `user` along main flows. Which connections are accepted is listed pair by pair in `rules/aws/links.toml` and in [docs/definition.md](docs/definition.md#which-connections-are-accepted). Parts of one service can be told apart with a name after a dot, such as `s3.web` and `s3.uploads`, or `ecs.web` and `ecs.admin` behind one load balancer.
 
-The second is an API without a VPC: users, CloudFront with WAF and Certificate Manager attached, S3, API Gateway as an HTTP API or a REST API, Lambda, DynamoDB, Cognito attached to API Gateway, and CloudWatch. Parts of one service can be told apart with a name after a dot, such as `s3.web` and `s3.uploads`. The accepted connections are listed pair by pair in `rules/aws/links.toml` and in [docs/definition.md](docs/definition.md#which-connections-are-accepted-without-a-vpc).
-
-In both shapes the diagram runs from top to bottom, or from left to right with `set.direction`. The only Region is `ap-northeast-1`, and labels are in English, or in Japanese with `set.lang`. A connection or shape not described here stops with the error `UNSUPPORTED` instead of producing a diagram that is wrong.
+The diagram runs from top to bottom, or from left to right with `set.direction`. The only Region is `ap-northeast-1`, and labels are in English, or in Japanese with `set.lang`. A connection or shape not described here stops with the error `UNSUPPORTED` instead of producing a diagram that is wrong.
 
 ## What this version does not do
 
-It cannot yet draw a definition that mixes VPC services (`alb`, `ecs`, `aurora`) with `apigateway`, `lambda`, `dynamodb` or `cognito`; such a definition stops with `UNSUPPORTED`. Names after a dot are accepted only in definitions without a VPC.
+A VPC holds one part that spans the Availability Zones, the load balancer: a definition with two load balancers, such as `alb.web` and `alb.admin`, stops with `UNSUPPORTED`. It does not attach Certificate Manager or WAF to a load balancer: `acm -- alb` and `waf -- alb` stop with `UNSUPPORTED`.
+
+Many named services behind one load balancer crowd the lines from it. With two zones up to six services, and with three zones up to three, are drawn without a note. With more, the diagram is still drawn, with notes naming the lines that could not avoid every icon, label and other line. From 51 services with two zones, and from 34 with three, the layout stops with `LAYOUT_FAILED`.
+
+A Lambda function is drawn in a VPC only in its private subnets, and only when it sends a main flow to Aurora. The line from a function to Aurora is drawn directly; RDS Proxy is not drawn. A route answered with `endpoint` adds no VPC endpoint icon.
 
 It does not draw the endpoint types of API Gateway (edge-optimized, Regional, private) or WebSocket APIs. It does not attach WAF to API Gateway; `waf` attaches only to `cloudfront`. Which API types support AWS WAF is in the AWS comparison [Choose between REST APIs and HTTP APIs](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-vs-rest.html). It does not draw a sign-in line from users to Cognito; Cognito is drawn only attached to API Gateway.
 
@@ -182,14 +213,14 @@ A diagram that compiles means it is consistent under these rules. It does not me
 
 `tools/known_findings.txt` lists findings that are known and do not fail `check_cases.sh`, one per line as `<case> <kind> <finding>`. A finding in the list that no longer appears fails the check, so the list cannot go stale. The list is empty today.
 
-The layout without a VPC is also tested on definitions made by a program, which vary the number of branches, shared targets, auxiliary flows, named parts, several CloudFront distributions and the language. `cargo test --workspace` lays out every one of them and checks that each is laid out without `LAYOUT_FAILED` (no parts or names overlapping, every part in its frame) and that no line or label is reported as not drawn clear. To check 40 of them as draw.io renders them, write them out and run the checker:
+The layout is also tested on definitions made by a program. Without a VPC they vary the number of branches, shared targets, auxiliary flows, named parts, several CloudFront distributions and the language; `cargo test --workspace` lays out every one of them and checks that each is laid out without `LAYOUT_FAILED` (no parts or names overlapping, every part in its frame) and that no line or label is reported as not drawn clear. With a VPC they vary the zones, the NAT gateways, the readers, the routes out and the side lines, and the definitions mixing a function in the VPC with other parts vary as well; `cargo test --workspace` draws the web definitions with two zones, and the rest are drawn by tests that run only when named, `generated_definitions_all_draw_cleanly` and `generated_mixed_definitions_all_draw_cleanly` with `-- --ignored`. To check 160 of them as draw.io renders them (40 without a VPC, 40 with one, and 80 mixing a function in the VPC with other parts), write them out and run the checker:
 
 ```sh
-ARCHWIRE_GEN_OUT=out/gen cargo test -p archwire-core generated
+ARCHWIRE_GEN_OUT=out/gen cargo test -p archwire-core -- generated_diagrams_compile_for_the_checker arranged_diagrams_for_the_checker mixed_diagrams_for_the_checker
 sh tools/check_generated.sh out/gen
 ```
 
-`check_generated.sh` exits with 0 when every diagram passes, 1 when a diagram has a blocking fault or is missing, and 2 when `drawio` is not on PATH.
+`check_generated.sh` exits with 0 when every diagram passes, 1 when a diagram has a blocking fault or is missing or the folder does not hold 160 definitions, and 2 when `drawio` is not on PATH.
 
 Continuous integration runs `cargo test --workspace` and the checker's self-test on Linux and macOS. It does not render diagrams, because that needs the draw.io desktop app, so the rendered-diagram check is run locally with `sh tools/check_cases.sh`.
 
