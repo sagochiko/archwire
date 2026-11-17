@@ -120,7 +120,7 @@ The rules are checked when archwire starts. The built-in rules are valid, so a u
 | `LINK_UNKNOWN_RULE` | a `to_kind` `rule`, `max_rule`, `from_rule`, `from_subnet_rule` or `from_copies_rule` is not in `rules.toml` |
 | `LINK_DUPLICATE` | two links have the same `from`, `to` and `rel` |
 | `LINK_BAD_LIMIT` | a link has only one of `max_from` and `max_rule`, or `from_region` or `from_scope` without `from_rule`, or `from_rule` without either, or some but not all of `from_subnet`, `from_subnet_rule` and `from_copies_rule` |
-| `LINK_BAD_SCOPE` | a link's `from_scope` is not `regional` or `global`, or is written together with `from_subnet` |
+| `LINK_BAD_SCOPE` | a link's `from_scope` is `vpc` or `outside` (only `regional` and `global` are accepted; any other word is a `LINKS_PARSE` error), or is written together with `from_subnet` |
 | `LINK_SUBNET_WITHOUT_VPC` | a link has `from_subnet`, but its `to` is not a VPC service |
 | `DERIVED_LINK_BAD_ROLE` | a `[[derived_link]]` names a role that is not one of the five above |
 | `DERIVED_LINK_DUPLICATE` | two `[[derived_link]]` entries have the same pair of roles |
