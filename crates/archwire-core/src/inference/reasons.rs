@@ -123,6 +123,7 @@ pub(super) fn explain(def: &Definition, rules: &Rules, model: &Model, checked: &
     let nats: Vec<_> = by_role(DerivedRole::EgressNat).collect();
     for n in &nats {
         why(&n.id, "private-egress-through-nat");
+        why(&n.id, "nat-device-is-nat-gateway");
     }
     if let Some(n) = nats.first().filter(|_| !def.set.contains_key("nat")) {
         why(&n.part, "nat-per-az");

@@ -595,6 +595,35 @@ mod tests {
         assert_eq!(rule.source.as_deref(), Some("https://docs.aws.amazon.com/whitepapers/latest/aws-fault-isolation-boundaries/global-services.html"));
     }
 
+    const NAT_DEVICES: &str = "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat.html";
+
+    // Fails if the constraint on the route through NAT names one kind of NAT device, says more than
+    // that resources can connect through one, or cites another page.
+    #[test]
+    fn the_nat_route_reason_names_no_device() {
+        let rule = Rules::builtin().rule("private-egress-through-nat").clone();
+        assert_eq!(rule.kind, DerivedKind::Constraint);
+        assert_eq!(rule.source.as_deref(), Some(NAT_DEVICES));
+        for word in ["NAT device", "IPv4"] {
+            assert!(rule.reason_en.contains(word), "{word}: {}", rule.reason_en);
+        }
+        for word in ["NAT gateway", "NAT Gateway", "must", "require"] {
+            assert!(!rule.reason_en.contains(word), "{word}: {}", rule.reason_en);
+        }
+        assert!(rule.reason_ja.contains("NAT デバイス"), "{}", rule.reason_ja);
+        for word in ["NAT ゲートウェイ", "NAT Gateway", "必須", "要る"] {
+            assert!(!rule.reason_ja.contains(word), "{word}: {}", rule.reason_ja);
+        }
+    }
+
+    // Fails if drawing a NAT gateway is made a constraint, or the choice loses its source.
+    #[test]
+    fn the_nat_device_choice_is_a_default_with_its_source() {
+        let rule = Rules::builtin().rule("nat-device-is-nat-gateway").clone();
+        assert_eq!(rule.kind, DerivedKind::Default);
+        assert_eq!(rule.source.as_deref(), Some(NAT_DEVICES));
+    }
+
     #[test]
     fn constraint_without_source_is_rejected_at_load() {
         let rules = "version = \"t\"\n[[rule]]\nid = \"x\"\nkind = \"constraint\"\nreason_en = \"a\"\nreason_ja = \"b\"\n";

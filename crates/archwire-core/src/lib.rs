@@ -24,7 +24,6 @@ mod path;
 pub(crate) mod test_inputs;
 
 use diag::{Diagnostics, Problem, Versions};
-use engine::Engine;
 use model::Model;
 use place::Placement;
 use rules::Rules;
@@ -50,18 +49,14 @@ pub fn compile(def_text: &str) -> Output {
         Ok(d) => d,
         Err(errors) => return stop(errors),
     };
-    // Two shapes are not drawn yet and stop before the inference: a definition mixing VPC parts
-    // with services kept apart from them, and one with a VPC that writes two or more parts
-    // spanning its zones. Every other definition, with a VPC or without, goes through the one
-    // inference.
-    match engine::pick(&def, &rules) {
-        Err(errors) => return stop(errors),
-        Ok(Engine::Grid) => {
-            if let Err(errors) = engine::spanning_parts(&def, &rules) {
-                return stop(errors);
-            }
+    // One shape is not drawn yet and stops before the inference: a definition with a VPC that
+    // writes two or more parts spanning its zones. Every other definition, with a VPC or without,
+    // goes through the one inference.
+    let vpc = def.links.iter().flat_map(|l| [&l.from, &l.to]).any(|r| rules.service(&r.service).is_some_and(|s| s.scope == rules::Scope::Vpc));
+    if vpc {
+        if let Err(errors) = engine::spanning_parts(&def, &rules) {
+            return stop(errors);
         }
-        Ok(Engine::Flow) => {}
     }
     let (model, diagnostics) = inference::infer(&def, &rules);
     let Some(model) = model else {
@@ -106,23 +101,24 @@ pub(crate) fn arranged_drawio(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::Engine;
     use crate::test_inputs::{
-        heavy_variants, CROWDED_SIDE_EN, CROWDED_S3_JA, ID_CLASH, LOAD_BALANCER_ALONE, ONE_FUNCTION_THREE_WAYS, TWIN_APPS, TWO_WEBS, VPC_TEST_DEFINITIONS,
-        WEB_EXAMPLES,
+        heavy_variants, CROWDED_SIDE_EN, CROWDED_S3_JA, ID_CLASH, LOAD_BALANCER_ALONE, MIX_LOGS, MIX_NAT, MIX_SMALLEST, MIX_WEB, ONE_FUNCTION_THREE_WAYS,
+        TWIN_APPS, TWO_WEBS, VPC_TEST_DEFINITIONS, WEB_EXAMPLES,
     };
 
+    // Fails if a definition once stopped for mixing VPC parts with separate services stops for
+    // another reason than a connection missing from the pairs, or one the pairs accept stops.
     #[test]
-    fn a_definition_mixing_vpc_parts_with_separate_services_stops_before_inference() {
+    fn definitions_once_stopped_for_mixing() {
         let web = "flows:\n  - user -> cloudfront -> alb -> ecs\n";
-        let cases = [
-            ("flows:\n  - user -> alb -> ecs -> lambda\n".to_string(), "flows[0][3]", "lambda"),
-            (format!("{web}  - cloudfront -> lambda\n"), "flows[1][1]", "lambda"),
-            (format!("{web}  - ecs ~> cognito\n"), "flows[1][1]", "cognito"),
-            (format!("{web}  - cognito -- alb\n"), "flows[1][0]", "cognito"),
-            (format!("{web}  - ecs -> dynamodb.orders\n"), "flows[1][1]", "dynamodb"),
-            (format!("{web}  - cloudfront -> apigateway.public(rest)\n"), "flows[1][1]", "apigateway"),
+        let stopped = [
+            ("flows:\n  - user -> alb -> ecs -> lambda\n".to_string(), "flows[0]", "ecs -> lambda"),
+            (format!("{web}  - cloudfront -> lambda\n"), "flows[1]", "cloudfront -> lambda"),
+            (format!("{web}  - ecs ~> cognito\n"), "flows[1]", "ecs ~> cognito"),
+            (format!("{web}  - cognito -- alb\n"), "flows[1]", "cognito -- alb"),
         ];
-        for (src, at, got) in &cases {
+        for (src, at, got) in &stopped {
             let out = compile(src);
             assert!(out.drawio.is_none(), "{src}");
             let d = &out.diagnostics;
@@ -130,10 +126,56 @@ mod tests {
             assert_eq!(d.errors.len(), 1, "{src}: {:?}", d.errors);
             let e = &d.errors[0];
             assert_eq!((e.code.as_str(), e.at.as_deref(), e.got.as_deref()), ("UNSUPPORTED", Some(*at), Some(*got)), "{src}");
-            assert!(e.message.contains("cannot be drawn together with VPC services"), "{src}: {}", e.message);
+            assert_eq!(e.message, format!("`{got}` is not a supported connection"), "{src}");
             assert_eq!(d.versions.rules, Rules::builtin().version);
             assert!(d.derived.is_empty() && d.holes.is_empty() && d.notes.is_empty());
         }
+        let hole = compile(&format!("{web}  - ecs -> dynamodb.orders\n"));
+        assert_eq!(hole.diagnostics.exit_code(), 2, "{:?}", hole.diagnostics.errors);
+        let holes: Vec<&str> = hole.diagnostics.holes.iter().map(|h| h.hole.as_str()).collect();
+        assert_eq!(holes, ["route.ecs.[dynamodb.orders]"]);
+        assert!(hole.drawio.is_some());
+        let api = compile(&format!("{web}  - cloudfront -> apigateway.public(rest)\n"));
+        assert_eq!(api.diagnostics.exit_code(), 0, "{:?}", api.diagnostics.errors);
+        assert!(api.drawio.is_some());
+    }
+
+    // Fails if a definition mixing VPC parts with separate services is still stopped, gets the
+    // wrong exit code, or comes out with a line the router could not place, in either direction.
+    #[test]
+    fn mixed_definitions_are_drawn() {
+        for (src, code) in [(MIX_SMALLEST, 2), (MIX_NAT, 0), (MIX_WEB, 2), (MIX_LOGS, 0)] {
+            for direction in ["down", "right"] {
+                let src = if src.contains("set:\n") {
+                    src.replace("set:\n", &format!("set:\n  direction: {direction}\n"))
+                } else {
+                    format!("{src}set:\n  direction: {direction}\n")
+                };
+                let out = compile(&src);
+                let d = &out.diagnostics;
+                assert_eq!(d.exit_code(), code, "{src}: {:?} {:?}", d.errors, d.holes);
+                assert!(out.drawio.is_some(), "{src}");
+                assert!(d.notes.iter().all(|n| !n.contains("edge-")), "{src}: {:?}", d.notes);
+            }
+        }
+        let holes = |src: &str| compile(src).diagnostics.holes.iter().map(|h| h.hole.clone()).collect::<Vec<_>>();
+        assert_eq!(holes(MIX_SMALLEST), ["route.lambda.s3"]);
+        assert_eq!(holes(MIX_WEB), ["route.ecs.dynamodb"]);
+    }
+
+    // Fails if a web stack and an API that share no part are stopped, or the function behind the
+    // API is put in the VPC.
+    #[test]
+    fn web_and_api_side_by_side_are_drawn() {
+        let src = "flows:\n  - user -> alb -> ecs\n  - user -> apigateway(http) -> lambda\n";
+        let out = compile(src);
+        assert_eq!(out.diagnostics.exit_code(), 0, "{:?}", out.diagnostics.errors);
+        let x = out.drawio.unwrap();
+        object(&x, "lambda");
+        let (model, _) = inference::infer(&def::parse(src).unwrap(), &Rules::builtin());
+        let lambda: Vec<_> = model.unwrap().nodes.into_iter().filter(|n| n.part == "lambda").collect();
+        assert_eq!(lambda.len(), 1);
+        assert_eq!((lambda[0].id.as_str(), lambda[0].area, lambda[0].az), ("lambda", model::Area::Region, None));
     }
 
     /// The tag that opens the object of `id`, up to its first `>`.
@@ -246,14 +288,6 @@ mod tests {
         assert_eq!(out.diagnostics.exit_code(), 1);
         assert_eq!(out.diagnostics.errors.iter().map(|e| e.code.as_str()).collect::<Vec<_>>(), ["LAYOUT_FAILED"]);
         assert_eq!((out.diagnostics.derived, out.diagnostics.holes), (derived, holes));
-    }
-
-    #[test]
-    fn mixed_definitions_stop_before_either_layout() {
-        let out = compile("flows:\n  - user -> apigateway(http) -> lambda -> aurora\n");
-        assert!(out.drawio.is_none());
-        assert_eq!(out.diagnostics.exit_code(), 1);
-        assert!(out.diagnostics.errors.iter().all(|e| e.code == "UNSUPPORTED"), "{:?}", out.diagnostics.errors);
     }
 
     const HOLE: &str = "flows:\n  - user -> apigateway -> lambda -> dynamodb\n  - cognito -- apigateway\n";
@@ -519,11 +553,16 @@ mod tests {
         ("UNSUPPORTED".to_string(), Some(at.to_string()), got.map(str::to_string))
     }
 
-    // Today a named function next to a part named like its zone copy stops, because the definition mixes VPC parts with separate services.
-    // Fails if a mixed definition is let through without an error.
+    // Fails if the zone copy of a named function and a part named like that copy get the same id.
     #[test]
-    fn a_named_function_and_a_part_named_like_its_copy_stop() {
-        assert_eq!(stops(ID_CLASH), [unsupported("flows[0][1]", Some("apigateway"))]);
+    fn a_named_function_and_a_part_named_like_its_copy_are_drawn() {
+        let out = compile(ID_CLASH);
+        assert_eq!(out.diagnostics.exit_code(), 0, "{:?}", out.diagnostics.errors);
+        let x = out.drawio.unwrap();
+        object(&x, "lambda.api@1a");
+        object(&x, "lambda.api-1a");
+        assert_eq!(x.matches("<object id=\"lambda.api@1a\"").count(), 1);
+        assert_eq!(x.matches("<object id=\"lambda.api-1a\"").count(), 1);
     }
 
     // Fails if a second part spanning the zones is let through, so a broken diagram or LAYOUT_FAILED comes out.
@@ -608,14 +647,52 @@ mod tests {
         }
     }
 
-    // Today a function reaching a database in a VPC stops in every line order, at the first separate service written.
-    // Fails if a mixed definition is let through for some order of its lines.
-    #[test]
-    fn a_function_reaching_a_database_stops_whatever_the_line_order() {
-        let want = [("flows[0][1]", "apigateway"), ("flows[0][1]", "apigateway"), ("flows[0][0]", "lambda")];
-        for (src, (at, got)) in ONE_FUNCTION_THREE_WAYS.iter().zip(want) {
-            assert_eq!(stops(src), [unsupported(at, Some(got))], "{src}");
+    /// Each part's frame in the diagram, keyed by its id: the `parent` of the cell of each object.
+    fn frames(x: &str) -> std::collections::BTreeMap<String, String> {
+        let mut out = std::collections::BTreeMap::new();
+        for chunk in x.split("<object ").skip(1) {
+            let id = chunk.strip_prefix("id=\"").and_then(|r| r.split('"').next()).unwrap().to_string();
+            let cell = chunk.split("<mxCell").nth(1).unwrap_or_else(|| panic!("no cell for {id}"));
+            let parent = cell.split(" parent=\"").nth(1).map(|r| r.split('"').next().unwrap().to_string()).unwrap_or_default();
+            out.insert(id, parent);
         }
+        out
+    }
+
+    // Fails if the order of the lines changes which frame a part lands in, its holes, or its reasons.
+    #[test]
+    fn a_function_reaching_a_database_lands_the_same_whatever_the_line_order() {
+        let at = [
+            [("route.lambda.dynamodb", "flows[1]"), ("route.lambda.s3", "flows[2]")],
+            [("route.lambda.dynamodb", "flows[2]"), ("route.lambda.s3", "flows[1]")],
+            [("route.lambda.dynamodb", "flows[1]"), ("route.lambda.s3", "flows[0]")],
+        ];
+        let mut seen = Vec::new();
+        for (src, want) in ONE_FUNCTION_THREE_WAYS.iter().zip(at) {
+            let out = compile(src);
+            let d = &out.diagnostics;
+            assert_eq!(d.exit_code(), 2, "{src}: {:?}", d.errors);
+            let x = out.drawio.clone().unwrap_or_else(|| panic!("no diagram for {src}"));
+            assert_eq!(compile(src).drawio, out.drawio, "{src}");
+            let mut holes: Vec<(String, Vec<String>)> = d.holes.iter().map(|h| (h.hole.clone(), h.choices.clone())).collect();
+            holes.sort();
+            let mut placed: Vec<(&str, &str)> = d.holes.iter().map(|h| (h.hole.as_str(), h.at.as_str())).collect();
+            placed.sort();
+            assert_eq!(placed, want, "{src}");
+            let mut reasons: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+            for r in &d.derived {
+                reasons.entry(r.target.clone()).or_default().push(r.rule.clone());
+            }
+            for rules in reasons.values_mut() {
+                rules.sort();
+            }
+            let (model, _) = inference::infer(&def::parse(src).unwrap(), &Rules::builtin());
+            let roles: std::collections::BTreeMap<String, (model::Area, Option<usize>, Option<String>)> =
+                model.unwrap().nodes.into_iter().map(|n| (n.id, (n.area, n.az, n.role))).collect();
+            seen.push((frames(&x), roles, holes, reasons));
+        }
+        assert_eq!(seen[0], seen[1]);
+        assert_eq!(seen[0], seen[2]);
     }
 
     // Fails if a definition whose VPC holds only public parts is stopped, or is drawn with a private subnet.

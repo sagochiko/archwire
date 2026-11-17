@@ -1,7 +1,7 @@
 {
   "versions": {
     "archwire": "0.1.0",
-    "rules": "2026.11.3"
+    "rules": "2026.11.4"
   },
   "derived": [
     {
@@ -121,16 +121,32 @@
       "added": true,
       "kind": "constraint",
       "rule": "private-egress-through-nat",
-      "reason": "Instances in a private subnet connect to the internet through a public NAT gateway, which is created in a public subnet.",
-      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat-gateway.html"
+      "reason": "Resources in a private subnet can connect to the internet through a NAT device in a public subnet, which replaces their source IPv4 addresses with its own.",
+      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat.html"
+    },
+    {
+      "target": "nat-1a",
+      "added": true,
+      "kind": "default",
+      "rule": "nat-device-is-nat-gateway",
+      "reason": "AWS offers a managed NAT device, the NAT gateway, and a NAT instance you build yourself on EC2, and recommends NAT gateways for better availability and bandwidth and less administration. archwire draws a NAT gateway.",
+      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat.html"
     },
     {
       "target": "nat-1c",
       "added": true,
       "kind": "constraint",
       "rule": "private-egress-through-nat",
-      "reason": "Instances in a private subnet connect to the internet through a public NAT gateway, which is created in a public subnet.",
-      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat-gateway.html"
+      "reason": "Resources in a private subnet can connect to the internet through a NAT device in a public subnet, which replaces their source IPv4 addresses with its own.",
+      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat.html"
+    },
+    {
+      "target": "nat-1c",
+      "added": true,
+      "kind": "default",
+      "rule": "nat-device-is-nat-gateway",
+      "reason": "AWS offers a managed NAT device, the NAT gateway, and a NAT instance you build yourself on EC2, and recommends NAT gateways for better availability and bandwidth and less administration. archwire draws a NAT gateway.",
+      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat.html"
     },
     {
       "target": "nat",

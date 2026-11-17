@@ -1,0 +1,10 @@
+flows:
+  - user -> cloudfront -> alb -> ecs(fargate) -> aurora
+  - cloudfront -> s3
+  - ecs -> dynamodb
+  - user -> apigateway(http) -> lambda.api -> aurora
+  - user -> apigateway -> lambda.report -> dynamodb
+  - ecs ~> cloudwatch
+  - lambda.api ~> cloudwatch
+set:
+  lang: ja

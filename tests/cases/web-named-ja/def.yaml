@@ -1,0 +1,5 @@
+flows:
+  - user -> cloudfront -> alb -> ecs.web -> aurora.web
+  - alb -> ecs.admin -> aurora.admin
+set:
+  lang: ja

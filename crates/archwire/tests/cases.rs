@@ -117,16 +117,17 @@ fn case_list_is_what_the_plan_says() {
         names,
         [
             "api-http-ja", "api-http-ja-down", "api-merged-ja", "api-merged-ja-down", "api-min-en", "api-names-ja", "api-rest-en",
-            "aux-to-side", "edge-waf-en", "endpoint-3az-en", "endpoint-3az-ja", "endpoint-ja", "endpoint-ja-right", "err-mixed-vpc",
-            "err-unknown-service", "err-unsupported", "hole-apigateway", "hole-s3", "web-2az-en", "web-2az-ja", "web-2az-ja-right",
-            "web-3az-en", "web-3az-en-right", "web-3az-ja", "web-attach-en",
+            "aux-to-side", "edge-waf-en", "endpoint-3az-en", "endpoint-3az-ja", "endpoint-ja", "endpoint-ja-right", "err-unknown-service",
+            "err-unsupported", "hole-apigateway", "hole-s3", "mix-beside-ja", "mix-logs-ja", "mix-min-en", "mix-nat-ja",
+            "mix-vpc-ja", "mix-vpc-ja-right", "mix-web-ja", "mix-web-ja-right", "web-2az-en", "web-2az-ja", "web-2az-ja-right",
+            "web-3az-en", "web-3az-en-right", "web-3az-ja", "web-attach-en", "web-named-ja",
         ]
     );
 }
 
 #[test]
 fn error_cases_have_no_expected_diagram() {
-    for name in ["err-mixed-vpc", "err-unknown-service", "err-unsupported"] {
+    for name in ["err-unknown-service", "err-unsupported"] {
         assert!(!cases_dir().join(name).join("expected.drawio").exists(), "{name}");
     }
 }

@@ -1,0 +1,7 @@
+flows:
+  - user -> apigateway(http) -> lambda.api -> aurora
+  - apigateway -> lambda.report -> dynamodb
+  - lambda.api ~> cloudwatch
+  - lambda.report ~> cloudwatch
+set:
+  lang: ja

@@ -1,0 +1,7 @@
+flows:
+  - user -> apigateway(http) -> lambda -> aurora
+  - lambda -> s3
+  - lambda ~> cloudwatch
+set:
+  direction: right
+  lang: ja

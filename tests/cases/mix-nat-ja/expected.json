@@ -1,0 +1,182 @@
+{
+  "versions": {
+    "archwire": "0.1.0",
+    "rules": "2026.11.4"
+  },
+  "derived": [
+    {
+      "target": "aws-cloud",
+      "added": true,
+      "kind": "default",
+      "rule": "resources-inside-aws-cloud-frame",
+      "reason": "AWS のリソースは AWS Cloud の枠の中に描く。",
+      "source": null
+    },
+    {
+      "target": "region",
+      "added": true,
+      "kind": "default",
+      "rule": "resources-inside-region-frame",
+      "reason": "リージョンに属する AWS のリソースは、そのリージョンの枠の中に描く。",
+      "source": null
+    },
+    {
+      "target": "region",
+      "added": true,
+      "kind": "default",
+      "rule": "default-region",
+      "reason": "リージョンの指定が無いので、ap-northeast-1（東京）にする。",
+      "source": null
+    },
+    {
+      "target": "vpc",
+      "added": true,
+      "kind": "constraint",
+      "rule": "aurora-cluster-in-vpc",
+      "reason": "Amazon Aurora の DB クラスターは VPC の中にだけ作成できるので、VPC を描く。",
+      "source": "https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Aurora.CreateInstance.html"
+    },
+    {
+      "target": "az",
+      "added": true,
+      "kind": "constraint",
+      "rule": "aurora-subnet-group-two-azs",
+      "reason": "Aurora の DB クラスターに選ぶ DB サブネットグループは、少なくとも2つのアベイラビリティゾーンを覆わなければならない。archwire は、2つ以上のアベイラビリティゾーンを描く。",
+      "source": "https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Aurora.CreateInstance.html"
+    },
+    {
+      "target": "az",
+      "added": true,
+      "kind": "default",
+      "rule": "default-two-azs-for-database",
+      "reason": "AZ の数の指定が無いので、2つにする。",
+      "source": null
+    },
+    {
+      "target": "subnet",
+      "added": true,
+      "kind": "default",
+      "rule": "public-and-private-subnet-per-az",
+      "reason": "archwire は、各アベイラビリティゾーンにパブリックサブネットとプライベートサブネットを1つずつ置く。",
+      "source": null
+    },
+    {
+      "target": "apigateway",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "VPC のサブネットに置かないリージョンのサービスは、リージョンの枠の中、VPC の枠の外に描く。",
+      "source": null
+    },
+    {
+      "target": "lambda",
+      "added": false,
+      "kind": "constraint",
+      "rule": "function-attaches-to-resource-vpc",
+      "reason": "Lambda 関数は、リソースを含むプライベートサブネットを通じて VPC にアタッチすると、Amazon VPC 内のリソースにアクセスできる。archwire は、VPC の中の部品につなぐ関数を、その VPC のプライベートサブネットに描く。",
+      "source": "https://docs.aws.amazon.com/lambda/latest/dg/configuration-vpc.html"
+    },
+    {
+      "target": "lambda",
+      "added": false,
+      "kind": "default",
+      "rule": "attached-function-per-az",
+      "reason": "Lambda 関数はどれも、Lambda が所有し管理する VPC の中で動く。関数を VPC にアタッチすると、選んだサブネットとセキュリティグループの組み合わせに対して Lambda が作るネットワークインターフェイスを使う。archwire は、アタッチした関数を、各アベイラビリティゾーンのプライベートサブネットに1つずつ描く。",
+      "source": "https://docs.aws.amazon.com/lambda/latest/dg/configuration-vpc.html"
+    },
+    {
+      "target": "lambda",
+      "added": false,
+      "kind": "constraint",
+      "rule": "attached-function-internet-through-nat",
+      "reason": "VPC にアタッチした関数は、VPC にインターネットアクセスが無ければ、その VPC 内のリソースにしか届かない。IPv4 では、プライベートサブネットは NAT ゲートウェイを通じてインターネットにアクセスできる。archwire は、アタッチした関数の IPv4 でのインターネットアクセスのために、パブリックサブネットに NAT ゲートウェイを足す。",
+      "source": "https://docs.aws.amazon.com/lambda/latest/dg/configuration-vpc-internet.html"
+    },
+    {
+      "target": "aurora",
+      "added": false,
+      "kind": "default",
+      "rule": "database-in-private",
+      "reason": "サブネットの指定が無いので、Aurora はインターネットから届かないプライベートサブネットに置く。",
+      "source": null
+    },
+    {
+      "target": "aurora",
+      "added": false,
+      "kind": "default",
+      "rule": "aurora-writer-reader",
+      "reason": "Writer を1つ目の AZ に、Reader を残りの AZ に置く。",
+      "source": null
+    },
+    {
+      "target": "s3",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "VPC のサブネットに置かないリージョンのサービスは、リージョンの枠の中、VPC の枠の外に描く。",
+      "source": null
+    },
+    {
+      "target": "cloudwatch",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "VPC のサブネットに置かないリージョンのサービスは、リージョンの枠の中、VPC の枠の外に描く。",
+      "source": null
+    },
+    {
+      "target": "igw",
+      "added": true,
+      "kind": "constraint",
+      "rule": "private-egress-through-nat",
+      "reason": "プライベートサブネットのリソースは、パブリックサブネットに置いた NAT デバイスを通じてインターネットへ接続できる。NAT デバイスは、送信元の IPv4 アドレスを自分のアドレスに置きかえる。",
+      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat.html"
+    },
+    {
+      "target": "nat-1a",
+      "added": true,
+      "kind": "constraint",
+      "rule": "private-egress-through-nat",
+      "reason": "プライベートサブネットのリソースは、パブリックサブネットに置いた NAT デバイスを通じてインターネットへ接続できる。NAT デバイスは、送信元の IPv4 アドレスを自分のアドレスに置きかえる。",
+      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat.html"
+    },
+    {
+      "target": "nat-1a",
+      "added": true,
+      "kind": "default",
+      "rule": "nat-device-is-nat-gateway",
+      "reason": "AWS は、マネージドな NAT デバイスである NAT ゲートウェイと、EC2 上に自分で作る NAT インスタンスを用意していて、可用性と帯域幅が優れ管理の手間が少ない NAT ゲートウェイを推奨している。archwire は NAT ゲートウェイを描く。",
+      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat.html"
+    },
+    {
+      "target": "nat-1c",
+      "added": true,
+      "kind": "constraint",
+      "rule": "private-egress-through-nat",
+      "reason": "プライベートサブネットのリソースは、パブリックサブネットに置いた NAT デバイスを通じてインターネットへ接続できる。NAT デバイスは、送信元の IPv4 アドレスを自分のアドレスに置きかえる。",
+      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat.html"
+    },
+    {
+      "target": "nat-1c",
+      "added": true,
+      "kind": "default",
+      "rule": "nat-device-is-nat-gateway",
+      "reason": "AWS は、マネージドな NAT デバイスである NAT ゲートウェイと、EC2 上に自分で作る NAT インスタンスを用意していて、可用性と帯域幅が優れ管理の手間が少ない NAT ゲートウェイを推奨している。archwire は NAT ゲートウェイを描く。",
+      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat.html"
+    },
+    {
+      "target": "nat",
+      "added": true,
+      "kind": "default",
+      "rule": "nat-per-az",
+      "reason": "NAT Gateway をアベイラビリティゾーンごとに置くと、ほかのゾーンが止まっても外向きの通信が続く。",
+      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/nat-gateway-scenarios.html"
+    }
+  ],
+  "holes": [],
+  "errors": [],
+  "warnings": [],
+  "notes": [
+    "補助の流れ（~>）は経路を扱わず、線だけを描く。"
+  ]
+}

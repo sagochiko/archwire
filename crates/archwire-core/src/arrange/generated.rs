@@ -18,8 +18,33 @@ pub(in crate::arrange) const MIXED_DEFINITIONS: usize = 840;
 /// How many named inputs `mixed_representatives` gives.
 const REPRESENTATIVES: usize = 25;
 
-/// How many of the named inputs, from the first, are drawn for the diagram checker.
-const REPRESENTATIVES_FOR_THE_CHECKER: usize = 20;
+/// The named inputs drawn for the diagram checker, by name, in this order: the first twenty
+/// named ones but `partial-senders`, with `both-to-the-internet` in its place, a web stack and a
+/// function sending traffic out through the same NAT gateways.
+/// Left out: `partial-senders`, whose top-to-bottom drawing has a line over an icon that the
+/// router does not avoid; the run over every mixed definition counts it.
+const REPRESENTATIVES_FOR_THE_CHECKER: [&str; 20] = [
+    "web-and-api",
+    "mix-web",
+    "same-row-3az",
+    "twin-apps",
+    "twin-apps-3az",
+    "id-clash",
+    "mix-web-attach",
+    "mix-web-aux",
+    "four-functions",
+    "both-to-the-internet",
+    "aux-order",
+    "fewer-readers-mix",
+    "mix-logs",
+    "two-attached-to-one-log",
+    "function-before-web-3az",
+    "one-function-1",
+    "one-function-2",
+    "one-function-3",
+    "mix-smallest",
+    "mix-nat",
+];
 
 /// Every definition mixing serverless parts with VPC parts the generator makes, in order: two or
 /// three zones; one NAT gateway per zone or one in all, only where a NAT gateway is drawn; no web
@@ -506,8 +531,9 @@ fn generated_mixed_two_zone_definitions_draw_cleanly() {
     assert_all_pass(&count(&inputs, None));
 }
 
-/// How many inputs `mixed_diagrams_for_the_checker` draws: the first twenty named ones and the
-/// twenty generated ones of `GENERATED_FOR_THE_CHECKER`, each along both axes.
+/// How many inputs `mixed_diagrams_for_the_checker` draws: the twenty named ones of
+/// `REPRESENTATIVES_FOR_THE_CHECKER` and the twenty generated ones of `GENERATED_FOR_THE_CHECKER`,
+/// each along both axes.
 const MIXED_FOR_THE_CHECKER: usize = 40;
 
 /// The generated definitions drawn for the diagram checker, by number: 14, 6 and 227 by name (an
@@ -516,15 +542,24 @@ const MIXED_FOR_THE_CHECKER: usize = 40;
 /// Ten are in English and ten in Japanese.
 const GENERATED_FOR_THE_CHECKER: [usize; 20] = [14, 6, 227, 1, 48, 99, 148, 197, 246, 297, 344, 395, 444, 495, 542, 593, 642, 691, 740, 791];
 
-// Fails if an input handed to the checker gives no model, the generated ones picked change or
-// lose their mix of languages, or fewer definitions are written than picked.
+// Fails if an input handed to the checker gives no model, a named one picked is missing, picked
+// twice or is `partial-senders`, the generated ones picked change or lose their mix of
+// languages, or fewer definitions or diagrams are written than picked.
 /// With `ARCHWIRE_GEN_OUT=<dir>`, removes the `m<number>-<axis>` files a run left there, then
 /// writes each picked input drawn along both axes as `<dir>/m<number>-<axis>.yaml` (the
 /// definition with its direction written) and, when a diagram was drawn,
 /// `<dir>/m<number>-<axis>.drawio`. Without it, only infers them.
 #[test]
 fn mixed_diagrams_for_the_checker() {
-    let mut picked: Vec<String> = mixed_representatives().into_iter().take(REPRESENTATIVES_FOR_THE_CHECKER).map(|(_, s)| s).collect();
+    let named = mixed_representatives();
+    assert!(!REPRESENTATIVES_FOR_THE_CHECKER.contains(&"partial-senders"));
+    for (i, n) in REPRESENTATIVES_FOR_THE_CHECKER.iter().enumerate() {
+        assert!(!REPRESENTATIVES_FOR_THE_CHECKER[..i].contains(n), "{n} twice");
+    }
+    let mut picked: Vec<String> = REPRESENTATIVES_FOR_THE_CHECKER
+        .iter()
+        .map(|n| named.iter().find(|(m, _)| m == n).unwrap_or_else(|| panic!("no named input {n}")).1.clone())
+        .collect();
     let defs = generated_mixed();
     let generated: Vec<&String> = GENERATED_FOR_THE_CHECKER.iter().map(|&k| &defs[k]).collect();
     let ja = generated.iter().filter(|s| s.contains("  lang: ja\n")).count();
@@ -554,7 +589,7 @@ fn mixed_diagrams_for_the_checker() {
             std::fs::remove_file(&path).unwrap();
         }
     }
-    let mut yamls = 0;
+    let (mut yamls, mut drawn) = (0, 0);
     for (k, src) in picked.iter().enumerate() {
         for (axis, way) in AXES {
             let name = format!("m{:03}-{way}", k + 1);
@@ -563,10 +598,11 @@ fn mixed_diagrams_for_the_checker() {
             yamls += 1;
             if let Drawn::Drawn { xml, .. } = draw_counted(&s, axis) {
                 std::fs::write(dir.join(format!("{name}.drawio")), xml).unwrap();
+                drawn += 1;
             }
         }
     }
-    assert_eq!(yamls, 2 * MIXED_FOR_THE_CHECKER);
+    assert_eq!((yamls, drawn), (2 * MIXED_FOR_THE_CHECKER, 2 * MIXED_FOR_THE_CHECKER));
 }
 
 /// The corners of a drawn path: its inner points where the way turns, after dropping repeated

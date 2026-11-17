@@ -1,4 +1,4 @@
-version = "2026.11.3"
+version = "2026.11.4"
 
 # kind = "constraint": states an AWS constraint; `source` (AWS documentation URL) is required.
 # kind = "default": a choice archwire makes when the definition is silent; `source` is optional.
@@ -53,9 +53,16 @@ reason_ja = "インターネット向けの Application Load Balancer では、I
 [[rule]]
 id = "private-egress-through-nat"
 kind = "constraint"
-source = "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat-gateway.html"
-reason_en = "Instances in a private subnet connect to the internet through a public NAT gateway, which is created in a public subnet."
-reason_ja = "プライベートサブネットのリソースは、パブリックサブネットに作った NAT Gateway を通してインターネットへ接続する。"
+source = "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat.html"
+reason_en = "Resources in a private subnet can connect to the internet through a NAT device in a public subnet, which replaces their source IPv4 addresses with its own."
+reason_ja = "プライベートサブネットのリソースは、パブリックサブネットに置いた NAT デバイスを通じてインターネットへ接続できる。NAT デバイスは、送信元の IPv4 アドレスを自分のアドレスに置きかえる。"
+
+[[rule]]
+id = "nat-device-is-nat-gateway"
+kind = "default"
+source = "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat.html"
+reason_en = "AWS offers a managed NAT device, the NAT gateway, and a NAT instance you build yourself on EC2, and recommends NAT gateways for better availability and bandwidth and less administration. archwire draws a NAT gateway."
+reason_ja = "AWS は、マネージドな NAT デバイスである NAT ゲートウェイと、EC2 上に自分で作る NAT インスタンスを用意していて、可用性と帯域幅が優れ管理の手間が少ない NAT ゲートウェイを推奨している。archwire は NAT ゲートウェイを描く。"
 
 [[rule]]
 id = "nat-per-az"

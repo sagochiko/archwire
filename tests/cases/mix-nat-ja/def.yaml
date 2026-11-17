@@ -1,0 +1,8 @@
+flows:
+  - user -> apigateway(http) -> lambda -> aurora
+  - lambda -> s3
+  - lambda ~> cloudwatch
+set:
+  lang: ja
+choose:
+  route.lambda.s3: nat

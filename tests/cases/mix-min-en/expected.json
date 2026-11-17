@@ -1,0 +1,108 @@
+{
+  "versions": {
+    "archwire": "0.1.0",
+    "rules": "2026.11.4"
+  },
+  "derived": [
+    {
+      "target": "aws-cloud",
+      "added": true,
+      "kind": "default",
+      "rule": "resources-inside-aws-cloud-frame",
+      "reason": "AWS resources are drawn inside the AWS Cloud frame.",
+      "source": null
+    },
+    {
+      "target": "region",
+      "added": true,
+      "kind": "default",
+      "rule": "resources-inside-region-frame",
+      "reason": "AWS resources that belong to a Region are drawn inside that Region's frame.",
+      "source": null
+    },
+    {
+      "target": "region",
+      "added": true,
+      "kind": "default",
+      "rule": "default-region",
+      "reason": "No Region was given, so ap-northeast-1 (Tokyo) is used.",
+      "source": null
+    },
+    {
+      "target": "vpc",
+      "added": true,
+      "kind": "constraint",
+      "rule": "aurora-cluster-in-vpc",
+      "reason": "An Amazon Aurora DB cluster can be created only in a VPC, so a VPC is drawn.",
+      "source": "https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Aurora.CreateInstance.html"
+    },
+    {
+      "target": "az",
+      "added": true,
+      "kind": "constraint",
+      "rule": "aurora-subnet-group-two-azs",
+      "reason": "The DB subnet group chosen for an Aurora DB cluster must cover at least two Availability Zones. archwire draws at least two Availability Zones.",
+      "source": "https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Aurora.CreateInstance.html"
+    },
+    {
+      "target": "az",
+      "added": true,
+      "kind": "default",
+      "rule": "default-two-azs-for-database",
+      "reason": "No number of Availability Zones was given, so two are used.",
+      "source": null
+    },
+    {
+      "target": "subnet",
+      "added": true,
+      "kind": "default",
+      "rule": "private-subnet-per-az",
+      "reason": "archwire gives each Availability Zone one private subnet; no part here is placed in a public subnet.",
+      "source": null
+    },
+    {
+      "target": "apigateway",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "Regional services that are not placed in a VPC subnet are drawn inside the Region frame and outside the VPC frame.",
+      "source": null
+    },
+    {
+      "target": "lambda",
+      "added": false,
+      "kind": "constraint",
+      "rule": "function-attaches-to-resource-vpc",
+      "reason": "A Lambda function can be given access to resources in an Amazon VPC by attaching it to the VPC through the private subnets that contain the resources. archwire draws a function that connects to a part in a VPC in that VPC's private subnets.",
+      "source": "https://docs.aws.amazon.com/lambda/latest/dg/configuration-vpc.html"
+    },
+    {
+      "target": "lambda",
+      "added": false,
+      "kind": "default",
+      "rule": "attached-function-per-az",
+      "reason": "Every Lambda function runs inside a VPC that Lambda owns and manages; attaching a function to a VPC gives it a network interface that Lambda creates for the chosen subnet and security group combination. archwire draws the attached function once in the private subnet of each Availability Zone.",
+      "source": "https://docs.aws.amazon.com/lambda/latest/dg/configuration-vpc.html"
+    },
+    {
+      "target": "aurora",
+      "added": false,
+      "kind": "default",
+      "rule": "database-in-private",
+      "reason": "No subnet was given, so Aurora is placed in private subnets so it is not reachable from the internet.",
+      "source": null
+    },
+    {
+      "target": "aurora",
+      "added": false,
+      "kind": "default",
+      "rule": "aurora-writer-reader",
+      "reason": "The Writer goes in the first Availability Zone and Readers in the remaining ones.",
+      "source": null
+    }
+  ],
+  "holes": [],
+  "errors": [],
+  "warnings": [],
+  "notes": []
+}

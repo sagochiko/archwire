@@ -1,7 +1,7 @@
 {
   "versions": {
     "archwire": "0.1.0",
-    "rules": "2026.11.3"
+    "rules": "2026.11.4"
   },
   "derived": [
     {
@@ -121,16 +121,32 @@
       "added": true,
       "kind": "constraint",
       "rule": "private-egress-through-nat",
-      "reason": "プライベートサブネットのリソースは、パブリックサブネットに作った NAT Gateway を通してインターネットへ接続する。",
-      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat-gateway.html"
+      "reason": "プライベートサブネットのリソースは、パブリックサブネットに置いた NAT デバイスを通じてインターネットへ接続できる。NAT デバイスは、送信元の IPv4 アドレスを自分のアドレスに置きかえる。",
+      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat.html"
+    },
+    {
+      "target": "nat-1a",
+      "added": true,
+      "kind": "default",
+      "rule": "nat-device-is-nat-gateway",
+      "reason": "AWS は、マネージドな NAT デバイスである NAT ゲートウェイと、EC2 上に自分で作る NAT インスタンスを用意していて、可用性と帯域幅が優れ管理の手間が少ない NAT ゲートウェイを推奨している。archwire は NAT ゲートウェイを描く。",
+      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat.html"
     },
     {
       "target": "nat-1c",
       "added": true,
       "kind": "constraint",
       "rule": "private-egress-through-nat",
-      "reason": "プライベートサブネットのリソースは、パブリックサブネットに作った NAT Gateway を通してインターネットへ接続する。",
-      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat-gateway.html"
+      "reason": "プライベートサブネットのリソースは、パブリックサブネットに置いた NAT デバイスを通じてインターネットへ接続できる。NAT デバイスは、送信元の IPv4 アドレスを自分のアドレスに置きかえる。",
+      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat.html"
+    },
+    {
+      "target": "nat-1c",
+      "added": true,
+      "kind": "default",
+      "rule": "nat-device-is-nat-gateway",
+      "reason": "AWS は、マネージドな NAT デバイスである NAT ゲートウェイと、EC2 上に自分で作る NAT インスタンスを用意していて、可用性と帯域幅が優れ管理の手間が少ない NAT ゲートウェイを推奨している。archwire は NAT ゲートウェイを描く。",
+      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat.html"
     },
     {
       "target": "nat",

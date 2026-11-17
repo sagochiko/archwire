@@ -21,7 +21,7 @@ use crate::model::{Area, Axis, Model, Tier};
 use crate::rules::{Lang, LinkRule, Place, Rules, Scope, Service, Subnet};
 
 /// The rules this module's code names itself; the rest come from the data, which loading checks.
-pub(crate) const RULES: [&str; 14] = [
+pub(crate) const RULES: [&str; 15] = [
     "resources-inside-aws-cloud-frame",
     "resources-inside-region-frame",
     "default-region",
@@ -35,6 +35,7 @@ pub(crate) const RULES: [&str; 14] = [
     "aurora-writer-reader",
     "internet-facing-alb-in-vpc-with-igw",
     "private-egress-through-nat",
+    "nat-device-is-nat-gateway",
     "nat-per-az",
 ];
 
@@ -718,111 +719,6 @@ mod tests {
         }
     }
 
-    /// How the answers of the inference without a VPC and of this one may differ for an input.
-    enum Expect {
-        /// The same model and the same diagnostics.
-        Same,
-        /// Both stop with the same errors; these are the `at` of the new order.
-        ErrorOrder(&'static [&'static str]),
-        /// The old inference gives a model; this one stops with these errors: code, at, got, text.
-        NewlyStopped(&'static [(&'static str, &'static str, &'static str, &'static str)]),
-    }
-
-    /// The inputs whose answer changes on purpose, by their name in the lists.
-    const CHANGED: [(&str, Expect); 2] = [
-        // Unknown keys are reported after the values of the known settings.
-        ("FLOW_INFER_TEST_DEFINITIONS#36", Expect::ErrorOrder(&["set.region", "set.lang", "set.direction", "set.azs"])),
-        // A function outside the VPC has no NAT gateway to send traffic to the internet through.
-        (
-            "FLOW_INFER_TEST_DEFINITIONS#8",
-            Expect::NewlyStopped(&[(
-                "UNSUPPORTED",
-                "flows[1]",
-                "lambda -> internet",
-                "`lambda -> internet` needs `lambda` in a VPC; connect it to a part in a private subnet",
-            )]),
-        ),
-    ];
-    const SAME_COUNT: usize = 1263;
-    const ERROR_ORDER_COUNT: usize = 1;
-    const NEWLY_STOPPED_COUNT: usize = 1;
-    const INPUT_COUNT: usize = 1265;
-
-    // Fails if the model, labels, reasons, holes or errors of a definition without a VPC change
-    // from the inference without a VPC outside the listed inputs, or an input drops out of the lists.
-    #[test]
-    fn definitions_without_a_vpc_infer_as_before() {
-        use crate::test_inputs::{generated, API_CASES, FLOW_INFER_TEST_DEFINITIONS};
-        let mut inputs: Vec<(String, String)> = Vec::new();
-        for (i, (name, src)) in API_CASES.iter().enumerate() {
-            inputs.push((format!("API_CASES#{i} {name}"), src.to_string()));
-        }
-        for (name, src) in [
-            ("api-http-ja-down", include_str!("../../../../tests/cases/api-http-ja-down/def.yaml")),
-            ("api-merged-ja-down", include_str!("../../../../tests/cases/api-merged-ja-down/def.yaml")),
-        ] {
-            inputs.push((format!("tests/cases/{name}"), src.to_string()));
-        }
-        for (i, src) in generated().into_iter().enumerate() {
-            inputs.push((format!("generated#{i}"), src));
-        }
-        for (i, src) in FLOW_INFER_TEST_DEFINITIONS.iter().enumerate() {
-            inputs.push((format!("FLOW_INFER_TEST_DEFINITIONS#{i}"), src.to_string()));
-        }
-        inputs.push(("tests/cases/err-unsupported".into(), include_str!("../../../../tests/cases/err-unsupported/def.yaml").into()));
-
-        let rules = Rules::builtin();
-        let (mut same, mut error_order, mut stopped) = (0, 0, 0);
-        for (id, src) in &inputs {
-            let def = crate::def::parse(src).unwrap_or_else(|e| panic!("{id}: {e:?}"));
-            let (old_model, old) = crate::flow_infer::infer(&def, &rules);
-            let (new_model, new) = infer(&def, &rules);
-            match CHANGED.iter().find(|(name, _)| name == id).map(|(_, e)| e).unwrap_or(&Expect::Same) {
-                Expect::Same => {
-                    assert_eq!(old_model, new_model, "{id}:\n{src}");
-                    assert_eq!(old.to_json(), new.to_json(), "{id}:\n{src}");
-                    same += 1;
-                }
-                Expect::ErrorOrder(want) => {
-                    assert!(old_model.is_none() && new_model.is_none(), "{id}:\n{src}");
-                    let at: Vec<&str> = new.errors.iter().map(|e| e.at.as_deref().unwrap_or("")).collect();
-                    assert_eq!(at, *want, "{id}:\n{src}");
-                    assert_ne!(old.errors, new.errors, "{id}: the order did not change");
-                    // The old errors put in the new order are the new errors, one for one.
-                    let mut left = old.errors.clone();
-                    let mut reordered = old.clone();
-                    reordered.errors = new
-                        .errors
-                        .iter()
-                        .map(|e| {
-                            let i = left.iter().position(|o| o == e).unwrap_or_else(|| panic!("{id}: {e:?} is new"));
-                            left.remove(i)
-                        })
-                        .collect();
-                    assert!(left.is_empty(), "{id}: {left:?} are gone");
-                    assert_eq!(reordered.to_json(), new.to_json(), "{id}:\n{src}");
-                    error_order += 1;
-                }
-                Expect::NewlyStopped(want) => {
-                    assert!(old_model.is_some() && old.errors.is_empty(), "{id}:\n{src}\nold {}", old.to_json());
-                    assert!(new_model.is_none(), "{id}:\n{src}");
-                    let got: Vec<_> = new
-                        .errors
-                        .iter()
-                        .map(|e| (e.code.as_str(), e.at.as_deref().unwrap_or(""), e.got.as_deref().unwrap_or(""), e.message.as_str()))
-                        .collect();
-                    assert_eq!(got, *want, "{id}:\n{src}");
-                    assert!(new.derived.is_empty() && new.holes.is_empty() && new.notes.is_empty(), "{id}:\n{src}");
-                    stopped += 1;
-                }
-            }
-        }
-        assert_eq!((same, error_order, stopped), (SAME_COUNT, ERROR_ORDER_COUNT, NEWLY_STOPPED_COUNT));
-        assert_eq!(inputs.len(), INPUT_COUNT);
-        assert_eq!(SAME_COUNT + ERROR_ORDER_COUNT + NEWLY_STOPPED_COUNT, INPUT_COUNT);
-        assert_eq!(CHANGED.len(), INPUT_COUNT - SAME_COUNT);
-    }
-
     /// The model of a definition with a VPC that passes the checks, built with these rules.
     fn vpc_with(src: &str, rules: &Rules) -> Model {
         let def = crate::def::parse(src).unwrap();
@@ -986,8 +882,8 @@ mod tests {
         let (m, d) = infer(&crate::def::parse(src).unwrap(), &rules);
         assert!(m.is_some(), "{:?}", d.errors);
         assert_eq!(rules_of(&d, "door"), ["internet-facing-alb-in-vpc-with-igw"]);
-        assert_eq!(rules_of(&d, "exit-1a"), ["private-egress-through-nat"]);
-        assert_eq!(rules_of(&d, "exit-1c"), ["private-egress-through-nat"]);
+        assert_eq!(rules_of(&d, "exit-1a"), ["private-egress-through-nat", "nat-device-is-nat-gateway"]);
+        assert_eq!(rules_of(&d, "exit-1c"), ["private-egress-through-nat", "nat-device-is-nat-gateway"]);
         assert_eq!(rules_of(&d, "exit"), ["nat-per-az"]);
         assert!(["igw", "nat-1a", "nat-1c", "nat"].iter().all(|t| rules_of(&d, t).is_empty()));
     }
@@ -1257,252 +1153,10 @@ mod tests {
         named_bucket_inferred(&m.unwrap(), &d);
     }
 
-    /// UNSUPPORTED for a line outside the pairs, and an answer to a hole the definition does not have.
-    const UNSUPPORTED_AND_UNKNOWN_HOLE: &str = "flows:\n  - user -> alb -> ecs\n  - user -> s3\nchoose:\n  route.ecs.rds: nat\n";
-    /// A named part in a definition with a VPC, and a bad language.
-    const NAMED_PART_AND_BAD_LANG: &str = "flows:\n  - user -> alb -> ecs.web\nset:\n  lang: fr\n";
-    /// A part no main flow from the user reaches, and a bad answer to its route.
     /// A web stack written with Aurora before the load balancer: the VPC's reasons come from Aurora.
     const AURORA_BEFORE_ALB: &str = "flows:\n  - ecs -> aurora\n  - user -> alb -> ecs\n";
     /// The same lines the other way round: the load balancer comes first.
     const ALB_BEFORE_AURORA: &str = "flows:\n  - user -> alb -> ecs\n  - ecs -> aurora\n";
-    const UNREACHED_AND_BAD_CHOICE: &str = "flows:\n  - user -> alb -> ecs\n  - aurora -> s3\nchoose:\n  route.aurora.s3: tunnel\n";
-
-    /// How the answers of the inference with a VPC and of this one may differ for an input.
-    enum VpcExpect {
-        /// The same model and the same diagnostics.
-        Same,
-        /// What may change, and the old diagnostics changed that way, which must then equal the new
-        /// ones; the models must be equal.
-        Fields(&'static str, fn(&mut Diagnostics)),
-        /// The old inference stops; this one gives this model and these diagnostics.
-        NewlyBuilt(fn(&Model, &Diagnostics)),
-        /// The old inference gives a model; this one stops with these errors: code, at, got, text.
-        NewlyStopped(&'static [(&'static str, &'static str, &'static str, &'static str)]),
-    }
-
-    /// The text of UNSUPPORTED for a connection that is not in the pairs.
-    fn not_supported(got: &str) -> String {
-        format!("`{got}` is not a supported connection")
-    }
-
-    /// The only error is UNSUPPORTED for the line written; its text says the pair is not listed.
-    fn message_only(d: &mut Diagnostics) {
-        assert_eq!(d.errors.len(), 1, "{:?}", d.errors);
-        let e = &mut d.errors[0];
-        assert_eq!(e.code, "UNSUPPORTED");
-        assert!(e.message.starts_with("v0.1 does not support"), "{}", e.message);
-        e.message = not_supported(e.got.as_deref().unwrap());
-    }
-
-    /// The shape check stops at `flows`; the pairs stop at the line without a pair instead.
-    fn alb_to_aurora_at_its_line(d: &mut Diagnostics) {
-        assert_eq!(d.errors.len(), 1, "{:?}", d.errors);
-        let e = &mut d.errors[0];
-        assert_eq!((e.code.as_str(), e.at.as_deref(), e.got.as_deref()), ("UNSUPPORTED", Some("flows"), None));
-        e.at = Some("flows[0]".into());
-        e.got = Some("alb -> aurora".into());
-        e.message = not_supported("alb -> aurora");
-    }
-
-    /// The note that auxiliary flows are not routed is gone: the only one is from outside the VPC.
-    fn aux_note_gone(d: &mut Diagnostics) {
-        let note = Rules::builtin().text("note.aux_not_routed", Lang::En);
-        assert_eq!(d.notes, [note]);
-        d.notes.clear();
-    }
-
-    /// The connections are checked before the answers, so UNSUPPORTED comes first, with its new text.
-    fn unsupported_first(d: &mut Diagnostics) {
-        let codes: Vec<_> = d.errors.iter().map(|e| e.code.as_str()).collect();
-        assert_eq!(codes, ["UNKNOWN_HOLE", "UNSUPPORTED"]);
-        d.errors.swap(0, 1);
-        d.errors[0].message = not_supported("user -> s3");
-    }
-
-    /// A named part is no longer stopped with a VPC.
-    fn named_part_accepted(d: &mut Diagnostics) {
-        let e = d.errors.remove(0);
-        assert_eq!((e.code.as_str(), e.at.as_deref(), e.got.as_deref()), ("UNSUPPORTED", Some("flows[0][2]"), Some("ecs.web")));
-        assert_eq!(d.errors.iter().map(|e| e.code.as_str()).collect::<Vec<_>>(), ["BAD_SETTING"]);
-    }
-
-    /// A main flow no main flow from the user reaches stops, before the answers are checked.
-    fn unreached_first(d: &mut Diagnostics) {
-        assert_eq!(d.errors.iter().map(|e| e.code.as_str()).collect::<Vec<_>>(), ["BAD_CHOICE"]);
-        d.errors.insert(0, bad("UNSUPPORTED", "flows[1]", "aurora -> s3", &[], "`aurora -> s3` is not reached by main flows (->) from `user`"));
-    }
-
-    /// The VPC's reasons, which the old inference took from the load balancer, come from Aurora,
-    /// written first: the rule id, its text and its source of each reason for `vpc` and `az`.
-    fn vpc_reasons_from_aurora(d: &mut Diagnostics) {
-        let rules = Rules::builtin();
-        let swap = [
-            ("load-balancer-in-vpc", "aurora-cluster-in-vpc"),
-            ("alb-spans-two-azs", "aurora-subnet-group-two-azs"),
-            ("default-two-azs", "default-two-azs-for-database"),
-        ];
-        let targets: Vec<_> = d.derived.iter().filter(|x| x.target == "vpc" || x.target == "az").map(|x| (x.target.as_str(), x.rule.as_str())).collect();
-        assert_eq!(targets, [("vpc", swap[0].0), ("az", swap[1].0), ("az", swap[2].0)]);
-        for x in d.derived.iter_mut().filter(|x| x.target == "vpc" || x.target == "az") {
-            let (_, to) = swap.iter().find(|(from, _)| *from == x.rule).expect("listed above");
-            let r = rules.rule(to);
-            x.rule = to.to_string();
-            x.reason = r.reason_en.clone();
-            x.source = r.source.clone();
-        }
-    }
-
-    fn twin_apps(m: &Model, d: &Diagnostics) {
-        twin_apps_built(m);
-        twin_apps_explained(d);
-    }
-    fn two_webs(m: &Model, d: &Diagnostics) {
-        two_webs_built(m);
-        two_webs_explained(d);
-    }
-    fn load_balancer_alone(m: &Model, d: &Diagnostics) {
-        load_balancer_alone_built(m);
-        load_balancer_alone_explained(d);
-    }
-
-    /// The inputs whose answer changes on purpose, by their name in the lists.
-    const VPC_CHANGED: [(&str, VpcExpect); 34] = [
-        // CloudFront's side line is outside the VPC.
-        ("VPC_TEST_DEFINITIONS#26", VpcExpect::Fields("notes: note.aux_not_routed is gone", aux_note_gone)),
-        // A line outside the pairs: only the text of its error changes.
-        ("GRID_INFER_TEST_DEFINITIONS#26", VpcExpect::Fields("errors[0].message", message_only)),
-        ("GRID_INFER_TEST_DEFINITIONS#28", VpcExpect::Fields("errors[0].message", message_only)),
-        ("GRID_INFER_TEST_DEFINITIONS#29", VpcExpect::Fields("errors[0].message", message_only)),
-        ("GRID_INFER_TEST_DEFINITIONS#30", VpcExpect::Fields("errors[0].message", message_only)),
-        ("GRID_INFER_TEST_DEFINITIONS#31", VpcExpect::Fields("errors[0].message", message_only)),
-        ("GRID_INFER_TEST_DEFINITIONS#32", VpcExpect::Fields("errors[0].message", message_only)),
-        ("GRID_INFER_TEST_DEFINITIONS#33", VpcExpect::Fields("errors[0].message", message_only)),
-        ("GRID_INFER_TEST_DEFINITIONS#34", VpcExpect::Fields("errors[0].message", message_only)),
-        ("GRID_INFER_TEST_DEFINITIONS#36", VpcExpect::Fields("errors[0].message", message_only)),
-        ("GRID_INFER_TEST_DEFINITIONS#37", VpcExpect::Fields("errors[0].message", message_only)),
-        ("GRID_INFER_TEST_DEFINITIONS#38", VpcExpect::Fields("errors[0].message", message_only)),
-        ("GRID_INFER_TEST_DEFINITIONS#39", VpcExpect::Fields("errors[0].message", message_only)),
-        ("GRID_INFER_TEST_DEFINITIONS#40", VpcExpect::Fields("errors[0].message", message_only)),
-        ("GRID_INFER_TEST_DEFINITIONS#41", VpcExpect::Fields("errors[0].message", message_only)),
-        ("GRID_INFER_TEST_DEFINITIONS#42", VpcExpect::Fields("errors[0].message", message_only)),
-        ("GRID_INFER_TEST_DEFINITIONS#43", VpcExpect::Fields("errors[0].message", message_only)),
-        ("GRID_INFER_TEST_DEFINITIONS#44", VpcExpect::Fields("errors[0].message", message_only)),
-        ("GRID_INFER_TEST_DEFINITIONS#45", VpcExpect::Fields("errors[0].message", message_only)),
-        ("GRID_INFER_TEST_DEFINITIONS#46", VpcExpect::Fields("errors[0].message", message_only)),
-        ("GRID_INFER_TEST_DEFINITIONS#47", VpcExpect::Fields("errors[0].message", message_only)),
-        ("GRID_INFER_TEST_DEFINITIONS#48", VpcExpect::Fields("errors[0].message", message_only)),
-        ("GRID_INFER_TEST_DEFINITIONS#49", VpcExpect::Fields("errors[0].message", message_only)),
-        ("GRID_INFER_TEST_DEFINITIONS#51", VpcExpect::Fields("errors[0].message", message_only)),
-        // `alb -> aurora` is not a pair: the error is at its line.
-        ("GRID_INFER_TEST_DEFINITIONS#8", VpcExpect::Fields("errors[0].at, errors[0].got, errors[0].message", alb_to_aurora_at_its_line)),
-        ("UNSUPPORTED_AND_UNKNOWN_HOLE", VpcExpect::Fields("the order of errors, and the text of UNSUPPORTED", unsupported_first)),
-        ("NAMED_PART_AND_BAD_LANG", VpcExpect::Fields("the UNSUPPORTED of the named part is gone", named_part_accepted)),
-        ("UNREACHED_AND_BAD_CHOICE", VpcExpect::Fields("an UNSUPPORTED for the unreached line comes first", unreached_first)),
-        // The first part with VPC reasons is Aurora, not the load balancer.
-        ("AURORA_BEFORE_ALB", VpcExpect::Fields("the rule, text and source of the reasons for vpc and az", vpc_reasons_from_aurora)),
-        // Named VPC parts, a load balancer with nothing behind it, and a named part outside the VPC.
-        ("LOAD_BALANCER_ALONE", VpcExpect::NewlyBuilt(load_balancer_alone)),
-        ("TWIN_APPS", VpcExpect::NewlyBuilt(twin_apps)),
-        ("TWO_WEBS", VpcExpect::NewlyBuilt(two_webs)),
-        ("GRID_INFER_TEST_DEFINITIONS#53", VpcExpect::NewlyBuilt(named_bucket_inferred)),
-        // `alb -> aurora` is not a pair.
-        ("VPC_TEST_DEFINITIONS#25", VpcExpect::NewlyStopped(&[("UNSUPPORTED", "flows[1]", "alb -> aurora", "`alb -> aurora` is not a supported connection")])),
-    ];
-    const VPC_SAME_COUNT: usize = 1099;
-    const VPC_FIELDS_COUNT: usize = 29;
-    const VPC_NEWLY_BUILT_COUNT: usize = 4;
-    const VPC_NEWLY_STOPPED_COUNT: usize = 1;
-    /// No input stops in both with the same errors in another order.
-    const VPC_ERROR_ORDER_COUNT: usize = 0;
-    const VPC_INPUT_COUNT: usize = 1133;
-
-    // Fails if the model, labels, reasons, holes, notes or errors of a definition with a VPC
-    // differ from the inference with a VPC outside the listed inputs and the listed changes, or an
-    // input drops out of the lists.
-    #[test]
-    fn definitions_with_a_vpc_infer_as_before() {
-        use crate::test_inputs::*;
-        let mut inputs: Vec<(String, String)> = Vec::new();
-        let mut list = |name: &str, srcs: Vec<String>| {
-            for (i, src) in srcs.into_iter().enumerate() {
-                inputs.push((format!("{name}#{i}"), src));
-            }
-        };
-        let owned = |srcs: &[&str]| srcs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        list("WEB_EXAMPLES", owned(&WEB_EXAMPLES));
-        list("VPC_TEST_DEFINITIONS", owned(&VPC_TEST_DEFINITIONS));
-        list("heavy_variants", heavy_variants());
-        list("generated_with_a_vpc", generated_with_a_vpc());
-        list("GRID_INFER_TEST_DEFINITIONS", owned(&GRID_INFER_TEST_DEFINITIONS));
-        for (name, src) in [
-            ("CROWDED_S3_JA", CROWDED_S3_JA),
-            ("CROWDED_SIDE_EN", CROWDED_SIDE_EN),
-            ("FEWER_READERS", FEWER_READERS),
-            ("TWIN_APPS", TWIN_APPS),
-            ("TWO_WEBS", TWO_WEBS),
-            ("LOAD_BALANCER_ALONE", LOAD_BALANCER_ALONE),
-            ("tests/cases/err-unknown-service", include_str!("../../../../tests/cases/err-unknown-service/def.yaml")),
-            ("tests/cases/endpoint-ja-right", include_str!("../../../../tests/cases/endpoint-ja-right/def.yaml")),
-            ("tests/cases/web-2az-ja-right", include_str!("../../../../tests/cases/web-2az-ja-right/def.yaml")),
-            ("tests/cases/web-3az-en-right", include_str!("../../../../tests/cases/web-3az-en-right/def.yaml")),
-            ("UNSUPPORTED_AND_UNKNOWN_HOLE", UNSUPPORTED_AND_UNKNOWN_HOLE),
-            ("NAMED_PART_AND_BAD_LANG", NAMED_PART_AND_BAD_LANG),
-            ("UNREACHED_AND_BAD_CHOICE", UNREACHED_AND_BAD_CHOICE),
-            ("AURORA_BEFORE_ALB", AURORA_BEFORE_ALB),
-        ] {
-            inputs.push((name.to_string(), src.to_string()));
-        }
-
-        let rules = Rules::builtin();
-        let (mut same, mut fields, mut built, mut stopped) = (0, 0, 0, 0);
-        for (id, src) in &inputs {
-            let def = crate::def::parse(src).unwrap_or_else(|e| panic!("{id}: {e:?}"));
-            let (old_model, old) = crate::infer::infer(&def, &rules);
-            let (new_model, new) = infer(&def, &rules);
-            let says = || format!("{id}:\n{src}\nold {}\nnew {}", old.to_json(), new.to_json());
-            match VPC_CHANGED.iter().find(|(name, _)| name == id).map(|(_, e)| e).unwrap_or(&VpcExpect::Same) {
-                VpcExpect::Same => {
-                    assert_eq!(old_model, new_model, "{}", says());
-                    assert_eq!(old.to_json(), new.to_json(), "{}", says());
-                    same += 1;
-                }
-                VpcExpect::Fields(what, change) => {
-                    assert_eq!(old_model, new_model, "{what}: {}", says());
-                    assert_ne!(old.to_json(), new.to_json(), "{what}: nothing changed: {}", says());
-                    let mut changed = old.clone();
-                    change(&mut changed);
-                    assert_eq!(changed.to_json(), new.to_json(), "{what}: {}", says());
-                    fields += 1;
-                }
-                VpcExpect::NewlyBuilt(check) => {
-                    assert!(old_model.is_none() && !old.errors.is_empty(), "{}", says());
-                    let m = new_model.as_ref().unwrap_or_else(|| panic!("{}", says()));
-                    check(m, &new);
-                    built += 1;
-                }
-                VpcExpect::NewlyStopped(want) => {
-                    assert!(old_model.is_some() && old.errors.is_empty(), "{}", says());
-                    assert!(new_model.is_none(), "{}", says());
-                    let got: Vec<_> = new
-                        .errors
-                        .iter()
-                        .map(|e| (e.code.as_str(), e.at.as_deref().unwrap_or(""), e.got.as_deref().unwrap_or(""), e.message.as_str()))
-                        .collect();
-                    assert_eq!(got, *want, "{}", says());
-                    assert!(new.derived.is_empty() && new.holes.is_empty() && new.notes.is_empty(), "{}", says());
-                    stopped += 1;
-                }
-            }
-        }
-        assert_eq!((same, fields, built, stopped), (VPC_SAME_COUNT, VPC_FIELDS_COUNT, VPC_NEWLY_BUILT_COUNT, VPC_NEWLY_STOPPED_COUNT));
-        assert_eq!(inputs.len(), VPC_INPUT_COUNT);
-        assert_eq!(
-            VPC_SAME_COUNT + VPC_FIELDS_COUNT + VPC_NEWLY_BUILT_COUNT + VPC_NEWLY_STOPPED_COUNT + VPC_ERROR_ORDER_COUNT,
-            VPC_INPUT_COUNT
-        );
-        assert_eq!(VPC_CHANGED.len(), VPC_INPUT_COUNT - VPC_SAME_COUNT);
-    }
 
     /// The built-in rules data with one piece of text taken out of services.toml or links.toml.
     fn rules_cut(services_cut: &str, links_cut: &str) -> Rules {
@@ -2131,12 +1785,33 @@ mod tests {
             }
         }
 
+        // Fails if an added part loses a reason or gets one too many.
         #[test]
-        fn every_added_part_has_one_derived() {
+        fn every_added_part_has_its_reasons() {
             let (m, d) = run("flows:\n  - user -> alb -> ecs\n  - ecs -> internet\n");
-            for n in m.unwrap().nodes.iter().filter(|n| n.added) {
-                assert_eq!(d.derived.iter().filter(|x| x.target == n.id).count(), 1, "{}", n.id);
+            let m = m.unwrap();
+            let added: Vec<&str> = m.nodes.iter().filter(|n| n.added).map(|n| n.id.as_str()).collect();
+            assert_eq!(added, ["igw", "nat-1a", "nat-1c"]);
+            assert_eq!(super::rules_of(&d, "igw"), ["internet-facing-alb-in-vpc-with-igw"]);
+            for id in ["nat-1a", "nat-1c"] {
+                assert_eq!(super::rules_of(&d, id), ["private-egress-through-nat", "nat-device-is-nat-gateway"], "{id}");
             }
+        }
+
+        // Fails if a NAT gateway is drawn without the reason that archwire chose that kind of NAT device.
+        #[test]
+        fn every_nat_gateway_says_why_it_is_a_nat_gateway() {
+            let web = crate::test_inputs::WEB_CASES.iter().find(|(n, _)| *n == "web-2az-ja").unwrap().1;
+            let src = web.replace("set:\n", "set:\n  nat: single\n");
+            assert_ne!(web, src);
+            let (m, d) = run(&src);
+            let rules = Rules::builtin();
+            let egress = |s: &str| rules.service(s).and_then(|s| s.derived_role) == Some(crate::rules::DerivedRole::EgressNat);
+            let nats: Vec<String> = m.unwrap().nodes.iter().filter(|n| n.added && egress(&n.service)).map(|n| n.id.clone()).collect();
+            assert_eq!(nats, ["nat-1a"]);
+            let choice: Vec<_> = d.derived.iter().filter(|x| x.rule == "nat-device-is-nat-gateway").collect();
+            assert_eq!(choice.len(), 1, "{:?}", d.derived);
+            assert_eq!((choice[0].target.as_str(), choice[0].kind.clone()), ("nat-1a", crate::diag::DerivedKind::Default));
         }
 
         #[test]
