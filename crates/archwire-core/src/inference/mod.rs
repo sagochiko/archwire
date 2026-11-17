@@ -517,12 +517,23 @@ mod tests {
         assert!(m.is_none());
         assert_eq!(d.errors.len(), 1, "{:?}", d.errors);
         assert_eq!(first(&d), ("UNSUPPORTED", Some("flows[1]"), Some("waf -- cloudfront")));
-        assert_eq!(d.errors[0].message, "`waf -- cloudfront` needs `cloudfront` on a main flow (->) from `user`");
+        assert_eq!(d.errors[0].message, "`waf -- cloudfront` needs `cloudfront` on a main flow (->) from `cloudtrail`, `cloudwatch`, `config`, `eventbridge`, `guardduty`, `inspector`, `securityhub`, `user`");
     }
 
     #[test]
     fn pairs_outside_the_list_stop() {
-        for line in ["user -> s3", "cloudfront -> lambda", "dynamodb -> lambda", "apigateway -- cognito", "waf -- apigateway"] {
+        for line in [
+            "user -> s3",
+            "cloudfront -> lambda",
+            "dynamodb -> lambda",
+            "apigateway -- cognito",
+            "waf -- apigateway",
+            "sns -> eventbridge",
+            "securityhub -> guardduty",
+            "eventbridge -> lambda",
+            "sns -> lambda",
+            "guardduty ~> eventbridge",
+        ] {
             let (m, d) = run(&format!("{B}  - {line}\n"));
             assert!(m.is_none(), "{line}");
             assert_eq!(first(&d), ("UNSUPPORTED", Some("flows[1]"), Some(line)), "{line}");
@@ -538,7 +549,7 @@ mod tests {
         assert!(m.is_none());
         assert_eq!(d.errors.len(), 1, "{:?}", d.errors);
         assert_eq!(first(&d), ("UNSUPPORTED", Some("flows[1]"), Some("cloudfront ~> cloudwatch")));
-        assert_eq!(d.errors[0].message, "`cloudfront ~> cloudwatch` needs `cloudfront` on a main flow (->) from `user`");
+        assert_eq!(d.errors[0].message, "`cloudfront ~> cloudwatch` needs `cloudfront` on a main flow (->) from `cloudtrail`, `cloudwatch`, `config`, `eventbridge`, `guardduty`, `inspector`, `securityhub`, `user`");
         let (m, d) = run("flows:\n  - user -> cloudfront -> s3\n  - cloudfront ~> cloudwatch\n");
         assert!(d.errors.is_empty(), "{:?}", d.errors);
         assert!(m.is_some());
@@ -553,6 +564,47 @@ mod tests {
         let (m, d) = run("flows:\n  - cognito -- apigateway(http)\n");
         assert!(m.is_none());
         assert_eq!((d.errors[0].code.as_str(), d.errors[0].at.as_deref()), ("UNSUPPORTED", Some("flows")));
+    }
+
+    // Fails if a detection service stops being a starting point, or the list of starting points grows by accident.
+    #[test]
+    fn the_detection_flows_start_from_their_services() {
+        let defs = [
+            "flows:\n  - guardduty -> securityhub -> eventbridge -> sns\n  - inspector -> securityhub\n  - config -> securityhub\nset:\n  lang: ja\n",
+            "flows:\n  - guardduty -> securityhub -> eventbridge -> stepfunctions\n  - stepfunctions -> ssm\n  - stepfunctions -> sns\n",
+            "flows:\n  - cloudtrail -> cloudwatch -> sns\n  - cloudtrail -> s3\n",
+            "flows:\n  - config -> ssm\n",
+        ];
+        for src in defs {
+            let (m, d) = run(src);
+            assert!(d.errors.is_empty(), "{src}: {:?}", d.errors);
+            assert!(m.is_some(), "{src}");
+            assert_eq!(d.exit_code(), 0, "{src}");
+        }
+    }
+
+    // Fails if a service that only receives starts a flow.
+    #[test]
+    fn a_flow_from_a_receiving_service_still_stops() {
+        let (m, d) = run("flows:\n  - stepfunctions -> sns\n");
+        assert!(m.is_none());
+        assert_eq!(first(&d), ("UNSUPPORTED", Some("flows[0]"), Some("stepfunctions -> sns")));
+        assert_eq!(
+            d.errors[0].message,
+            "`stepfunctions -> sns` is not reached by main flows (->) from `cloudtrail`, `cloudwatch`, `config`, `eventbridge`, `guardduty`, `inspector`, `securityhub`, `user`"
+        );
+        let (m, d) = run("flows:\n  - lambda -> dynamodb\n");
+        assert!(m.is_none());
+        assert_eq!(first(&d), ("UNSUPPORTED", Some("flows[0]"), Some("lambda -> dynamodb")));
+    }
+
+    // Fails if an alarm reached only by a side line cannot start the notification.
+    #[test]
+    fn an_alarm_reached_by_a_side_line_notifies() {
+        let (m, d) = run("flows:\n  - user -> alb -> ecs\n  - ecs ~> cloudwatch\n  - cloudwatch -> sns\n");
+        assert!(d.errors.is_empty(), "{:?}", d.errors);
+        assert!(m.is_some());
+        assert_eq!(label(&m.unwrap(), "cloudwatch", "sns"), "alarms");
     }
 
     #[test]
@@ -1304,7 +1356,11 @@ mod tests {
     #[test]
     fn unknown_names_are_reported_in_full() {
         let (_, d) = run("flows:\n  - user -> cloudfrnt -> alb -> ecs(lambda)\n");
-        let services = ["acm", "alb", "apigateway", "aurora", "cloudfront", "cloudwatch", "cognito", "dynamodb", "ecs", "internet", "lambda", "s3", "user", "waf"];
+        let services = [
+            "acm", "alb", "apigateway", "aurora", "cloudfront", "cloudtrail", "cloudwatch", "cognito", "config", "dynamodb", "ecs",
+            "eventbridge", "guardduty", "inspector", "internet", "lambda", "s3", "securityhub", "sns", "ssm", "stepfunctions", "user",
+            "waf",
+        ];
         assert_eq!(d.errors, [
             bad("UNKNOWN_SERVICE", "flows[0][1]", "cloudfrnt", &services, "unknown service `cloudfrnt`"),
             bad("UNKNOWN_OPTION", "flows[0][3]", "lambda", &["fargate"], "`ecs` has no kind `lambda`"),

@@ -1,4 +1,4 @@
-<mxfile archwire="0.1.0" rules="2026.11.5"><diagram id="p1" name="Architecture"><mxGraphModel adaptiveColors="auto"><root>
+<mxfile archwire="0.1.0" rules="2026.11.6"><diagram id="p1" name="Architecture"><mxGraphModel adaptiveColors="auto"><root>
 <mxCell id="0" />
 <mxCell id="1" parent="0" />
 <object id="aws-cloud" label="AWS Cloud" added="1" derived="AWS のリソースは AWS Cloud の枠の中に描く。" rule="resources-inside-aws-cloud-frame" kind="default"><mxCell style="html=1;whiteSpace=wrap;fontSize=12;shape=mxgraph.aws4.group;grIcon=mxgraph.aws4.group_aws_cloud_alt;strokeColor=#000000;fillColor=none;verticalAlign=top;align=left;spacingLeft=30;fontColor=#000000;container=1;collapsible=0;recursiveResize=0" vertex="1" parent="1"><mxGeometry x="160" y="60" width="1112" height="601" as="geometry" /></mxCell></object>

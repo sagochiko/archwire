@@ -249,6 +249,120 @@ to = "cloudwatch"
 rel = "aux"
 label = "logs_metrics"
 
+[[link]]
+from = "guardduty"
+to = "eventbridge"
+rel = "main"
+label = "findings"
+
+[[link]]
+from = "guardduty"
+to = "securityhub"
+rel = "main"
+label = "findings"
+
+[[link]]
+from = "inspector"
+to = "eventbridge"
+rel = "main"
+label = "findings"
+
+[[link]]
+from = "inspector"
+to = "securityhub"
+rel = "main"
+label = "findings"
+
+[[link]]
+from = "securityhub"
+to = "eventbridge"
+rel = "main"
+label = "findings"
+
+[[link]]
+from = "config"
+to = "eventbridge"
+rel = "main"
+label = "compliance_changes"
+
+[[link]]
+from = "config"
+to = "securityhub"
+rel = "main"
+label = "findings"
+
+[[link]]
+from = "config"
+to = "sns"
+rel = "main"
+label = "notifications"
+
+[[link]]
+from = "config"
+to = "ssm"
+rel = "main"
+label = "remediation"
+
+[[link]]
+from = "cloudtrail"
+to = "s3"
+rel = "main"
+label = "log_files"
+
+[[link]]
+from = "cloudtrail"
+to = "cloudwatch"
+rel = "main"
+label = "logs"
+
+[[link]]
+from = "cloudtrail"
+to = "eventbridge"
+rel = "main"
+label = "api_calls"
+
+[[link]]
+from = "cloudwatch"
+to = "sns"
+rel = "main"
+label = "alarms"
+
+[[link]]
+from = "eventbridge"
+to = "sns"
+rel = "main"
+label = "by_rule"
+
+[[link]]
+from = "eventbridge"
+to = "stepfunctions"
+rel = "main"
+label = "by_rule"
+
+[[link]]
+from = "eventbridge"
+to = "ssm"
+rel = "main"
+label = "by_rule"
+
+[[link]]
+from = "stepfunctions"
+to = "sns"
+rel = "main"
+label = "publish"
+
+[[link]]
+from = "stepfunctions"
+to = "lambda"
+rel = "main"
+label = "invoke"
+
+[[link]]
+from = "stepfunctions"
+to = "ssm"
+rel = "main"
+label = "call"
+
 [[derived_link]]
 from = "private"
 to = "egress_nat"

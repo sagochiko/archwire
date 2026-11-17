@@ -72,6 +72,50 @@ ja = "JWT オーソライザー"
 en = "Cognito authorizer"
 ja = "Cognito オーソライザー"
 
+[findings]
+en = "Findings"
+ja = "検出結果"
+
+[compliance_changes]
+en = "Compliance changes"
+ja = "準拠状態の変化"
+
+[notifications]
+en = "Notifications"
+ja = "通知"
+
+[remediation]
+en = "Remediation"
+ja = "自動修復"
+
+[log_files]
+en = "Log files"
+ja = "ログファイル"
+
+[logs]
+en = "Logs"
+ja = "ログ"
+
+[api_calls]
+en = "API calls"
+ja = "API 呼び出し"
+
+[alarms]
+en = "Alarms"
+ja = "アラーム"
+
+[by_rule]
+en = "Rule"
+ja = "ルール"
+
+[publish]
+en = "Publish"
+ja = "発行"
+
+[call]
+en = "Call"
+ja = "呼び出し"
+
 [undecided_route]
 en = "Route undecided"
 ja = "経路未定"

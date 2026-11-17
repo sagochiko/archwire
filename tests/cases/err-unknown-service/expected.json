@@ -1,7 +1,7 @@
 {
   "versions": {
     "archwire": "0.1.0",
-    "rules": "2026.11.5"
+    "rules": "2026.11.6"
   },
   "derived": [],
   "holes": [],
@@ -16,13 +16,22 @@
         "apigateway",
         "aurora",
         "cloudfront",
+        "cloudtrail",
         "cloudwatch",
         "cognito",
+        "config",
         "dynamodb",
         "ecs",
+        "eventbridge",
+        "guardduty",
+        "inspector",
         "internet",
         "lambda",
         "s3",
+        "securityhub",
+        "sns",
+        "ssm",
+        "stepfunctions",
         "user",
         "waf"
       ],

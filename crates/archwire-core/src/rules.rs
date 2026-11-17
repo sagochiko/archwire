@@ -570,7 +570,14 @@ mod tests {
     #[test]
     fn builtin_has_the_v01_services() {
         let r = Rules::builtin();
-        assert_eq!(r.service_keys(), ["acm","alb","apigateway","aurora","cloudfront","cloudwatch","cognito","dynamodb","ecs","igw","internet","lambda","nat","s3","user","waf"]);
+        assert_eq!(
+            r.service_keys(),
+            [
+                "acm", "alb", "apigateway", "aurora", "cloudfront", "cloudtrail", "cloudwatch", "cognito", "config", "dynamodb", "ecs",
+                "eventbridge", "guardduty", "igw", "inspector", "internet", "lambda", "nat", "s3", "securityhub", "sns", "ssm",
+                "stepfunctions", "user", "waf",
+            ]
+        );
         let alb = r.service("alb").unwrap();
         assert_eq!((alb.scope, alb.subnet, alb.place), (Scope::Vpc, Some(Subnet::Public), Place::Span));
         assert_eq!(r.service("ecs").unwrap().options["fargate"].shape, "fargate");
@@ -809,7 +816,7 @@ mod tests {
         assert_eq!(r.service("cognito").unwrap().place_rule.as_deref(), Some("cognito-user-pool-in-one-region"));
         assert!(r.service("user").unwrap().origin);
         let origins: Vec<_> = r.service_keys().into_iter().filter(|k| r.service(k).unwrap().origin).collect();
-        assert_eq!(origins, ["user"]);
+        assert_eq!(origins, ["cloudtrail", "cloudwatch", "config", "eventbridge", "guardduty", "inspector", "securityhub", "user"]);
         assert!(!r.service("ecs").unwrap().kind_hole);
     }
 

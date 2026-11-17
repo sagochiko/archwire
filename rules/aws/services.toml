@@ -135,6 +135,7 @@ icon = "service"
 shape = "cloudwatch_2"
 color = "#E7157B"
 label = "Amazon CloudWatch"
+origin = true
 
 [[service]]
 key = "apigateway"
@@ -182,3 +183,90 @@ shape = "cognito"
 color = "#DD344C"
 label = "Amazon Cognito"
 place_rule = "cognito-user-pool-in-one-region"
+
+[[service]]
+key = "guardduty"
+scope = "regional"
+place = "single"
+icon = "service"
+shape = "guardduty"
+color = "#DD344C"
+label = "Amazon GuardDuty"
+origin = true
+
+[[service]]
+key = "inspector"
+scope = "regional"
+place = "single"
+icon = "service"
+shape = "inspector"
+color = "#DD344C"
+label = "Amazon Inspector"
+origin = true
+
+[[service]]
+key = "securityhub"
+scope = "regional"
+place = "single"
+icon = "service"
+shape = "security_hub"
+color = "#DD344C"
+label = "AWS Security Hub"
+origin = true
+
+[[service]]
+key = "config"
+scope = "regional"
+place = "single"
+icon = "service"
+shape = "config"
+color = "#E7157B"
+label = "AWS Config"
+origin = true
+
+[[service]]
+key = "cloudtrail"
+scope = "regional"
+place = "single"
+icon = "service"
+shape = "cloudtrail"
+color = "#E7157B"
+label = "AWS CloudTrail"
+origin = true
+
+[[service]]
+key = "eventbridge"
+scope = "regional"
+place = "single"
+icon = "service"
+shape = "eventbridge"
+color = "#E7157B"
+label = "Amazon EventBridge"
+origin = true
+
+[[service]]
+key = "sns"
+scope = "regional"
+place = "single"
+icon = "service"
+shape = "sns"
+color = "#E7157B"
+label = "Amazon SNS"
+
+[[service]]
+key = "stepfunctions"
+scope = "regional"
+place = "single"
+icon = "service"
+shape = "step_functions"
+color = "#E7157B"
+label = "AWS Step Functions"
+
+[[service]]
+key = "ssm"
+scope = "regional"
+place = "single"
+icon = "service"
+shape = "systems_manager"
+color = "#E7157B"
+label = "AWS Systems Manager"
