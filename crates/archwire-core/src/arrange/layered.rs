@@ -526,10 +526,20 @@ fn stagger(model: &Model, layout: &Layout, p: &Piece, at: impl Fn((i32, i32)) ->
             })
         })
     };
+    let best = first_clear_order(n, crosses);
+    lines.iter().zip(best).map(|(l, s)| (l.0, s * step)).collect()
+}
+
+/// How many orders of the attached lines are tried: every order of up to seven lines.
+const STAGGER_TRIES: usize = 5040;
+
+/// The first order of the steps 1 to `n`, in sequence, for which `crosses` is false; if none is
+/// found within `STAGGER_TRIES` orders, the steps in turn. More lines than seven are left to
+/// the router's last check, which names a line that crosses another.
+fn first_clear_order(n: usize, crosses: impl Fn(&[i32]) -> bool) -> Vec<i32> {
     let mut order: Vec<i32> = (1..=n as i32).collect();
     let mut best = order.clone();
-    // Orders are tried in sequence; there are few lines.
-    loop {
+    for _ in 0..STAGGER_TRIES {
         if !crosses(&order) {
             best = order.clone();
             break;
@@ -540,7 +550,7 @@ fn stagger(model: &Model, layout: &Layout, p: &Piece, at: impl Fn((i32, i32)) ->
         order.swap(k - 1, j);
         order[k..].reverse();
     }
-    lines.iter().zip(best).map(|(l, s)| (l.0, s * step)).collect()
+    best
 }
 
 /// The Region's contents, from the Region's parts and the lines between them alone. The VPC, if
@@ -1182,6 +1192,31 @@ pub(super) mod tests {
     use crate::measure::{NAME_CHARS, NAME_DRAWN, NAME_WIDE_CHARS, NAME_WIDE_DRAWN};
     use crate::route::{port_point, route_planned, Wire};
     use crate::test_inputs::{generated, through_cloudfront, API_CASES};
+
+    // Fails if the search for the order in which attached lines turn tries more orders than its
+    // bound however many lines there are, stops trying every order of up to seven lines, or stops
+    // taking the first clear order in sequence.
+    #[test]
+    fn the_order_of_attached_lines_is_searched_within_a_bound() {
+        for n in [7, 8, 12] {
+            let tried = std::cell::Cell::new(0usize);
+            let order = first_clear_order(n, |_| {
+                tried.set(tried.get() + 1);
+                true
+            });
+            assert_eq!(order, (1..=n as i32).collect::<Vec<_>>(), "{n}");
+            let all: usize = (1..=n).product();
+            assert_eq!(tried.get(), all.min(STAGGER_TRIES), "{n}");
+        }
+        assert_eq!(STAGGER_TRIES, (1..=7).product::<usize>());
+        let seen = std::cell::RefCell::new(Vec::new());
+        let order = first_clear_order(3, |o| {
+            seen.borrow_mut().push(o.to_vec());
+            o != [3, 1, 2]
+        });
+        assert_eq!(order, [3, 1, 2]);
+        assert_eq!(seen.into_inner(), [[1, 2, 3], [1, 3, 2], [2, 1, 3], [2, 3, 1], [3, 1, 2]]);
+    }
 
     /// The model of a definition without a VPC, and its layout with lines running along `axis`.
     pub(in crate::arrange) fn arranged(src: &str, axis: Axis) -> (Model, Placement) {

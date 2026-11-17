@@ -608,6 +608,33 @@ mod tests {
         }
     }
 
+    // Fails if a definition with eight to twelve lines attached to load balancers stops by a panic
+    // or never ends, or ends otherwise than with a diagram (perhaps with notes naming lines) or with
+    // LAYOUT_FAILED, in either direction.
+    #[test]
+    fn many_attachments_on_load_balancers_end() {
+        let albs = |n: usize, own_waf: bool| {
+            let mut src = String::from("flows:\n");
+            for k in 0..n {
+                src.push_str(&format!("  - user -> alb.a{k} -> ecs.a{k}\n  - acm.a{k} -- alb.a{k}\n"));
+                src.push_str(&if own_waf { format!("  - waf.a{k} -- alb.a{k}\n") } else { format!("  - waf -- alb.a{k}\n") });
+            }
+            src
+        };
+        // Eight and twelve lines: more than the seven whose every order the layout tries.
+        for shape in [albs(4, true), albs(6, false)] {
+            for direction in ["down", "right"] {
+                let src = format!("{shape}set:\n  direction: {direction}\n");
+                let out = compile(&src);
+                let d = &out.diagnostics;
+                match &out.drawio {
+                    Some(_) => assert!(d.errors.is_empty(), "{src}: {:?}", d.errors),
+                    None => assert!(!d.errors.is_empty() && d.errors.iter().all(|e| e.code == "LAYOUT_FAILED"), "{src}: {:?}", d.errors),
+                }
+            }
+        }
+    }
+
     // Fails if named VPC parts are still stopped, a database loses its replication line, or a line
     // joins the writer of one named database to the other database in either direction.
     #[test]
