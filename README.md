@@ -195,7 +195,7 @@ The diagram runs from top to bottom, or from left to right with `set.direction`.
 
 A VPC holds one part that spans the Availability Zones, the load balancer: a definition with two load balancers, such as `alb.web` and `alb.admin`, stops with `UNSUPPORTED`. It does not attach Certificate Manager or WAF to a load balancer: `acm -- alb` and `waf -- alb` stop with `UNSUPPORTED`.
 
-Many named services behind one load balancer crowd the lines from it. With two zones up to six services, and with three zones up to three, are drawn without a note. With more, the diagram is still drawn, with notes naming the lines that could not avoid every icon, label and other line. From 51 services with two zones, and from 34 with three, the layout stops with `LAYOUT_FAILED`.
+Many named services behind one load balancer crowd the lines from it. Counted on `- user -> cloudfront -> alb -> ecs.s01 -> aurora` followed by lines `- alb -> ecs.s02`, `- alb -> ecs.s03` and so on: with two zones up to six services, and with three zones up to three, are drawn without a note naming a line. With more, the diagram is still drawn, with notes naming the lines that could not avoid every icon, label and other line. From 51 services with two zones, and from 34 with three, the layout stops with `LAYOUT_FAILED`. Writing fewer services avoids this; it is a limit of this layout, not of AWS.
 
 A Lambda function is drawn in a VPC only in its private subnets, and only when it sends a main flow to Aurora. The line from a function to Aurora is drawn directly; RDS Proxy is not drawn. A route answered with `endpoint` adds no VPC endpoint icon.
 

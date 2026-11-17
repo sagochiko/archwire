@@ -126,7 +126,7 @@ The rules are checked when archwire starts. The built-in rules are valid, so a u
 
 For example, deleting the `source` line of `private-egress-through-nat` and running any `compile` stops with `RULE_WITHOUT_SOURCE` at `private-egress-through-nat`. Changing `rel = "main"` to `rel = "flow"` in the `apigateway` to `lambda` entry of `links.toml` stops with `LINK_BAD_REL` at `apigateway flow lambda`.
 
-A few mistakes are found later, when a definition needs what is missing, and they are reported by `compile` as an error with exit code 1, without a panic. `RULE_MISSING` names a rule the program itself names and no data file refers to. `DERIVED_ROLE_MISSING` names a role no service in `services.toml` plays, and `DERIVED_LINK_MISSING` a pair of roles with no `[[derived_link]]`.
+A few mistakes are found later, by `compile`, and reported as an error with exit code 1, without a panic. `RULE_MISSING` names a rule the program itself names and no data file refers to. Every such rule is checked at the start of every compile, so a missing one stops every definition, even one that would not use it: without `nat-device-is-nat-gateway`, `- user -> apigateway(http) -> lambda` stops too. `DERIVED_ROLE_MISSING` names a role no service in `services.toml` plays, and `DERIVED_LINK_MISSING` a pair of roles with no `[[derived_link]]`. These two are found only when a definition needs that role or that line: without the `egress_nat` role, `- user -> alb -> ecs` still compiles, and `- user -> alb -> ecs` with `- ecs -> internet` stops.
 
 ## Adding or changing a rule
 

@@ -85,7 +85,7 @@ set:
   lang: ja
 ```
 
-This draws two services and two databases behind one load balancer, and is the acceptance case `tests/cases/web-named-ja`. A part drawn once in each zone gets one id per zone. For a part without a name the id is the name, a hyphen and the zone, such as `ecs-1a`; for a named part it is the name, `@` and the zone, such as `ecs.web@1a` and `aurora.admin@1c`. `@` cannot be written in a name, so these ids never meet the id of another part. A route hole puts a named part in square brackets, such as `route.ecs.[s3.web]` or `route.[lambda.api].s3`; see [choose](#choose). The hole for the kind of a named API Gateway has no brackets: `apigateway.public` gives `kind.apigateway.public`.
+This draws two services and two databases behind one load balancer, and is the acceptance case `tests/cases/web-named-ja`. A part drawn once in each zone gets one id per zone. For a part without a name the id is the name, a hyphen and the zone, such as `ecs-1a`; for a named part it is the name, `@` and the zone, such as `ecs.web@1a` and `aurora.admin@1c`. `@` cannot be written in a name, so these ids cannot collide with another part's id. A route hole puts a named part in square brackets, such as `route.ecs.[s3.web]` or `route.[lambda.api].s3`; see [choose](#choose). The hole for the kind of a named API Gateway has no brackets: `apigateway.public` gives `kind.apigateway.public`.
 
 A VPC holds one part that spans the Availability Zones, the load balancer. A second one stops with `UNSUPPORTED` at its first mention. For example,
 
@@ -214,13 +214,22 @@ The Internet Gateway sits inside the VPC on the side where the traffic comes in:
 
 The load balancer spans the zones. With two zones it sits in the public tier on the border between them, level with the NAT gateways in a top-to-bottom diagram. With three zones it sits above the zone frames.
 
-A line's label says which zones it stands for. With two zones, archwire draws the lines between parts in different zones. With three zones it draws no line between zones: each line inside a zone stands for the lines from every zone into the same part, and a note in the report says so. A label ends with "(all AZs)" when the sender has a copy in every zone, and names the zones otherwise. For example, with `azs: 3` and `readers: 1`, Aurora has a copy in two zones only, and `aurora ~> cloudwatch` is labelled "Logs and metrics (from 1a, 1c)". When a target in one zone has no sender in the same zone, the line comes from a sender in another zone, and a note names it. With the same settings, `aurora -> ecs` gives the note "In ap-northeast-1d, ecs-1d has no aurora in its own zone, so the line from aurora-1a in another zone is drawn."
+A line's label says which zones it stands for. With two zones, archwire draws the lines between parts in different zones. With three zones it draws no line between copies of two different services in different zones: the line inside the target's zone stands for the lines from every zone into the same part, and a note in the report says so. Two kinds of line still cross zones: the replication line from Aurora's writer to each reader, and a line from another zone when the target's zone has no sender, described below. A label ends with "(all AZs)" when the sender has a copy in every zone, and names the zones otherwise. For example, with `azs: 3` and `readers: 1`, Aurora has a copy in two zones only, and `aurora ~> cloudwatch` is labelled "Logs and metrics (from 1a, 1c)". When a target in one zone has no sender in the same zone, the line comes from a sender in another zone, and a note names it. With the same settings, `aurora -> ecs` gives the note "In ap-northeast-1d, ecs-1d has no aurora in its own zone, so the line from aurora-1a in another zone is drawn."
 
 Some diagrams are correct but harder to read than they could be. In a top-to-bottom diagram, WAF and Certificate Manager attached to CloudFront stand one under the other to its right, which makes the row of global services tall. An auxiliary line from the load balancer to a part right of the VPC, such as `alb ~> s3`, can go round the far side of that part and enter it from the right. With two zones, each NAT gateway sits to the right of the ECS copy in its zone, so in the first zone the line from the load balancer to ECS crosses the line from ECS to the NAT gateway. In a left-to-right diagram, S3 fed by CloudFront sits below the VPC, so the line to it is long.
 
 ### Services behind one load balancer
 
-Every service behind the load balancer is copied into each zone, and the load balancer sends a line to each copy. With two zones up to six services, and with three zones up to three, are drawn without a note. With seven services in two zones, or four in three, the diagram is still drawn, with notes naming the lines that could not avoid every icon, label and other line. From 51 services with two zones, and from 34 with three, the layout stops with `LAYOUT_FAILED`. The counts are the same in both directions.
+Every service behind the load balancer is copied into each zone, and the load balancer sends a line to each copy. The counts below are for this shape, with more `- alb -> ecs.sNN` lines added one at a time:
+
+```yaml
+flows:
+  - user -> cloudfront -> alb -> ecs.s01 -> aurora
+  - alb -> ecs.s02
+  - alb -> ecs.s03
+```
+
+With two zones up to six services, and with three zones up to three, are drawn without a note naming a line; notes that explain the drawing, such as the one on auxiliary flows or on three zones, may still be there. With seven services in two zones, or four in three, the diagram is still drawn, with notes naming the lines that could not avoid every icon, label and other line. From 51 services with two zones, and from 34 with three, the layout stops with `LAYOUT_FAILED`. The counts are the same in both directions. Writing fewer services avoids this; it is a limit of this layout, not of AWS.
 
 ## Definitions without a VPC
 
@@ -374,9 +383,9 @@ The place is `flows[i][j]`, `set.<key>` or `choose.<hole id>`. For `set` and `ch
 
 ## Errors
 
-When a definition has errors, `compile` writes no diagram, removes a diagram left at the `-o` path by an earlier compile, prints the report with an `errors` list, and exits with 1. Several errors can be reported at once. Each example below was run, and the line shows the report's `code`, `at` and `got`. The last column says whether `archwire set <at> <value>` can fix the error at the place the report gives, and what to do otherwise. The examples for `BAD_CHOICE` and `UNKNOWN_HOLE` assume the definition contains `ecs -> s3`, so that the hole `route.ecs.s3` exists.
+When a definition has errors, `compile` writes no diagram, removes a diagram left at the `-o` path by an earlier compile, prints the report with an `errors` list, and exits with 1. Several errors can be reported at once. Each example below shows the report's `code`, `at` and `got`. The last column says whether `archwire set <definition> <at> <value>` can fix the error at the place the report gives, and what to do otherwise. The examples for `BAD_CHOICE` and `UNKNOWN_HOLE` assume the definition contains `ecs -> s3`, so that the hole `route.ecs.s3` exists.
 
-| Code | Meaning | Example and result | Fixed by `archwire set <at>`? |
+| Code | Meaning | Example and result | Fixed with `set` at `at`? |
 |---|---|---|---|
 | `EMPTY_DEFINITION` | there are no flows | an empty file: `at` is `flows` | No. Write a `flows:` section with at least one line in the file |
 | `BAD_SYNTAX` | a line is not in the accepted form | `- user => alb` under `flows:` gives `at` `flows[0]` | No. `at` is a whole line (`flows[i]`, `set[i]`, `choose[i]` or `line n`); edit that line in the file |
@@ -384,7 +393,7 @@ When a definition has errors, `compile` writes no diagram, removes a diagram lef
 | `NAME_TOO_LONG` | a name after the dot is longer than 24 characters | `- user -> apigateway(http) -> lambda.resize-images-for-the-web` gives `at` `flows[0][2]`, `got` `resize-images-for-the-web` | Yes, with a shorter name, such as `archwire set api.yaml 'flows[0][2]' lambda.resize` |
 | `SELF_LINK` | a part connected to itself | `- ecs -> ecs` gives `at` `flows[0]` | No. `at` is the whole flow line; change one of its parts with `flows[i][j]` or edit the line |
 | `CONFLICTING_OPTION` | one part written with two kinds | `- alb -> ecs(fargate)` and `- ecs(ec2) -> aurora` give `at` `flows[1][0]`, `allowed` is `fargate` | Yes, with a value from `allowed`, such as `archwire set web.yaml 'flows[1][0]' 'ecs(fargate)'` |
-| `CONFLICTING_RELATION` | one pair of parts with two relations | `- ecs -> s3` and then `- ecs ~> s3` give `at` `flows[2]` | No. `set` changes parts, not symbols; remove one of the two lines in the file |
+| `CONFLICTING_RELATION` | one pair of parts with two relations | `- ecs -> s3` and then `- ecs ~> s3` give `at` `flows[1]` | No. `set` changes parts, not symbols; remove one of the two lines in the file |
 | `DUPLICATE_KEY` | a key written twice in `set` or `choose` | `azs: 2` and `azs: 3` give `at` `set.azs` | No. `set` would change only the first of the two; delete one line in the file |
 | `UNKNOWN_SERVICE` | a name that is not a writable service | `- user -> cloudfrnt -> alb -> ecs` gives `at` `flows[0][1]`, `allowed` lists the writable names | Yes, with a name from `allowed` |
 | `UNKNOWN_OPTION` | a kind the service does not have | `ecs(lambda)` gives `allowed` `fargate` | Yes, with the part and a kind from `allowed`, or the bare name |
@@ -394,7 +403,7 @@ When a definition has errors, `compile` writes no diagram, removes a diagram lef
 | `UNKNOWN_HOLE` | an answer for a hole that does not exist | `route.ecs.rds: nat` gives `at` `choose.route.ecs.rds`; so does `kind.apigateway: http` when the definition already says `apigateway(http)` | No. `set` can change only the value; delete the line in the file, and answer a hole from `allowed` with `archwire set <definition> choose.<hole> <value>` |
 | `UNSUPPORTED` | a connection or shape this version does not draw | `- user -> s3` gives `at` `flows[0]`; `- user -> alb.a -> ecs` and `- user -> alb.b -> ecs` give `at` `flows[1][1]`; more under [Which connections are accepted](#which-connections-are-accepted) | Sometimes. `at` is a flow line (`flows[i]`), a part (`flows[i][j]`) or `flows`; change a part with `flows[i][j]`, or edit or remove the line in the file |
 | `TOO_MANY_ATTACHED` | more parts attached to one part than AWS allows | `- user -> cloudfront -> s3`, `- waf.front -- cloudfront` and `- waf.extra -- cloudfront` give `at` `flows[2]`, `got` `waf.extra`, `rule` `one-web-acl-per-resource` | No. Remove the extra line in the file |
-| `LAYOUT_FAILED` | archwire could not lay out the definition; the message names the parts or lines involved | 34 named services behind one load balancer with `azs: 3`, see [Services behind one load balancer](#services-behind-one-load-balancer) | No. Write fewer parts, or report the definition |
+| `LAYOUT_FAILED` | archwire could not lay out the definition; the message names the parts or lines involved | 34 named services behind one load balancer with `azs: 3`, see [Services behind one load balancer](#services-behind-one-load-balancer) | No. Write fewer parts, or report the definition. Fewer parts is a way around a limit of the layout, not a limit of AWS |
 | `BAD_PATH` | the place given to `set` does not exist | `archwire set web.yaml 'flows[9][0]' x`, on a file with fewer flow lines | Run `set` again with an existing place |
 | `BAD_VALUE` | the value given to `set` is empty or has a line break or `#`, or a value for `flows[i][j]` does not read as one part | `archwire set web.yaml set.azs ""`; `archwire set api.yaml 'flows[0][2]' 's3.foo--bar'` | Run `set` again with one non-empty line, or one part |
 | `CANNOT_READ` | `compile` or `set` could not read the definition file | `archwire compile missing.yaml -o out.drawio` | No. Check the path and the file's permissions |
@@ -404,7 +413,7 @@ The reports that `set` prints (for `BAD_PATH`, `BAD_VALUE`, `CANNOT_READ` and `C
 
 ### The order of errors
 
-The errors come in the order of the checks, and within a check in the order of the lines. A file that cannot be read as a definition gives only its reading errors (`EMPTY_DEFINITION`, `BAD_SYNTAX`, `UNKNOWN_SECTION`, `NAME_TOO_LONG`, `SELF_LINK`, `CONFLICTING_OPTION`, `CONFLICTING_RELATION`, `DUPLICATE_KEY`). A definition with a VPC that writes a second part spanning the zones gives only that `UNSUPPORTED`. Otherwise the checks run in this order:
+The errors come in the order of the checks. Within a check on the flows, they come in the order of the lines. Keys that are not settings, and the answers in `choose`, are checked in the alphabetical order of their keys, whatever order they are written in: `choose` with `z.hole` and then `a.hole` gives `UNKNOWN_HOLE` at `choose.a.hole` first. A file that cannot be read as a definition gives only its reading errors (`EMPTY_DEFINITION`, `BAD_SYNTAX`, `UNKNOWN_SECTION`, `NAME_TOO_LONG`, `SELF_LINK`, `CONFLICTING_OPTION`, `CONFLICTING_RELATION`, `DUPLICATE_KEY`). A definition with a VPC that writes more than one part spanning the zones gives only those `UNSUPPORTED` errors, one for each such part after the first: `alb.a`, `alb.b` and `alb.c` give two, at the first mentions of `alb.b` and `alb.c`. Otherwise the checks run in this order:
 
 1. names: `UNKNOWN_SERVICE`, `UNKNOWN_OPTION`
 2. settings, by key in the order `azs`, `region`, `lang`, `direction`, `nat`, `readers`, then the keys that are not settings
