@@ -505,9 +505,49 @@ fn lay_region(model: &Model, rules: &Rules, axis: Axis, piece: Option<&Piece>) -
         let bending = lines.iter().filter(|&&(a, b, _)| vs[a.0] + off(a.1) != vs[b.0] + off(b.1)).count() as i32;
         u[c + 1] = u[c] + rank_gap(least_main, (span[c].1, span[c + 1].0), (line[c].1, line[c + 1].0), label, bending);
     }
+    // The parts past the VPC's rank whose main lines all come from the other parts of that rank,
+    // or from such parts in turn, follow them at the distances their own ranks take without the
+    // VPC, rather than past the VPC's end.
+    let vpc_rank = f.parts.iter().position(|&i| i == vpc_id).map(|k| f.col[k]);
+    let mut near = vec![false; f.parts.len()];
+    let mut near_u = u.clone();
+    if let Some(cv) = vpc_rank {
+        let beside = |k: usize, near: &[bool]| f.parts[k] != vpc_id && (f.col[k] == cv || near[k]);
+        for c in cv + 1..=ranks {
+            for k in (0..f.parts.len()).filter(|&k| f.col[k] == c) {
+                near[k] = !f.preds[k].is_empty() && f.preds[k].iter().all(|&(p, _)| beside(p, &near));
+            }
+        }
+        for c in cv..ranks {
+            let (from, into): (Vec<usize>, Vec<usize>) = (
+                (0..f.parts.len()).filter(|&k| f.col[k] == c && beside(k, &near)).collect(),
+                (0..f.parts.len()).filter(|&k| f.col[k] == c + 1 && near[k]).collect(),
+            );
+            if into.is_empty() {
+                break;
+            }
+            let (mut s, mut l) = (((0, ICON), (0, ICON)), ((0, ICON), (0, ICON)));
+            for &k in &from {
+                (s.0, l.0) = (widen(s.0, main(f.parts[k])), widen(l.0, on_line(f.parts[k])));
+            }
+            for &k in &into {
+                (s.1, l.1) = (widen(s.1, main(f.parts[k])), widen(l.1, on_line(f.parts[k])));
+            }
+            let lines: Vec<(Unit, Unit, &str)> = model
+                .edges
+                .iter()
+                .filter(|e| e.rel == Rel::Main)
+                .filter_map(|e| Some((unit(&e.from)?, unit(&e.to)?, e.label.as_str())))
+                .filter(|&(a, b, _)| from.contains(&a.0) && into.contains(&b.0))
+                .collect();
+            let label = lines.iter().map(|l| uv(axis, wire_text_size(&rules.text(l.2, model.lang))).0).max().unwrap_or(0);
+            let bending = lines.iter().filter(|&&(a, b, _)| vs[a.0] + off(a.1) != vs[b.0] + off(b.1)).count() as i32;
+            near_u[c + 1] = (near_u[c] + rank_gap(least_main, (s.0 .1, s.1 .0), (l.0 .1, l.1 .0), label, bending)).min(u[c + 1]);
+        }
+    }
     // (model index, u, v) of every Region part.
     let block_at = f.parts.iter().position(|&i| i == vpc_id).map(|k| (u[f.col[k]], vs[k]));
-    let mut spots: Vec<(usize, i32, i32)> = f.parts.iter().enumerate().filter(|&(_, &i)| i != vpc_id).map(|(k, &i)| (i, u[f.col[k]], vs[k])).collect();
+    let mut spots: Vec<(usize, i32, i32)> = f.parts.iter().enumerate().filter(|&(_, &i)| i != vpc_id).map(|(k, &i)| (i, if near[k] { near_u[f.col[k]] } else { u[f.col[k]] }, vs[k])).collect();
 
     // Side parts take one step across past the main parts, at the rank of the part their first
     // side line joins, or the next rank on where their names keep clear of the side parts placed
@@ -604,7 +644,8 @@ fn lay_region(model: &Model, rules: &Rules, axis: Axis, piece: Option<&Piece>) -
     }
     // Wide enough for the frame's own name.
     bw = bw.max(FRAME_NAME_INDENT + name_text_width(&region_name(model, rules)) + FRAME_ROOM);
-    let mut centres: Vec<i32> = u[1..].iter().copied().chain(extra).map(|c| c + ICON / 2).collect();
+    let near_ranks = (0..f.parts.len()).filter(|&k| near[k]).map(|k| near_u[f.col[k]]);
+    let mut centres: Vec<i32> = u[1..].iter().copied().chain(extra).chain(near_ranks).map(|c| c + ICON / 2).collect();
     centres.sort_unstable();
     centres.dedup();
     Block { w: bw, h: bh, icons, ranks: centres, across, vpc }
@@ -1787,6 +1828,54 @@ set:
                     assert!((a.rect.y - b.rect.y).abs() >= ROW_STEP, "{} and {}\n{src}", a.id, b.id);
                 }
             }
+        }
+    }
+
+    /// Where a part starts and ends along the main axis, and where it starts across.
+    fn along(axis: Axis, r: Rect) -> (i32, i32, i32) {
+        let (u, v) = uv(axis, (r.x, r.y));
+        (u, u + uv(axis, (r.w, r.h)).0, v)
+    }
+
+    // Fails if a part reached only from a part beside the VPC in its rank is put past the VPC's
+    // end instead of a usual rank's distance after the part before it.
+    #[test]
+    fn a_part_after_one_beside_the_vpc_follows_it_at_the_usual_distance() {
+        for lang in ["en", "ja"] {
+            let src = ONWARD_BESIDE_THE_VPC.replace("  lang: en\n", &format!("  lang: {lang}\n"));
+            let alone = format!("flows:\n  - user -> apigateway(http) -> lambda.report -> dynamodb\nset:\n  lang: {lang}\n");
+            for axis in [Axis::Right, Axis::Down] {
+                drawn_mixed(&src, axis);
+                let (_, p) = arranged_mixed(&src, axis);
+                let vpc = along(axis, p.layout.rect(super::super::azgrid::VPC_FRAME));
+                let (report, table) = (along(axis, at(&p, "lambda.report")), along(axis, at(&p, "dynamodb")));
+                assert!(table.0 < vpc.1, "{axis:?} dynamodb starts at {} past the VPC's end {}\n{src}", table.0, vpc.1);
+                assert_eq!(table.2, report.2, "{axis:?} dynamodb is not level with lambda.report\n{src}");
+                let (_, q) = arranged(&alone, axis);
+                let usual = along(axis, at(&q, "dynamodb")).0 - along(axis, at(&q, "lambda.report")).0;
+                assert_eq!(table.0 - report.0, usual, "{axis:?}\n{src}");
+            }
+        }
+    }
+
+    const ONWARD_BESIDE_THE_VPC_TWO_WAYS: &str = "flows:\n  - user -> alb -> ecs\n  - ecs -> dynamodb\n  - user -> apigateway(http) -> lambda -> aurora\n  - apigateway -> lambda.report -> dynamodb\n  - lambda.report -> s3\nset:\n  azs: 2\n  lang: ja\nchoose:\n  route.ecs.dynamodb: endpoint\n";
+
+    // Fails if a part a part inside the VPC sends a main line to is moved before the VPC's end
+    // along with the parts reached only from beside the VPC, or keeps those parts past it too.
+    #[test]
+    fn a_part_reached_from_inside_the_vpc_stays_past_its_end() {
+        for axis in [Axis::Right, Axis::Down] {
+            for src in [ONWARD_BESIDE_THE_VPC_WEB, ONWARD_BESIDE_THE_VPC_TWO_WAYS] {
+                drawn_mixed(src, axis);
+                let (_, p) = arranged_mixed(src, axis);
+                let vpc = along(axis, p.layout.rect(super::super::azgrid::VPC_FRAME));
+                let table = along(axis, at(&p, "dynamodb"));
+                assert!(table.0 > vpc.1, "{axis:?} dynamodb starts at {} before the VPC's end {}\n{src}", table.0, vpc.1);
+            }
+            let (_, p) = arranged_mixed(ONWARD_BESIDE_THE_VPC_TWO_WAYS, axis);
+            let vpc = along(axis, p.layout.rect(super::super::azgrid::VPC_FRAME));
+            let (report, bucket) = (along(axis, at(&p, "lambda.report")), along(axis, at(&p, "s3")));
+            assert!(bucket.0 < vpc.1 && bucket.2 == report.2, "{axis:?} s3 at {bucket:?}, lambda.report at {report:?}, the VPC ends at {}", vpc.1);
         }
     }
 
