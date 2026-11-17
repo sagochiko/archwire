@@ -866,9 +866,23 @@ mod tests {
                 }
             }
         }
+        for extra in ["  - alb.web ~> s3\n", "  - alb.admin ~> s3\n", "  - alb.web ~> s3\n  - alb.admin ~> s3\n"] {
+            for azs in [2, 3] {
+                srcs.push(format!("{two}{extra}set:\n  azs: {azs}\n  lang: ja\n"));
+            }
+        }
+        let bare = "flows:\n  - user -> cloudfront -> alb.web -> ecs.web -> aurora.web\n  - user -> alb.admin\n";
+        for extra in ["", "  - alb.admin ~> cloudwatch\n", "  - ecs.web -> internet\n"] {
+            for azs in [2, 3] {
+                srcs.push(format!("{bare}{extra}set:\n  azs: {azs}\n  lang: ja\n"));
+            }
+        }
         for azs in [2, 3] {
             srcs.push(format!("flows:\n  - user -> alb.a -> ecs\n  - user -> alb.b -> ecs\n  - user -> alb.c -> ecs\nset:\n  azs: {azs}\n"));
             srcs.push(format!("flows:\n  - user -> cloudfront -> alb.a -> ecs.a\n  - user -> alb.b -> ecs.b\n  - user -> alb.c -> ecs.c\n  - ecs.a -> internet\nset:\n  azs: {azs}\n"));
+            for side in ["  - alb.a ~> cloudwatch\n", "  - alb.b ~> cloudwatch\n", "  - alb.c ~> cloudwatch\n", "  - alb.a ~> cloudwatch\n  - alb.c ~> cloudwatch\n", "  - ecs.b ~> cloudwatch\n  - alb.b ~> s3\n"] {
+                srcs.push(format!("flows:\n  - user -> alb.a -> ecs.a\n  - user -> alb.b -> ecs.b\n  - user -> alb.c -> ecs.c\n{side}set:\n  azs: {azs}\n"));
+            }
         }
         let mut bad = Vec::new();
         for src in &srcs {
@@ -881,6 +895,20 @@ mod tests {
             }
         }
         assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
+
+    // Fails if, with no private tier to carry it below, the side line from the left load balancer
+    // to a part outside the VPC, which still crosses the load balancer on its right, comes out
+    // without a note naming it, or the definition stops being drawn.
+    #[test]
+    fn a_side_line_across_the_next_balancer_without_a_private_tier_is_named() {
+        for azs in [2, 3] {
+            for axis in AXES {
+                let src = format!("flows:\n  - user -> alb.a\n  - user -> alb.b\n  - alb.a ~> cloudwatch\nset:\n  azs: {azs}\n");
+                let (_, named) = faults(&src, axis);
+                assert_eq!(named, ["The line edge-alb.a-to-cloudwatch could not avoid every icon, label and other line; check it in the diagram."], "{axis:?} {azs}");
+            }
+        }
     }
 
     /// The example at the top of the definition guide.
