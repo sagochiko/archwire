@@ -253,20 +253,7 @@ fn outer_first(ctx: &Ctx, specs: &[Line], drafts: &[Draft], ports: &[(Port, Port
     }
     for places in sides.values().filter(|p| p.len() > 1) {
         let lines: Vec<usize> = places.iter().map(|&at| order[at]).collect();
-        // How far each port lies along its side and which way its line turns from it.
-        let turns: Vec<(i32, i32)> = lines
-            .iter()
-            .map(|&i| {
-                let (from, to) = (&specs[i].from, &specs[i].to);
-                let (p, t) = (port_point(ctx.layout.rect(from), ports[i].0), crate::path::center(ctx.layout.rect(to)));
-                let (along, toward) = match ports[i].0.side {
-                    Side::Top | Side::Bottom => (p.0, t.0),
-                    Side::Left | Side::Right => (p.1, t.1),
-                };
-                let way = if (toward - along).abs() <= LEVEL { 0 } else { (toward - along).signum() };
-                (along, way)
-            })
-            .collect();
+        let turns: Vec<(i32, i32)> = lines.iter().map(|&i| turn_of(ctx, &specs[i], ports[i].0)).collect();
         // Among the lines turning one way, how many lie farther toward it.
         let outer = |k: usize| {
             let (along, way) = turns[k];
@@ -283,18 +270,34 @@ fn outer_first(ctx: &Ctx, specs: &[Line], drafts: &[Draft], ports: &[(Port, Port
     }
 }
 
+/// How far a line's exit lies along its side, and which way the line turns from it toward the
+/// middle of the part it goes to: -1 or 1, or 0 when that middle lies within `LEVEL` of the exit.
+fn turn_of(ctx: &Ctx, s: &Line, exit: Port) -> (i32, i32) {
+    let (p, t) = (port_point(ctx.layout.rect(&s.from), exit), crate::path::center(ctx.layout.rect(&s.to)));
+    let (along, toward) = match exit.side {
+        Side::Top | Side::Bottom => (p.0, t.0),
+        Side::Left | Side::Right => (p.1, t.1),
+    };
+    let way = if (toward - along).abs() <= LEVEL { 0 } else { (toward - along).signum() };
+    (along, way)
+}
+
 /// Shares out the ports, lays every line, places the labels and runs the final check, which
 /// also looks at how each line keeps its draft in `plans` (none when no plans are given).
-/// When two lines leaving one side of a part outside the Region cross, the lines are laid again
-/// with the outer lines of each such side first, and that drawing is kept when it has fewer
-/// crossing lines and no more notes.
+/// When two lines leaving one side of a part outside the Region and turning the same way cross,
+/// the lines are laid again with the outer lines of each such side first, and that drawing is
+/// kept when it has fewer crossing lines and no more notes.
 pub(crate) fn draw(ctx: &Ctx, specs: &[Line], drafts: &[Draft], plans: &[LinePlan], notes: Vec<String>) -> (Vec<Wire>, Vec<String>) {
     let first = draw_in_order(ctx, specs, drafts, plans, notes.clone(), false);
     let crossings = |wires: &[Wire], paths: &[Vec<Pt>], only_one_side: bool| {
         let mut n = 0;
         for a in 0..paths.len() {
             for b in a + 1..paths.len() {
-                let one_side = specs[a].from == specs[b].from && wires[a].exit.side == wires[b].exit.side && outside_the_region(ctx, &specs[a].from);
+                let one_side = specs[a].from == specs[b].from
+                    && wires[a].exit.side == wires[b].exit.side
+                    && outside_the_region(ctx, &specs[a].from)
+                    && turn_of(ctx, &specs[a], wires[a].exit).1 != 0
+                    && turn_of(ctx, &specs[a], wires[a].exit).1 == turn_of(ctx, &specs[b], wires[b].exit).1;
                 if only_one_side && !one_side {
                     continue;
                 }
