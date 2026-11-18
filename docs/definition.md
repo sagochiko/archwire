@@ -31,7 +31,7 @@ One pair of parts can be connected with one relation only. `ecs -> s3` together 
 
 ### With a VPC or without
 
-A definition that writes a service that sits in a VPC (`alb`, `ecs` or `aurora`) is drawn with one VPC, as described under [Definitions with a VPC](#definitions-with-a-vpc). A definition without them is drawn without a VPC, as described under [Definitions without a VPC](#definitions-without-a-vpc). Which settings may be written depends on this, see [set](#set).
+A definition that writes a service that sits in a VPC (`alb`, `ecs`, `ec2` or `aurora`) is drawn with one VPC, as described under [Definitions with a VPC](#definitions-with-a-vpc). A definition without them is drawn without a VPC, as described under [Definitions without a VPC](#definitions-without-a-vpc). Which settings may be written depends on this, see [set](#set).
 
 The other services can be written in either. In a definition with a VPC, a Lambda function that sends a main flow to Aurora is attached to the VPC, as described under [A function attached to the VPC](#a-function-attached-to-the-vpc). Every other part of those services is drawn outside the VPC, as it would be without one.
 
@@ -46,6 +46,7 @@ The other services can be written in either. In a definition with a VPC, a Lambd
 | `acm` | AWS Certificate Manager. Only as `acm -- cloudfront` or `acm -- alb` | | in the AWS Cloud frame, outside the Region, when attached to `cloudfront`; in the Region, right of the VPC, when attached to `alb` |
 | `alb` | Application Load Balancer | | in the VPC, spanning the public subnets |
 | `ecs` | Amazon ECS | `fargate` | in the VPC, in each private subnet |
+| `ec2` | Amazon EC2 | | in the VPC, in each private subnet |
 | `aurora` | Amazon Aurora | | in the VPC, the writer and readers in the private subnets |
 | `s3` | Amazon S3 | | in the Region |
 | `cloudwatch` | Amazon CloudWatch | | in the Region |
@@ -156,6 +157,16 @@ The accepted connections are listed pair by pair in `rules/aws/links.toml`, and 
 | `ecs` | `~>` | `s3` | Logs and metrics |
 | `ecs` | `~>` | `cloudwatch` | Logs and metrics |
 | `aurora` | `->` | `ecs` | HTTP |
+| `alb` | `->` | `ec2` | HTTP |
+| `ec2` | `->` | `aurora` | Read/Write to the writer, Read to a reader |
+| `ec2` | `->` | `s3` | Read/Write |
+| `ec2` | `->` | `dynamodb` | Read/Write |
+| `ec2` | `->` | `cloudwatch` | Logs and metrics |
+| `ec2` | `->` | `ssm` | HTTPS |
+| `ec2` | `->` | `internet` | Outbound |
+| `ec2` | `~>` | `s3` | Logs and metrics |
+| `ec2` | `~>` | `cloudwatch` | Logs and metrics |
+| `aurora` | `->` | `ec2` | HTTP |
 | `aurora` | `->` | `s3` | Read/Write |
 | `aurora` | `->` | `cloudwatch` | Logs and metrics |
 | `aurora` | `->` | `internet` | Outbound |
@@ -196,9 +207,9 @@ A pair means the services, whatever the parts are named: `lambda.resize -> s3.up
 
 Besides the list, archwire checks the following, and stops with `UNSUPPORTED` when one does not hold:
 
-- There is at least one main flow (`at` `flows`), and every main flow can be reached along main flows from a starting point (`at` the line that cannot be reached). The starting points are `user` and the services that start a flow by themselves: `guardduty`, `inspector`, `securityhub`, `config`, `cloudtrail`, `eventbridge` and `cloudwatch`. `sns`, `stepfunctions`, `ssm`, `athena`, `securitylake` and the other services only receive, so a definition cannot start with them.
+- There is at least one main flow (`at` `flows`), and every main flow can be reached along main flows from a starting point (`at` the line that cannot be reached). The starting points are `user` and the services that start a flow by themselves: `guardduty`, `inspector`, `securityhub`, `config`, `cloudtrail`, `eventbridge`, `cloudwatch` and `ec2`. EC2 instances start flows of their own, so `- ec2 -> s3` alone is accepted; ECS and Lambda are not starting points. `sns`, `stepfunctions`, `ssm`, `athena`, `securitylake` and the other services only receive, so a definition cannot start with them.
 - The source of an auxiliary flow and the target of an association are on a main flow reached from a starting point.
-- A main flow to `internet` comes from a part in a private subnet of the VPC: ECS, Aurora, or a function attached to the VPC.
+- A main flow to `internet` comes from a part in a private subnet of the VPC: ECS, EC2, Aurora, or a function attached to the VPC.
 
 One CloudFront distribution or one load balancer takes one WAF. With `- user -> cloudfront -> s3`, `- waf.front -- cloudfront` and `- waf.extra -- cloudfront`, the third line stops with `TOO_MANY_ATTACHED`, `got` `waf.extra`, and `rule` `one-web-acl-per-resource`; the reason is in [docs/rules.md](rules.md). `- user -> alb -> ecs`, `- waf.a -- alb` and `- waf.b -- alb` stop the same way, at `flows[2]` with `got` `waf.b`. One WAF attached to two distributions is accepted, and so is one WAF attached to two load balancers, such as `- waf -- alb.web` and `- waf -- alb.admin`.
 
@@ -214,21 +225,21 @@ For example, each of these stops with `UNSUPPORTED`:
 | `- user -> alb -> ecs -> aurora` and `- alb -> aurora` | `flows[1]` | ``"`alb -> aurora` is not a supported connection"`` |
 | `- user -> cloudfront -> alb -> ecs` and `- cloudfront -> cloudwatch` | `flows[1]` | ``"`cloudfront -> cloudwatch` is not a supported connection"`` |
 | `- user -> cloudfront -> alb -> ecs` and `- alb -- acm` | `flows[1]` | ``"`alb -- acm` is not a supported connection"`` |
-| `- stepfunctions -> sns` alone | `flows[0]` | ``"`stepfunctions -> sns` is not reached by main flows (->) from `cloudtrail`, `cloudwatch`, `config`, `eventbridge`, `guardduty`, `inspector`, `securityhub`, `user`"`` |
-| `- lambda -> dynamodb` alone | `flows[0]` | ``"`lambda -> dynamodb` is not reached by main flows (->) from `cloudtrail`, `cloudwatch`, `config`, `eventbridge`, `guardduty`, `inspector`, `securityhub`, `user`"`` |
-| `- user -> alb -> ecs` and `- aurora -> s3` | `flows[1]` | ``"`aurora -> s3` is not reached by main flows (->) from `cloudtrail`, `cloudwatch`, `config`, `eventbridge`, `guardduty`, `inspector`, `securityhub`, `user`"`` |
-| `- user -> cloudfront -> s3` and `- cognito -- apigateway` | `flows[1]` | ``"`cognito -- apigateway` needs `apigateway` on a main flow (->) from `cloudtrail`, `cloudwatch`, `config`, `eventbridge`, `guardduty`, `inspector`, `securityhub`, `user`"`` |
+| `- stepfunctions -> sns` alone | `flows[0]` | ``"`stepfunctions -> sns` is not reached by main flows (->) from `cloudtrail`, `cloudwatch`, `config`, `ec2`, `eventbridge`, `guardduty`, `inspector`, `securityhub`, `user`"`` |
+| `- lambda -> dynamodb` alone | `flows[0]` | ``"`lambda -> dynamodb` is not reached by main flows (->) from `cloudtrail`, `cloudwatch`, `config`, `ec2`, `eventbridge`, `guardduty`, `inspector`, `securityhub`, `user`"`` |
+| `- user -> alb -> ecs` and `- aurora -> s3` | `flows[1]` | ``"`aurora -> s3` is not reached by main flows (->) from `cloudtrail`, `cloudwatch`, `config`, `ec2`, `eventbridge`, `guardduty`, `inspector`, `securityhub`, `user`"`` |
+| `- user -> cloudfront -> s3` and `- cognito -- apigateway` | `flows[1]` | ``"`cognito -- apigateway` needs `apigateway` on a main flow (->) from `cloudtrail`, `cloudwatch`, `config`, `ec2`, `eventbridge`, `guardduty`, `inspector`, `securityhub`, `user`"`` |
 | `- user -> apigateway(http) -> lambda -> internet` | `flows[0]` | ``"`lambda -> internet` needs `lambda` in a VPC; connect it to a part in a private subnet"`` |
 
 `alb -- waf` stops the same way as `alb -- acm`: write the attached part first. So do `user -> aurora`, `alb -> s3`, `user ~> alb`, `internet -> alb`, `ecs -> user` and `waf -> alb` in a definition with a VPC. The auxiliary flows `cloudfront ~> s3` and `cloudfront ~> cloudwatch` are accepted in every definition, and so is `- user -> alb` alone.
 
-A main flow from a part in a private subnet to a part in the Region outside the VPC leaves a hole for its route, see [choose](#choose). With the list above that is `ecs` to `s3`, `dynamodb` or `cloudwatch`, `aurora` to `s3` or `cloudwatch`, and a function attached to the VPC to `s3` or `dynamodb`.
+A main flow from a part in a private subnet to a part in the Region outside the VPC leaves a hole for its route, see [choose](#choose). With the list above that is `ecs` to `s3`, `dynamodb` or `cloudwatch`, `ec2` to `s3`, `dynamodb`, `cloudwatch` or `ssm`, `aurora` to `s3` or `cloudwatch`, and a function attached to the VPC to `s3` or `dynamodb`.
 
 ## Definitions with a VPC
 
-archwire adds what the path needs and lays the parts out as described under [How the parts are laid out with a VPC](#how-the-parts-are-laid-out-with-a-vpc). Public subnets are drawn when a part goes in one: the load balancer, or the NAT gateways. Private subnets are drawn when a part goes in one: ECS, Aurora, or a function attached to the VPC. The Internet Gateway is added for an internet-facing load balancer, and for traffic going out to the internet. A note in the report says that auxiliary flows are not given a network route.
+archwire adds what the path needs and lays the parts out as described under [How the parts are laid out with a VPC](#how-the-parts-are-laid-out-with-a-vpc). Public subnets are drawn when a part goes in one: the load balancer, or the NAT gateways. Private subnets are drawn when a part goes in one: ECS, EC2, Aurora, or a function attached to the VPC. The Internet Gateway is added for an internet-facing load balancer, and for traffic going out to the internet. A note in the report says that auxiliary flows are not given a network route.
 
-`internet` is never drawn. `ecs -> internet` says the ECS tasks make outbound requests; `aurora -> internet` and `lambda -> internet` for a function attached to the VPC say the same. archwire adds a NAT gateway in each public subnet, one per Availability Zone unless `nat` is `single`, and the lines from each copy of the part to the NAT gateway in its zone and on to the Internet Gateway, all labelled "Outbound". Parts that go out share the same NAT gateways.
+`internet` is never drawn. `ecs -> internet` says the ECS tasks make outbound requests; `ec2 -> internet`, `aurora -> internet` and `lambda -> internet` for a function attached to the VPC say the same. archwire adds a NAT gateway in each public subnet, one per Availability Zone unless `nat` is `single`, and the lines from each copy of the part to the NAT gateway in its zone and on to the Internet Gateway, all labelled "Outbound". Parts that go out share the same NAT gateways.
 
 ### A function attached to the VPC
 
@@ -243,7 +254,7 @@ set:
   lang: ja
 ```
 
-`compile` exits with 2, with the hole `route.lambda.s3`. API Gateway, S3 and CloudWatch are in the Region outside the VPC. Each copy of the function has a line to the writer, labelled Read/Write, and a line to the reader, labelled Read. The function gets two reasons: `function-attaches-to-resource-vpc`, a constraint, for being in the private subnets, and `attached-function-per-az`, a default, for being drawn once per zone. The VPC and its zones get their reasons from the first part in the definition that has them, the load balancer or Aurora. Here it is Aurora, so the VPC gets `aurora-cluster-in-vpc`, the zones `aurora-subnet-group-two-azs`, and their number `default-two-azs-for-database`. When the load balancer comes first, they get `load-balancer-in-vpc`, `alb-spans-two-azs` and `default-two-azs`. With `set: direction: right` this definition is the acceptance case `tests/cases/mix-vpc-ja-right`, and without the direction `tests/cases/mix-vpc-ja`.
+`compile` exits with 2, with the hole `route.lambda.s3`. API Gateway, S3 and CloudWatch are in the Region outside the VPC. Each copy of the function has a line to the writer, labelled Read/Write, and a line to the reader, labelled Read. The function gets two reasons: `function-attaches-to-resource-vpc`, a constraint, for being in the private subnets, and `attached-function-per-az`, a default, for being drawn once per zone. The VPC and its zones get their reasons from the first part in the definition that has them, the load balancer, EC2 or Aurora. Here it is Aurora, so the VPC gets `aurora-cluster-in-vpc`, the zones `aurora-subnet-group-two-azs`, and their number `default-two-azs-for-database`. When the load balancer comes first, they get `load-balancer-in-vpc`, `alb-spans-two-azs` and `default-two-azs`. When EC2 comes first, the VPC gets `ec2-instance-in-subnet`, the zones no constraint, and their number `default-two-azs-for-instances`. With `set: direction: right` this definition is the acceptance case `tests/cases/mix-vpc-ja-right`, and without the direction `tests/cases/mix-vpc-ja`.
 
 With `lambda -> internet` added, the function gets `attached-function-internet-through-nat` too, and its traffic goes out through NAT gateways. `lambda -> internet` for a function outside the VPC stops, as in the table above.
 
@@ -261,9 +272,9 @@ archwire does not draw RDS Proxy: the line from a function to Aurora goes to Aur
 
 ### How the parts are laid out with a VPC
 
-Outside the VPC, the parts are laid out as in a definition without a VPC (see [How the parts are laid out](#how-the-parts-are-laid-out)), in the direction `set.direction` gives: from top to bottom, or from left to right with `direction: right`. Users and CloudFront come first, then the Region frame, which holds the VPC and the Regional services. The VPC takes a place in its rank like one large part, and comes first in that rank. So S3 in `cloudfront -> s3` goes to the right of the VPC in a top-to-bottom diagram, and below it in a left-to-right one. A Regional part that flows into the VPC, such as API Gateway in `apigateway -> lambda` with the function attached, comes in a rank before the VPC. A part that only parts inside the VPC connect to, such as CloudWatch in `ecs ~> cloudwatch`, goes to the right of the VPC in both directions.
+Outside the VPC, the parts are laid out as in a definition without a VPC (see [How the parts are laid out](#how-the-parts-are-laid-out)), in the direction `set.direction` gives: from top to bottom, or from left to right with `direction: right`. Users and CloudFront come first, then the Region frame, which holds the VPC and the Regional services. The VPC takes a place in its rank like one large part, and comes first in that rank. When no main flow enters or leaves the VPC, as in `- ec2 -> internet` or `- ec2 -> aurora` alone, the VPC is the first rank. So S3 in `cloudfront -> s3` goes to the right of the VPC in a top-to-bottom diagram, and below it in a left-to-right one. A Regional part that flows into the VPC, such as API Gateway in `apigateway -> lambda` with the function attached, comes in a rank before the VPC. A part that only parts inside the VPC connect to, such as CloudWatch in `ecs ~> cloudwatch`, goes to the right of the VPC in both directions.
 
-The inside of the VPC is the same in both directions. The Availability Zones stand side by side, and in each zone the public subnet is above the private one. Inside the subnets the main flows run from top to bottom, so in `alb -> ecs -> aurora` ECS is above Aurora. ECS and a function attached to the VPC get a copy in each zone. Aurora's writer is in the first zone and its readers in the zones after it.
+The inside of the VPC is the same in both directions. The Availability Zones stand side by side, and in each zone the public subnet is above the private one. Inside the subnets the main flows run from top to bottom, so in `alb -> ecs -> aurora` ECS is above Aurora. ECS, EC2 and a function attached to the VPC get a copy in each zone. Aurora's writer is in the first zone and its readers in the zones after it.
 
 The Internet Gateway sits inside the VPC on the side where the traffic comes in: the top side in a top-to-bottom diagram, the left side in a left-to-right one. A part that sends a main flow to the Internet Gateway, such as CloudFront, is lined up with it, so CloudFront, the Internet Gateway and the load balancer stand on one straight line, and a line from CloudFront to S3 bends on its way.
 
@@ -513,7 +524,7 @@ Here is a full report for a misspelled name, from `- user -> cloudfrnt -> alb ->
 {
   "versions": {
     "archwire": "0.1.0",
-    "rules": "2026.11.7"
+    "rules": "2026.11.8"
   },
   "derived": [],
   "holes": [],
@@ -534,6 +545,7 @@ Here is a full report for a misspelled name, from `- user -> cloudfrnt -> alb ->
         "cognito",
         "config",
         "dynamodb",
+        "ec2",
         "ecs",
         "eventbridge",
         "glue",
