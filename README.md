@@ -85,6 +85,7 @@ How to write a definition and answer each hole is in [Writing a definition](docs
 - A flow from detection to notification, from GuardDuty, Inspector, Security Hub, Config or CloudTrail to EventBridge, SNS, Step Functions or Systems Manager
 - Log analysis with Security Lake, Athena and the Glue Data Catalog
 - A KMS key attached to an S3 bucket or a DynamoDB table
+- Route 53 attached to a CloudFront distribution, drawn as an association because DNS only answers the name and the users' traffic does not pass through it
 - Events between EventBridge, SNS, SQS, Lambda and S3, such as a queue between two functions, a topic fanned out to queues, or event notifications from a bucket
 - EC2 instances in private subnets that start flows of their own
 

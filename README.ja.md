@@ -85,6 +85,7 @@ archwire compile web.yaml -o web.drawio
 - 検出から通知への流れ。GuardDuty、Inspector、Security Hub、Config、CloudTrail から、EventBridge、SNS、Step Functions、Systems Manager へつなぐ
 - Security Lake、Athena、Glue Data Catalog を使うログ分析
 - S3 のバケットや DynamoDB のテーブルに付ける KMS のキー
+- CloudFront のディストリビューションに付ける Route 53。DNS は名前を引くだけで利用者の通信は通らないので、本流ではなく関連の点線で描く
 - EventBridge、SNS、SQS、Lambda、S3 のあいだのイベント。2つの関数のあいだにキューを挟む形、トピックから複数のキューに分ける形、バケットのイベント通知など
 - 自分から通信を始める、プライベートサブネットの EC2 インスタンス
 
