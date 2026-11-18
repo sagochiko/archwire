@@ -1,5 +1,7 @@
 # archwire
 
+[日本語](README.ja.md)
+
 archwire turns a short definition of how services connect into a draw.io diagram for AWS architectures. It works by rules, not by an AI. The same definition always gives the same diagram, byte for byte, on macOS and Linux. Every part or setting archwire adds on its own carries a reason, and where the connections alone cannot decide the architecture, archwire reports a hole and asks instead of guessing.
 
 archwire is not an official AWS tool and is not affiliated with Amazon Web Services.
