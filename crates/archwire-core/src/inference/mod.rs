@@ -517,7 +517,7 @@ mod tests {
         assert!(m.is_none());
         assert_eq!(d.errors.len(), 1, "{:?}", d.errors);
         assert_eq!(first(&d), ("UNSUPPORTED", Some("flows[1]"), Some("waf -- cloudfront")));
-        assert_eq!(d.errors[0].message, "`waf -- cloudfront` needs `cloudfront` on a main flow (->) from `cloudtrail`, `cloudwatch`, `config`, `eventbridge`, `guardduty`, `inspector`, `securityhub`, `user`");
+        assert_eq!(d.errors[0].message, "`waf -- cloudfront` needs `cloudfront` on a main flow (->) from `cloudtrail`, `cloudwatch`, `config`, `ec2`, `eventbridge`, `guardduty`, `inspector`, `securityhub`, `user`");
     }
 
     #[test]
@@ -560,7 +560,7 @@ mod tests {
         assert!(m.is_none());
         assert_eq!(d.errors.len(), 1, "{:?}", d.errors);
         assert_eq!(first(&d), ("UNSUPPORTED", Some("flows[1]"), Some("cloudfront ~> cloudwatch")));
-        assert_eq!(d.errors[0].message, "`cloudfront ~> cloudwatch` needs `cloudfront` on a main flow (->) from `cloudtrail`, `cloudwatch`, `config`, `eventbridge`, `guardduty`, `inspector`, `securityhub`, `user`");
+        assert_eq!(d.errors[0].message, "`cloudfront ~> cloudwatch` needs `cloudfront` on a main flow (->) from `cloudtrail`, `cloudwatch`, `config`, `ec2`, `eventbridge`, `guardduty`, `inspector`, `securityhub`, `user`");
         let (m, d) = run("flows:\n  - user -> cloudfront -> s3\n  - cloudfront ~> cloudwatch\n");
         assert!(d.errors.is_empty(), "{:?}", d.errors);
         assert!(m.is_some());
@@ -602,7 +602,7 @@ mod tests {
         assert_eq!(first(&d), ("UNSUPPORTED", Some("flows[0]"), Some("stepfunctions -> sns")));
         assert_eq!(
             d.errors[0].message,
-            "`stepfunctions -> sns` is not reached by main flows (->) from `cloudtrail`, `cloudwatch`, `config`, `eventbridge`, `guardduty`, `inspector`, `securityhub`, `user`"
+            "`stepfunctions -> sns` is not reached by main flows (->) from `cloudtrail`, `cloudwatch`, `config`, `ec2`, `eventbridge`, `guardduty`, `inspector`, `securityhub`, `user`"
         );
         let (m, d) = run("flows:\n  - lambda -> dynamodb\n");
         assert!(m.is_none());
@@ -727,6 +727,114 @@ mod tests {
         let (m, d) = run("flows:\n  - glue -- athena\n");
         assert!(m.is_none());
         assert_eq!(d.errors[0].code, "UNSUPPORTED");
+    }
+
+    // Fails if one of the pairs with EC2 stops, gets another label, or is drawn without its label
+    // in English or Japanese. EC2 starts flows of its own; the load balancer reaches it from the user.
+    #[test]
+    fn every_ec2_pair_is_accepted_with_its_label() {
+        let r = Rules::builtin();
+        let (m, a) = (Rel::Main, Rel::Aux);
+        let pairs = [
+            ("alb", "ec2", m, "http", "flows:\n  - user -> alb -> ec2\n", "alb", "ec2-1a"),
+            ("ec2", "aurora", m, "read_write", "flows:\n  - ec2 -> aurora\n", "ec2-1a", "aurora-1a"),
+            ("aurora", "ec2", m, "http", "flows:\n  - ec2 -> aurora\n  - aurora -> ec2\n", "aurora-1a", "ec2-1a"),
+            ("ec2", "s3", m, "read_write", "flows:\n  - ec2 -> s3\nchoose:\n  route.ec2.s3: endpoint\n", "ec2-1c", "s3"),
+            ("ec2", "dynamodb", m, "read_write", "flows:\n  - ec2 -> dynamodb\nchoose:\n  route.ec2.dynamodb: endpoint\n", "ec2-1c", "dynamodb"),
+            ("ec2", "cloudwatch", m, "logs_metrics", "flows:\n  - ec2 -> cloudwatch\nchoose:\n  route.ec2.cloudwatch: endpoint\n", "ec2-1c", "cloudwatch"),
+            ("ec2", "internet", m, "outbound", "flows:\n  - user -> alb -> ec2 -> internet\n", "ec2-1a", "nat-1a"),
+            ("ec2", "s3", a, "logs_metrics", "flows:\n  - user -> alb -> ec2\n  - ec2 ~> s3\n", "ec2-1c", "s3"),
+            ("ec2", "cloudwatch", a, "logs_metrics", "flows:\n  - user -> alb -> ec2\n  - ec2 ~> cloudwatch\n", "ec2-1c", "cloudwatch"),
+            ("ec2", "ssm", m, "https", "flows:\n  - ec2 -> ssm\nchoose:\n  route.ec2.ssm: endpoint\n", "ec2-1c", "ssm"),
+        ];
+        assert_eq!(pairs.len(), 10);
+        for (from, to, rel, key, flows, a_id, b_id) in pairs {
+            assert_eq!(r.link(from, to, rel).map(|l| l.label.as_str()), Some(key), "{from} {rel:?} {to}");
+            let (m, d) = run(flows);
+            assert!(d.errors.is_empty(), "{from} -> {to}: {:?}", d.errors);
+            let m = m.unwrap_or_else(|| panic!("{from} -> {to}: no model"));
+            let edge = m.edges.iter().find(|e| e.from == a_id && e.to == b_id).unwrap_or_else(|| panic!("{from} -> {to}: no edge {a_id} -> {b_id}"));
+            assert_eq!(edge.label, key, "{from} -> {to}");
+            for (lang, text) in [("en", r.text(key, Lang::En)), ("ja", r.text(key, Lang::Ja))] {
+                let src = match flows.find("choose:") {
+                    Some(at) => format!("{}set:\n  lang: {lang}\n{}", &flows[..at], &flows[at..]),
+                    None => format!("{flows}set:\n  lang: {lang}\n"),
+                };
+                let out = crate::compile(&src);
+                assert_eq!(out.diagnostics.exit_code(), 0, "{from} -> {to} {lang}: {:?}", out.diagnostics.errors);
+                let drawio = out.drawio.unwrap_or_else(|| panic!("{from} -> {to} {lang}: no diagram"));
+                assert!(drawio.contains(&format!("value=\"{text}")), "{from} -> {to} {lang}: no label {text}");
+            }
+        }
+    }
+
+    // Fails if EC2 is not drawn once in the private subnet of each zone, or its parts and the VPC
+    // lose their reasons: those of EC2 when it is the first VPC part, those of the load balancer
+    // when that comes first.
+    #[test]
+    fn ec2_is_drawn_per_zone_in_private_subnets_with_its_reasons() {
+        use crate::diag::DerivedKind;
+        let (m, d) = run("flows:\n  - ec2 -> ssm\nchoose:\n  route.ec2.ssm: endpoint\n");
+        assert!(d.errors.is_empty(), "{:?}", d.errors);
+        let m = m.unwrap();
+        let copies: Vec<_> = m.nodes.iter().filter(|n| n.part == "ec2").map(|n| (n.id.as_str(), n.area)).collect();
+        assert_eq!(copies, [("ec2-1a", Area::Subnet(Tier::Private)), ("ec2-1c", Area::Subnet(Tier::Private))]);
+        assert_eq!(rules_of(&d, "vpc"), ["ec2-instance-in-subnet"]);
+        assert_eq!(rules_of(&d, "az"), ["default-two-azs-for-instances"]);
+        assert_eq!(rules_of(&d, "subnet"), ["private-subnet-per-az"]);
+        assert_eq!(rules_of(&d, "ec2"), ["instances-in-private"]);
+        let r = Rules::builtin();
+        let rule = r.rule("ec2-instance-in-subnet");
+        assert_eq!(rule.kind, DerivedKind::Constraint);
+        assert_eq!(rule.source.as_deref(), Some("https://aws.amazon.com/vpc/faqs/"));
+        assert_eq!(r.rule("instances-in-private").kind, DerivedKind::Default);
+        assert_eq!(r.rule("default-two-azs-for-instances").kind, DerivedKind::Default);
+
+        let (_, d) = run("flows:\n  - ec2 -> ssm\nset:\n  azs: 3\nchoose:\n  route.ec2.ssm: endpoint\n");
+        assert!(rules_of(&d, "az").is_empty(), "{:?}", rules_of(&d, "az"));
+
+        let (m, d) = run("flows:\n  - user -> alb -> ec2 -> aurora\n");
+        assert!(d.errors.is_empty(), "{:?}", d.errors);
+        assert_eq!(m.unwrap().nodes.iter().filter(|n| n.part == "ec2").count(), 2);
+        assert_eq!(rules_of(&d, "vpc"), ["load-balancer-in-vpc"]);
+        assert_eq!(rules_of(&d, "az"), ["alb-spans-two-azs", "default-two-azs"]);
+        assert_eq!(rules_of(&d, "ec2"), ["instances-in-private"]);
+    }
+
+    // Fails if a main flow from a private EC2 to a regional service leaves no route hole, or the
+    // shapes of the problems EC2 is added for stop or leave a hole once answered.
+    #[test]
+    fn the_ec2_shapes_are_drawn() {
+        for (src, holes) in [
+            ("flows:\n  - ec2 -> ssm\n", vec!["route.ec2.ssm"]),
+            ("flows:\n  - ec2 -> s3\n  - ec2 -> ssm\n  - ec2 ~> cloudwatch\n", vec!["route.ec2.s3", "route.ec2.ssm"]),
+            ("flows:\n  - user -> alb -> ec2\n  - ec2 -> internet\n", vec![]),
+        ] {
+            let (m, d) = run(src);
+            assert!(d.errors.is_empty(), "{src}: {:?}", d.errors);
+            assert!(m.is_some(), "{src}");
+            assert_eq!(d.holes.iter().map(|h| h.hole.as_str()).collect::<Vec<_>>(), holes, "{src}");
+        }
+        for src in [
+            "flows:\n  - user -> alb -> ec2 -> aurora\n  - ec2 -> internet\nset:\n  lang: ja\n",
+            "flows:\n  - ec2 -> s3\nset:\n  lang: ja\nchoose:\n  route.ec2.s3: endpoint\n",
+            "flows:\n  - ec2 -> ssm\n  - ec2 ~> cloudwatch\nchoose:\n  route.ec2.ssm: endpoint\n",
+            "flows:\n  - user -> cloudfront -> alb -> ec2\n  - waf -- cloudfront\nset:\n  azs: 3\n",
+        ] {
+            let out = crate::compile(src);
+            assert_eq!(out.diagnostics.exit_code(), 0, "{src}: {:?}", out.diagnostics.errors);
+            assert!(out.drawio.is_some(), "{src}");
+        }
+    }
+
+    // Fails if a pair with EC2 left out of the list is accepted.
+    #[test]
+    fn ec2_pairs_outside_the_list_stop() {
+        for line in ["user -> ec2", "cloudfront -> ec2", "ssm -> ec2", "ec2 -> user", "ec2 -> ecs", "ecs -> ec2", "ec2 ~> ssm", "ec2 -- alb", "apigateway -> ec2", "lambda -> ec2"] {
+            let (m, d) = run(&format!("flows:\n  - user -> alb -> ec2\n  - {line}\n"));
+            assert!(m.is_none(), "{line}");
+            assert_eq!(first(&d), ("UNSUPPORTED", Some("flows[1]"), Some(line)), "{line}");
+        }
     }
 
     #[test]
@@ -1488,7 +1596,7 @@ mod tests {
         let (_, d) = run("flows:\n  - user -> cloudfrnt -> alb -> ecs(lambda)\n");
         let services = [
             "acm", "alb", "apigateway", "athena", "aurora", "cloudfront", "cloudtrail", "cloudwatch", "cognito", "config", "dynamodb",
-            "ecs", "eventbridge", "glue", "guardduty", "inspector", "internet", "lambda", "s3", "securityhub", "securitylake", "sns",
+            "ec2", "ecs", "eventbridge", "glue", "guardduty", "inspector", "internet", "lambda", "s3", "securityhub", "securitylake", "sns",
             "sqs", "ssm", "stepfunctions", "user", "waf",
         ];
         assert_eq!(d.errors, [

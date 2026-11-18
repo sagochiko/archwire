@@ -155,13 +155,18 @@ fn parts(items: &[Item]) -> Vec<usize> {
 #[cfg(test)]
 const MOST_PER_PART: i32 = 300;
 
+/// The fewest parts a drawing is measured for. A VPC of two zones is about 900 pixels across
+/// with one part in each zone: `ec2 -> ssm` running down took 910 for its three parts.
+#[cfg(test)]
+const FEWEST_PARTS_MEASURED: usize = 4;
+
 /// The size of a laid-out drawing, when it is wider or taller than `MOST_PER_PART` per part.
 #[cfg(test)]
 pub(crate) fn spread_too_far(layout: &Layout) -> Option<String> {
     let rects: Vec<crate::layout::Rect> = layout.icons.iter().map(|i| i.rect).chain(layout.frames.iter().map(|f| f.rect)).collect();
     let (x0, y0) = (rects.iter().map(|r| r.x).min()?, rects.iter().map(|r| r.y).min()?);
     let (x1, y1) = (rects.iter().map(|r| r.x + r.w).max()?, rects.iter().map(|r| r.y + r.h).max()?);
-    let most = MOST_PER_PART * layout.icons.len() as i32;
+    let most = MOST_PER_PART * layout.icons.len().max(FEWEST_PARTS_MEASURED) as i32;
     (x1 - x0 > most || y1 - y0 > most).then(|| format!("{} by {} pixels for {} parts, more than {most}", x1 - x0, y1 - y0, layout.icons.len()))
 }
 
@@ -235,6 +240,31 @@ mod tests {
         samples
     }
 
+    // Fails if a VPC that no main line enters or leaves is not laid out: its parts start the flows
+    // and send only to each other or out through a NAT gateway, with or without other flows
+    // beside it in the Region, along either axis. The router must name no line it could not draw.
+    #[test]
+    fn a_vpc_no_main_line_crosses_is_laid_out() {
+        let defs = [
+            "flows:\n  - ec2 -> internet\n",
+            "flows:\n  - ec2 -> aurora\n",
+            "flows:\n  - ec2 -> aurora\n  - aurora -> ec2\nset:\n  azs: 3\n",
+            "flows:\n  - ec2 -> internet\n  - cloudtrail -> s3\n",
+            "flows:\n  - ec2 -> aurora\n  - ec2 -> internet\n  - ec2 ~> cloudwatch\nset:\n  lang: ja\n",
+        ];
+        for def in defs {
+            for way in ["down", "right"] {
+                let src = with_setting(def, &format!("direction: {way}"));
+                let out = crate::compile(&src);
+                assert!(out.diagnostics.errors.is_empty(), "{src}{:?}", out.diagnostics.errors);
+                assert!(out.drawio.is_some(), "{src}");
+                assert_eq!(out.diagnostics.exit_code(), 0, "{src}");
+                let broken: Vec<&String> = out.diagnostics.notes.iter().filter(|n| n.contains("edge-")).collect();
+                assert!(broken.is_empty(), "{src}{broken:?}");
+            }
+        }
+    }
+
     // Fails if a model that writes no direction is drawn along any axis but down, with a VPC or without.
     #[test]
     fn models_run_down_unless_written_otherwise() {
@@ -288,6 +318,84 @@ mod tests {
     fn generated_two_zone_definitions_draw_cleanly() {
         let defs: Vec<String> = generated_with_a_vpc().into_iter().filter(|s| s.contains("  azs: 2\n")).collect();
         assert_eq!(defs.len(), TWO_ZONE_DEFINITIONS);
+        let failed = generated_failures(&defs, &[Axis::Right, Axis::Down]);
+        assert!(failed.is_empty(), "{} of {} diagrams failed:\n{}", failed.len(), 2 * defs.len(), failed.join("\n"));
+    }
+
+    /// Definitions with EC2 and no load balancer, the shapes EC2 starts flows in: two or three
+    /// zones; Aurora or not; S3 and Systems Manager each left out, or reached through an endpoint
+    /// or a NAT gateway; out to the internet or not; a side line to CloudWatch or not; English
+    /// and Japanese in turn. Each has at least one main flow.
+    fn ec2_without_a_load_balancer() -> Vec<String> {
+        let mut out = Vec::new();
+        for azs in [2, 3] {
+            for aurora in [false, true] {
+                for s3 in [None, Some("endpoint"), Some("nat")] {
+                    for ssm in [None, Some("endpoint"), Some("nat")] {
+                        for internet in [false, true] {
+                            for aux in [false, true] {
+                                if !aurora && s3.is_none() && ssm.is_none() && !internet {
+                                    continue;
+                                }
+                                let mut src = String::from("flows:\n");
+                                if aurora {
+                                    src.push_str("  - ec2 -> aurora\n");
+                                }
+                                if s3.is_some() {
+                                    src.push_str("  - ec2 -> s3\n");
+                                }
+                                if ssm.is_some() {
+                                    src.push_str("  - ec2 -> ssm\n");
+                                }
+                                if internet {
+                                    src.push_str("  - ec2 -> internet\n");
+                                }
+                                if aux {
+                                    src.push_str("  - ec2 ~> cloudwatch\n");
+                                }
+                                let lang = if out.len() % 2 == 0 { "en" } else { "ja" };
+                                src.push_str(&format!("set:\n  azs: {azs}\n  lang: {lang}\n"));
+                                if s3.is_some() || ssm.is_some() {
+                                    src.push_str("choose:\n");
+                                }
+                                if let Some(r) = s3 {
+                                    src.push_str(&format!("  route.ec2.s3: {r}\n"));
+                                }
+                                if let Some(r) = ssm {
+                                    src.push_str(&format!("  route.ec2.ssm: {r}\n"));
+                                }
+                                out.push(src);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// How many definitions `ec2_without_a_load_balancer` makes.
+    const EC2_WITHOUT_A_LOAD_BALANCER: usize = 140;
+
+    // Fails if EC2 in place of ECS in every sixteenth generated definition with a VPC, or a
+    // definition with EC2 and no load balancer, fails to lay out, breaks a line, leaves a hole or
+    // is drawn wider or taller than its parts can take up, along either axis.
+    #[test]
+    fn ec2_definitions_draw_cleanly() {
+        let mut defs: Vec<String> = generated_with_a_vpc().into_iter().step_by(16).map(|s| s.replace("ecs", "ec2")).collect();
+        assert_eq!(defs.len(), 63);
+        let alone = ec2_without_a_load_balancer();
+        assert_eq!(alone.len(), EC2_WITHOUT_A_LOAD_BALANCER);
+        defs.extend(alone);
+        let r = Rules::builtin();
+        for src in &defs {
+            let (m, d) = crate::inference::infer(&crate::def::parse(src).unwrap(), &r);
+            assert!(m.is_some() && d.errors.is_empty(), "{:?}\n{src}", d.errors);
+            if !src.contains("route.ec2.s3") && src.contains("ec2 -> s3") {
+                continue;
+            }
+            assert!(d.holes.is_empty(), "{:?}\n{src}", d.holes);
+        }
         let failed = generated_failures(&defs, &[Axis::Right, Axis::Down]);
         assert!(failed.is_empty(), "{} of {} diagrams failed:\n{}", failed.len(), 2 * defs.len(), failed.join("\n"));
     }

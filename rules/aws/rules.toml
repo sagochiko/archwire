@@ -1,4 +1,4 @@
-version = "2026.11.7"
+version = "2026.11.8"
 
 # kind = "constraint": states an AWS constraint; `source` (AWS documentation URL) is required.
 # kind = "default": a choice archwire makes when the definition is silent; `source` is optional.
@@ -204,6 +204,25 @@ reason_ja = "Aurora の DB クラスターに選ぶ DB サブネットグルー�
 
 [[rule]]
 id = "default-two-azs-for-database"
+kind = "default"
+reason_en = "No number of Availability Zones was given, so two are used."
+reason_ja = "AZ の数の指定が無いので、2つにする。"
+
+[[rule]]
+id = "ec2-instance-in-subnet"
+kind = "constraint"
+source = "https://aws.amazon.com/vpc/faqs/"
+reason_en = "An Amazon EC2 instance is launched in a subnet, in the Availability Zone associated with that subnet, so a VPC is drawn."
+reason_ja = "Amazon EC2 のインスタンスはサブネットに起動され、そのサブネットに関連付けられたアベイラビリティゾーンで動くので、VPC を描く。"
+
+[[rule]]
+id = "instances-in-private"
+kind = "default"
+reason_en = "No subnet was given, so the EC2 instances are placed in private subnets, which are not reachable from the internet. archwire draws one in the private subnet of each Availability Zone."
+reason_ja = "サブネットの指定が無いので、EC2 のインスタンスは、インターネットから届かないプライベートサブネットに置く。archwire は、各アベイラビリティゾーンのプライベートサブネットに1つずつ描く。"
+
+[[rule]]
+id = "default-two-azs-for-instances"
 kind = "default"
 reason_en = "No number of Availability Zones was given, so two are used."
 reason_ja = "AZ の数の指定が無いので、2つにする。"

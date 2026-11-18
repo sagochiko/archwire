@@ -905,14 +905,10 @@ fn flow_of(model: &Model, piece: Option<&Piece>, axis: Axis, lone_right: i32, ro
         .filter(|&i| model.nodes[i].area == Area::Region && on_main(model, &model.nodes[i].id) && !(piece.is_some() && only_inside(model, i)))
         .collect();
     let index = |id: &str| model.nodes.iter().position(|n| n.id == id);
+    // The VPC stands in the flow whenever it is drawn, also when no main line enters or leaves
+    // it: its parts then start the flows and send only to each other or out through its gateways.
     if piece.is_some() {
-        let crosses = model.edges.iter().any(|e| {
-            let (Some(a), Some(b)) = (index(&e.from), index(&e.to)) else { return false };
-            e.rel == Rel::Main && inside(model, a) != inside(model, b)
-        });
-        if crosses {
-            parts.insert(0, vpc_id);
-        }
+        parts.insert(0, vpc_id);
     }
     let unit = |i: usize| if piece.is_some() && inside(model, i) { vpc_id } else { i };
     let local = |i: usize| parts.iter().position(|&p| p == unit(i));

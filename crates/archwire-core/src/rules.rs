@@ -574,8 +574,8 @@ mod tests {
             r.service_keys(),
             [
                 "acm", "alb", "apigateway", "athena", "aurora", "cloudfront", "cloudtrail", "cloudwatch", "cognito", "config", "dynamodb",
-                "ecs", "eventbridge", "glue", "guardduty", "igw", "inspector", "internet", "lambda", "nat", "s3", "securityhub",
-                "securitylake", "sns", "sqs", "ssm", "stepfunctions", "user", "waf",
+                "ec2", "ecs", "eventbridge", "glue", "guardduty", "igw", "inspector", "internet", "lambda", "nat", "s3",
+                "securityhub", "securitylake", "sns", "sqs", "ssm", "stepfunctions", "user", "waf",
             ]
         );
         let alb = r.service("alb").unwrap();
@@ -816,7 +816,7 @@ mod tests {
         assert_eq!(r.service("cognito").unwrap().place_rule.as_deref(), Some("cognito-user-pool-in-one-region"));
         assert!(r.service("user").unwrap().origin);
         let origins: Vec<_> = r.service_keys().into_iter().filter(|k| r.service(k).unwrap().origin).collect();
-        assert_eq!(origins, ["cloudtrail", "cloudwatch", "config", "eventbridge", "guardduty", "inspector", "securityhub", "user"]);
+        assert_eq!(origins, ["cloudtrail", "cloudwatch", "config", "ec2", "eventbridge", "guardduty", "inspector", "securityhub", "user"]);
         assert!(!r.service("ecs").unwrap().kind_hole);
     }
 
@@ -934,16 +934,28 @@ mod tests {
             ("ecs", "cloudwatch", a, "logs_metrics"),
             ("aurora", "s3", a, "logs_metrics"),
             ("aurora", "cloudwatch", a, "logs_metrics"),
+            ("alb", "ec2", m, "http"),
+            ("ec2", "aurora", m, "read_write"),
+            ("aurora", "ec2", m, "http"),
+            ("ec2", "s3", m, "read_write"),
+            ("ec2", "dynamodb", m, "read_write"),
+            ("ec2", "cloudwatch", m, "logs_metrics"),
+            ("ec2", "internet", m, "outbound"),
+            ("ec2", "ssm", m, "https"),
+            ("ec2", "s3", a, "logs_metrics"),
+            ("ec2", "cloudwatch", a, "logs_metrics"),
         ];
-        assert_eq!(want.len(), 19);
+        assert_eq!(want.len(), 29);
         for (from, to, rel, label) in want {
             let listed = r.links.iter().filter(|l| l.from == from && l.to == to && l.rel == rel).count();
             assert_eq!(listed, 1, "{from} {rel:?} {to}");
             assert_eq!(r.link(from, to, rel).unwrap_or_else(|| panic!("{from} {rel:?} {to}")).label, label, "{from} {rel:?} {to}");
         }
-        let roles = &r.link("ecs", "aurora", Rel::Main).unwrap().to_role;
-        let roles: Vec<_> = roles.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        assert_eq!(roles, [("reader", "read"), ("writer", "read_write")]);
+        for from in ["ecs", "ec2"] {
+            let roles = &r.link(from, "aurora", Rel::Main).unwrap().to_role;
+            let roles: Vec<_> = roles.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+            assert_eq!(roles, [("reader", "read"), ("writer", "read_write")], "{from}");
+        }
     }
 
     // Fails if an auxiliary line from CloudFront is stopped, or drawn with a note, in a definition without a VPC.
@@ -1090,7 +1102,7 @@ mod tests {
     }
 
     // Fails if the reasons the VPC and its zones get cannot be read from the data of the load
-    // balancer or of Aurora, if either is written wrong, or if another service is given them.
+    // balancer, of Aurora or of EC2, if one is written wrong, or if another service is given them.
     #[test]
     fn the_load_balancer_and_aurora_give_the_vpc_its_reasons() {
         let r = Rules::builtin();
@@ -1102,7 +1114,9 @@ mod tests {
         };
         assert_eq!(r.service("alb").unwrap().vpc_reasons.as_ref(), Some(&alb));
         assert_eq!(r.service("aurora").unwrap().vpc_reasons.as_ref(), Some(&aurora));
-        for k in r.service_keys().into_iter().filter(|k| k != "alb" && k != "aurora") {
+        let ec2 = VpcReasons { vpc: "ec2-instance-in-subnet".into(), az: Vec::new(), default_azs: "default-two-azs-for-instances".into() };
+        assert_eq!(r.service("ec2").unwrap().vpc_reasons.as_ref(), Some(&ec2));
+        for k in r.service_keys().into_iter().filter(|k| k != "alb" && k != "aurora" && k != "ec2") {
             assert_eq!(r.service(&k).unwrap().vpc_reasons, None, "{k}");
         }
     }

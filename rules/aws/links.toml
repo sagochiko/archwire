@@ -202,6 +202,56 @@ rel = "main"
 label = "outbound"
 
 [[link]]
+from = "alb"
+to = "ec2"
+rel = "main"
+label = "http"
+
+[[link]]
+from = "ec2"
+to = "aurora"
+rel = "main"
+label = "read_write"
+to_role.writer = "read_write"
+to_role.reader = "read"
+
+[[link]]
+from = "aurora"
+to = "ec2"
+rel = "main"
+label = "http"
+
+[[link]]
+from = "ec2"
+to = "s3"
+rel = "main"
+label = "read_write"
+
+[[link]]
+from = "ec2"
+to = "dynamodb"
+rel = "main"
+label = "read_write"
+
+[[link]]
+from = "ec2"
+to = "cloudwatch"
+rel = "main"
+label = "logs_metrics"
+
+[[link]]
+from = "ec2"
+to = "internet"
+rel = "main"
+label = "outbound"
+
+[[link]]
+from = "ec2"
+to = "ssm"
+rel = "main"
+label = "https"
+
+[[link]]
 from = "cloudfront"
 to = "s3"
 rel = "aux"
@@ -233,6 +283,18 @@ label = "logs_metrics"
 
 [[link]]
 from = "ecs"
+to = "cloudwatch"
+rel = "aux"
+label = "logs_metrics"
+
+[[link]]
+from = "ec2"
+to = "s3"
+rel = "aux"
+label = "logs_metrics"
+
+[[link]]
+from = "ec2"
 to = "cloudwatch"
 rel = "aux"
 label = "logs_metrics"

@@ -108,6 +108,19 @@ shape = "fargate"
 label = "Amazon ECS (Fargate)"
 
 [[service]]
+key = "ec2"
+scope = "vpc"
+subnet = "private"
+place = "per_az"
+icon = "service"
+shape = "ec2"
+color = "#ED7100"
+label = "Amazon EC2"
+origin = true
+place_rule = "instances-in-private"
+vpc_reasons = { vpc = "ec2-instance-in-subnet", az = [], default_azs = "default-two-azs-for-instances" }
+
+[[service]]
 key = "aurora"
 scope = "vpc"
 subnet = "private"
