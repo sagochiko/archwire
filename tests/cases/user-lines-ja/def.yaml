@@ -1,0 +1,8 @@
+flows:
+  - user -> cloudfront -> s3
+  - user -> cognito
+  - user -> s3.uploads
+  - user -> athena -> s3.logs
+  - cloudtrail -> s3.logs
+set:
+  lang: ja
