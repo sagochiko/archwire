@@ -436,6 +436,23 @@ fn inside(model: &Model, i: usize) -> bool {
     matches!(model.nodes[i].area, Area::VpcEdge | Area::Subnet(_))
 }
 
+/// The Region's parts that a line joins to a part outside the Region, as a line from the users or
+/// the global rank does: such a line comes in across the Region frame's side, at the part.
+fn entered_parts(model: &Model) -> Vec<usize> {
+    let index = |id: &str| model.nodes.iter().position(|n| n.id == id);
+    let mut out = Vec::new();
+    for e in &model.edges {
+        if let (Some(a), Some(b)) = (index(&e.from), index(&e.to)) {
+            match (in_region(model.nodes[a].area), in_region(model.nodes[b].area)) {
+                (true, false) => out.push(a),
+                (false, true) => out.push(b),
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
 /// A Region part whose every line comes from or goes to a part inside the VPC.
 pub(super) fn only_inside(model: &Model, i: usize) -> bool {
     let id = &model.nodes[i].id;
@@ -597,7 +614,10 @@ fn lay_region(model: &Model, rules: &Rules, axis: Axis, piece: Option<&Piece>) -
     let mut u = vec![0; ranks + 1];
     if ranks > 0 {
         let first: Vec<usize> = f.parts.iter().enumerate().filter(|&(k, _)| f.col[k] == 1).map(|(_, &i)| i).collect();
-        let parts_start = if first.iter().any(|&i| i != vpc_id) { start_main } else { frame_main };
+        // Across the page with no line coming in, the first parts and their names keep the room
+        // the frame keeps on its far side.
+        let lead = if axis == Axis::Right && entered_parts(model).is_empty() { REGION_RIGHT - span[1].0 } else { start_main };
+        let parts_start = if first.iter().any(|&i| i != vpc_id) { lead } else { frame_main };
         let block_start = if first.contains(&vpc_id) { frame_main } else { parts_start };
         u[1] = parts_start.max(block_start).max(FRAME_ROOM - span[1].0);
     }
@@ -688,21 +708,32 @@ fn lay_region(model: &Model, rules: &Rules, axis: Axis, piece: Option<&Piece>) -
     }
     spots.sort_by_key(|s| s.0);
 
-    // The parts' cross coordinate 0 lies past the frame's margin, far enough in for every name,
-    // and, for lines coming in across the frame's first side, clear of the frame's own name.
+    // The parts' cross coordinate 0 lies past the frame's margin, far enough in for every name.
+    // A part a line comes into from outside the Region, across the frame's first side, keeps
+    // clear of the frame's own name, so the line does not run through it. With no line coming
+    // in, down the page, the parts and their names keep the room the frame keeps on its far side,
+    // so the frame sits evenly around them.
     let probe = Frame { id: REGION_FRAME.into(), kind: FrameKind::Region, label: region_name(model, rules), rect: icon_at(0, 0), parent: None };
     let name = frame_name_box(&probe);
     let name_across = uv(axis, (name.x + name.w, name.y + name.h)).1;
     let named_rule = name_across + FRAME_ROOM - ICON / 2;
-    let across = match block_at {
-        None => spots.iter().map(|&(i, _, at)| FRAME_ROOM - uv(axis, spans(&named(i))).1 .0 - at).fold(start_cross.max(named_rule), i32::max),
+    let entered = entered_parts(model);
+    let across_with = |rule: i32| match block_at {
+        None => spots.iter().map(|&(i, _, at)| FRAME_ROOM - uv(axis, spans(&named(i))).1 .0 - at).fold(start_cross.max(rule), i32::max),
         // The VPC is entered through its gates, deep inside it, so only the parts keep clear of the name.
         Some((_, bv)) => spots
             .iter()
-            .map(|&(i, _, at)| (FRAME_ROOM - uv(axis, spans(&named(i))).1 .0).max(named_rule).max(start_cross) - at)
+            .map(|&(i, _, at)| (FRAME_ROOM - uv(axis, spans(&named(i))).1 .0).max(rule).max(start_cross) - at)
             .chain([frame_cross - bv])
             .max()
             .expect("not empty"),
+    };
+    let mut across = if entered.is_empty() && axis == Axis::Down {
+        let even = |i: usize, at: i32| REGION_RIGHT - uv(axis, spans(&named(i))).1 .0 - at;
+        spots.iter().map(|&(i, _, at)| even(i, at)).chain(block_at.map(|(_, bv)| frame_cross - bv)).max().unwrap_or(start_cross)
+    } else {
+        let loose = across_with(i32::MIN);
+        if spots.iter().any(|&(i, _, at)| entered.contains(&i) && loose + at < named_rule) { across_with(named_rule) } else { loose }
     };
 
     let mut icons: Vec<Icon> = spots
@@ -761,10 +792,18 @@ fn lay_region(model: &Model, rules: &Rules, axis: Axis, piece: Option<&Piece>) -
             bh = icons.iter().map(|i| extent(i).1).max().expect("not empty") + REGION_BOTTOM;
         }
     }
-    // Wide enough for the frame's own name.
+    // Wide enough for the frame's own name. With no line coming in and no VPC, the parts move
+    // to the middle of the room the name adds, so the frame stays even around them.
+    let content_w = bw;
     bw = bw.max(FRAME_NAME_INDENT + name_text_width(&region_name(model, rules)) + FRAME_ROOM);
+    let shift = if entered.is_empty() && vpc.is_none() { (bw - content_w) / 2 } else { 0 };
+    for i in &mut icons {
+        i.rect.x += shift;
+    }
+    let (shift_main, shift_cross) = uv(axis, (shift, 0));
+    across += shift_cross;
     let near_ranks = (0..f.parts.len()).filter(|&k| near[k]).map(|k| near_u[f.col[k]]);
-    let mut centres: Vec<i32> = u[1..].iter().copied().chain(extra).chain(near_ranks).map(|c| c + ICON / 2).collect();
+    let mut centres: Vec<i32> = u[1..].iter().copied().chain(extra).chain(near_ranks).map(|c| c + ICON / 2 + shift_main).collect();
     centres.sort_unstable();
     centres.dedup();
     Block { w: bw, h: bh, icons, ranks: centres, across, vpc }
@@ -2307,6 +2346,76 @@ set:
                 }
             }
         }
+    }
+
+    /// The room left and right of the Region's parts, icons and names, inside the Region frame.
+    fn region_margins(p: &Placement) -> (i32, i32) {
+        let region = at(p, "region");
+        let inner: Vec<&Icon> = p.layout.icons.iter().filter(|i| inside_rect(region, i.rect)).collect();
+        let left = inner.iter().map(|i| i.rect.x.min(name_area(i).x)).min().expect("parts in the Region");
+        let end = inner.iter().map(|i| extent(i).0).max().expect("parts in the Region");
+        (left - region.x, right(region) - end)
+    }
+    fn inside_rect(outer: Rect, r: Rect) -> bool {
+        r.x >= outer.x && r.y >= outer.y && r.x + r.w <= outer.x + outer.w && r.y + r.h <= outer.y + outer.h
+    }
+
+    // Fails if the Region's parts keep the room for lines coming in though no line comes into the
+    // Region: down the page, the parts of these flows sat clear of the Region's name, 210 pixels
+    // in from the left, and the frame closed 50 pixels past them on the right; across the page,
+    // they sat 110 pixels in.
+    #[test]
+    fn a_region_no_line_comes_into_keeps_even_room_on_both_sides() {
+        let flows = [
+            "flows:\n  - cloudtrail -> cloudwatch -> sns\n",
+            "flows:\n  - cloudtrail -> cloudwatch -> sns\n  - cloudtrail -> s3\n  - config -> ssm\n",
+            "flows:\n  - guardduty -> securityhub -> eventbridge -> sns\n  - inspector -> securityhub\n  - config -> securityhub\n",
+            "flows:\n  - guardduty -> securityhub -> eventbridge -> stepfunctions\n  - stepfunctions -> ssm\n  - stepfunctions -> sns\n",
+        ];
+        for flow in flows {
+            for lang in ["ja", "en"] {
+                for axis in [Axis::Down, Axis::Right] {
+                    let src = format!("{flow}set:\n  lang: {lang}\n");
+                    let (_, p) = arranged(&src, axis);
+                    let (left, right) = region_margins(&p);
+                    assert!((left - right).abs() <= 10, "{axis:?} {lang}: left {left}, right {right}\n{src}");
+                }
+            }
+        }
+    }
+
+    // Fails if a line coming into the Region from above runs through the Region's name: the
+    // Region's first parts keep clear of the name when a line comes in.
+    #[test]
+    fn a_region_a_line_comes_into_keeps_its_parts_clear_of_its_name() {
+        let (_, p) = arranged(TARGET, Axis::Down);
+        let region = p.layout.frames.iter().find(|f| f.id == "region").unwrap();
+        let name = frame_name_box(region);
+        let first = p.layout.icons.iter().filter(|i| inside_rect(region.rect, i.rect)).map(|i| i.rect.x + ICON / 2).min().unwrap();
+        assert!(first >= right(name) + FRAME_ROOM, "first centre {first}, name ends at {}", right(name));
+    }
+
+    // Fails if the Region's parts keep clear of the Region's name when the lines coming in reach
+    // only parts past it: here the users' line comes into API Gateway in the middle of the
+    // Region, and the parts sat 210 pixels in from the left rather than the usual 110.
+    #[test]
+    fn a_region_whose_lines_come_in_past_its_name_keeps_its_usual_room() {
+        let src = "flows:
+  - user -> apigateway(http) -> lambda.orders -> dynamodb.orders
+  - apigateway -> lambda.users -> dynamodb.users
+  - apigateway -> lambda.search -> dynamodb.orders
+  - lambda.orders ~> cloudwatch
+  - lambda.users ~> cloudwatch
+  - lambda.search ~> cloudwatch
+set:
+  lang: ja
+";
+        let (_, p) = arranged(src, Axis::Down);
+        let region = p.layout.frames.iter().find(|f| f.id == "region").unwrap();
+        let left = p.layout.icons.iter().filter(|i| inside_rect(region.rect, i.rect)).map(|i| i.rect.x - region.rect.x).min().unwrap();
+        assert_eq!(left, REGION_LEFT);
+        let api = at(&p, "apigateway").x + ICON / 2;
+        assert!(api >= right(frame_name_box(region)) + FRAME_ROOM, "API Gateway centre {api}, name ends at {}", right(frame_name_box(region)));
     }
 
     const PARENTS_IN_ANOTHER_ORDER: &str = "flows:
