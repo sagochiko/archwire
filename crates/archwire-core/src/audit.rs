@@ -186,6 +186,23 @@ fn audit_points(raw: &[(i32, i32)]) -> Vec<(i32, i32)> {
     out
 }
 
+/// The points where a drawn line turns: its inner points, without repeated points and points a
+/// straight run passes through.
+fn audit_corners(path: &[(i32, i32)]) -> Vec<(i32, i32)> {
+    let mut p = audit_points(path);
+    let mut k = 1;
+    while k + 1 < p.len() {
+        let (a, b, c) = (p[k - 1], p[k], p[k + 1]);
+        if (a.0 == b.0 && b.0 == c.0) || (a.1 == b.1 && b.1 == c.1) {
+            p.remove(k);
+            k = k.max(2) - 1;
+        } else {
+            k += 1;
+        }
+    }
+    p.get(1..p.len().saturating_sub(1)).map_or(Vec::new(), |inner| inner.to_vec())
+}
+
 /// True if the path runs straight on and then back over itself somewhere: three points on one
 /// line, the middle one not between the others.
 fn audit_turns_back(path: &[(i32, i32)]) -> bool {
@@ -269,7 +286,8 @@ fn audit_keeps_draft(w: &Wire, p: &LinePlan, layout: &Layout) -> bool {
 }
 
 /// Lines that run over text (an icon's label, a frame's name, another line's label), over an
-/// icon they do not attach to, or on top of another line, or that break their drafts in `plans`
+/// icon they do not attach to, or on top of another line, or that turn where another line sharing
+/// no end with them turns, or that break their drafts in `plans`
 /// (a kept part moved, a gate missed, a track left); a line is matched to the draft of the
 /// semantic edge it stands for. A line between two parts outside the VPC (neither in a subnet
 /// nor on the VPC's edge) that passes through the inside of a VPC frame is named too: it reads
@@ -300,6 +318,19 @@ pub(crate) fn audit(model: &Model, layout: &Layout, wires: &[Wire], plans: &[Lin
                     bad[n] = true;
                     bad[m] = true;
                 }
+            }
+        }
+    }
+    // Two lines sharing no end that turn at one point: drawn, the first half of one and the
+    // second half of the other read as one line.
+    let corners: Vec<Vec<(i32, i32)>> = paths.iter().map(|p| audit_corners(p)).collect();
+    for n in 0..wires.len() {
+        for m in n + 1..wires.len() {
+            let (a, b) = (&wires[n], &wires[m]);
+            let shared = [&a.from, &a.to].iter().any(|e| **e == b.from || **e == b.to);
+            if !shared && corners[n].iter().any(|c| corners[m].contains(c)) {
+                bad[n] = true;
+                bad[m] = true;
             }
         }
     }

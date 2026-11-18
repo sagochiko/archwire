@@ -128,6 +128,12 @@ fn crosses(a: Pt, b: Pt, c: Pt, d: Pt) -> bool {
     cross((a, b), (c, d)) || cross((c, d), (a, b))
 }
 
+/// The points where a path turns.
+pub(crate) fn corners(path: &[Pt]) -> Vec<Pt> {
+    let p = simplify(path.to_vec());
+    p.get(1..p.len().saturating_sub(1)).map_or(Vec::new(), |inner| inner.to_vec())
+}
+
 /// Drops repeated points and points in the middle of a straight run.
 fn simplify(raw: Vec<Pt>) -> Vec<Pt> {
     let mut out: Vec<Pt> = Vec::new();
@@ -198,6 +204,11 @@ pub(crate) struct Scene<'a> {
     /// pass through the inside of a VPC frame, where it would read as a line to the parts in it.
     /// Lines with an end in a VPC are not held by it.
     pub(crate) fence: Fence,
+    /// While a line is laid again because it turned where a line sharing no end with it turns:
+    /// the corners of the lines laid that share no end with it, where it may not turn (drawn, the
+    /// first half of one line and the second half of the other would read as one line). A line
+    /// kept whole is drawn as planned and may. Empty otherwise.
+    pub(crate) taken_corners: std::cell::RefCell<Vec<Pt>>,
 }
 
 /// The VPC frames, and the ids of the parts outside them.
@@ -252,7 +263,7 @@ impl<'a> Scene<'a> {
                 [((l, t), (rt, t)), ((l, b), (rt, b)), ((l, t), (l, b)), ((rt, t), (rt, b))]
             })
             .collect();
-        Scene { icons: &layout.icons, labels, frame_names, borders, xs: channels(ex), ys: channels(ey), barriers: Vec::new(), fence: Fence::default() }
+        Scene { icons: &layout.icons, labels, frame_names, borders, xs: channels(ex), ys: channels(ey), barriers: Vec::new(), fence: Fence::default(), taken_corners: Default::default() }
     }
 
     /// Whether one segment of the line from `from` to `to` stays clear of icons, labels and frame
@@ -353,6 +364,9 @@ impl<'a> Scene<'a> {
         if path.len() < 2 {
             return None;
         }
+        if barriers && self.turns_at_a_taken_corner(path) {
+            return None;
+        }
         let last = path.len() - 2;
         let mut crossings = 0;
         for (k, s) in path.windows(2).enumerate() {
@@ -363,6 +377,12 @@ impl<'a> Scene<'a> {
             crossings += self.against(s[0], s[1], placed)?;
         }
         Some(crossings)
+    }
+
+    /// Whether the path turns at a corner of a line laid before it that shares no end with it.
+    fn turns_at_a_taken_corner(&self, path: &[Pt]) -> bool {
+        let taken = self.taken_corners.borrow();
+        !taken.is_empty() && corners(path).iter().any(|c| taken.contains(c))
     }
 
     /// Shortest acceptable path over the channels, counting bends, crossings and frame sides crossed, or None.
@@ -377,6 +397,7 @@ impl<'a> Scene<'a> {
             v
         };
         let (xs, ys) = (with(&self.xs, start.0, goal.0), with(&self.ys, start.1, goal.1));
+        let taken: Vec<Pt> = self.taken_corners.borrow().clone();
         let (nx, ny) = (xs.len(), ys.len());
         let at = |p: Pt| (xs.binary_search(&p.0).expect("added"), ys.binary_search(&p.1).expect("added"));
         let dir_index = |d: Dir| DIRS.iter().position(|&x| x == d).expect("listed");
@@ -422,6 +443,9 @@ impl<'a> Scene<'a> {
                 };
                 let Some((xj, yj)) = next else { continue };
                 let (a, b) = ((xs[xi], ys[yi]), (xs[xj], ys[yj]));
+                if nd != d && taken.contains(&a) {
+                    continue;
+                }
                 let nfirst = first && nd == d;
                 let on_entry = dir == inward
                     && if vertical(dir) { a.0 == goal.0 } else { a.1 == goal.1 }

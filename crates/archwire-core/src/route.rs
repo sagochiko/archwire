@@ -218,6 +218,22 @@ pub fn route_planned(model: &Model, layout: &Layout, rules: &Rules, plans: &[Lin
     draw(&ctx, &specs, &drafts, plans, notes)
 }
 
+/// How much longer a line may grow to keep from turning where a line sharing no end with it turns.
+const DETOUR: i32 = 200;
+
+/// Lays line `i`: its path, its new ports when it moved to free sides, and whether it is clear.
+/// A kept draft is never moved to other sides: it is drawn as planned and named.
+fn lay_one(ctx: &Ctx, specs: &[Line], i: usize, d: &Draft, ports: &[(Port, Port)], placed: &[Vec<Pt>]) -> (Vec<Pt>, Option<(Port, Port)>, bool) {
+    match ctx.lay(&specs[i], d, ports[i], placed) {
+        Ok(p) => (p, None, true),
+        Err(best) if d.keep != Keep::Free => (best, None, false),
+        Err(best) => match ctx.on_free_sides(specs, i, ports, placed) {
+            Some((p, moved)) => (p, Some(moved), true),
+            None => (best, None, false),
+        },
+    }
+}
+
 /// Shares out the ports, lays every line, places the labels and runs the final check, which
 /// also looks at how each line keeps its draft in `plans` (none when no plans are given).
 pub(crate) fn draw(ctx: &Ctx, specs: &[Line], drafts: &[Draft], plans: &[LinePlan], mut notes: Vec<String>) -> (Vec<Wire>, Vec<String>) {
@@ -229,29 +245,63 @@ pub(crate) fn draw(ctx: &Ctx, specs: &[Line], drafts: &[Draft], plans: &[LinePla
     order.sort_by_key(|&i| (drafts[i].rank, i));
     let mut paths: Vec<Vec<Pt>> = vec![Vec::new(); specs.len()];
     let mut placed: Vec<Vec<Pt>> = Vec::new();
+    let mut laid: Vec<usize> = Vec::new();
+    // The corners of each line laid, and whether two lines share no end.
+    let mut bends: Vec<Vec<Pt>> = vec![Vec::new(); specs.len()];
+    let apart = |a: usize, b: usize| ![&specs[a].from, &specs[a].to].iter().any(|e| **e == specs[b].from || **e == specs[b].to);
     for i in order {
         let (s, d) = (&specs[i], &drafts[i]);
         let unrouted = || rules.text("note.unrouted_line", lang).replace("{line}", &edge_id(&s.from, &s.to));
-        let path = match ctx.lay(s, d, ports[i], &placed) {
-            Ok(p) => p,
-            // A kept draft is never moved to other sides: it is drawn as planned and named.
-            Err(best) if d.keep != Keep::Free => {
-                notes.push(unrouted());
-                best
+        let (mut path, mut moved, mut clear) = lay_one(ctx, specs, i, d, &ports, &placed);
+        // A line that turns where a line sharing no end with it turns is laid again without
+        // turning there, and keeps the new way when it is clear and not much longer: drawn, the
+        // first half of one line and the second half of the other would read as one line.
+        let mut mine = crate::path::corners(&path);
+        let meets = |mine: &[Pt], j: usize, bends: &[Vec<Pt>]| apart(i, j) && bends[j].iter().any(|c| mine.contains(c));
+        if clear && laid.iter().any(|&j| meets(&mine, j, &bends)) {
+            *ctx.scene.taken_corners.borrow_mut() = laid.iter().filter(|&&j| apart(i, j)).flat_map(|&j| bends[j].iter().copied()).collect();
+            let again = lay_one(ctx, specs, i, d, &ports, &placed);
+            ctx.scene.taken_corners.borrow_mut().clear();
+            if again.2 && path_length(&again.0) <= path_length(&path) + DETOUR {
+                (path, moved, clear) = again;
+                mine = crate::path::corners(&path);
             }
-            Err(best) => match ctx.on_free_sides(specs, i, &ports, &placed) {
-                Some((p, moved)) => {
-                    ports[i] = moved;
-                    p
+        }
+        // Else the line laid before it whose corner it turns at is laid again, with this line
+        // placed, the same way.
+        if clear {
+            for k in 0..laid.len() {
+                let j = laid[k];
+                if !meets(&mine, j, &bends) {
+                    continue;
                 }
-                None => {
-                    notes.push(unrouted());
-                    best
+                let mut others: Vec<Vec<Pt>> = placed.iter().enumerate().filter(|&(m, _)| m != k).map(|(_, p)| p.clone()).collect();
+                others.push(path.clone());
+                let mut taken: Vec<Pt> = laid.iter().filter(|&&o| o != j && apart(j, o)).flat_map(|&o| bends[o].iter().copied()).collect();
+                taken.extend(mine.iter().copied());
+                *ctx.scene.taken_corners.borrow_mut() = taken;
+                let again = lay_one(ctx, specs, j, &drafts[j], &ports, &others);
+                ctx.scene.taken_corners.borrow_mut().clear();
+                if again.2 && path_length(&again.0) <= path_length(&paths[j]) + DETOUR {
+                    if let Some(m) = again.1 {
+                        ports[j] = m;
+                    }
+                    bends[j] = crate::path::corners(&again.0);
+                    placed[k] = again.0.clone();
+                    paths[j] = again.0;
                 }
-            },
-        };
+            }
+        }
+        if !clear {
+            notes.push(unrouted());
+        }
+        if let Some(m) = moved {
+            ports[i] = m;
+        }
+        bends[i] = mine;
         placed.push(path.clone());
         paths[i] = path;
+        laid.push(i);
     }
 
     // Labels on the shortest lines first, since they have the fewest spots to choose from; each
@@ -1684,6 +1734,20 @@ pub(crate) mod tests {
         l.frames.push(Frame { id: "f".to_string(), kind: FrameKind::Vpc, label: "F".to_string(), rect: Rect { x: 200, y: 0, w: 200, h: 300 }, parent: Some("region".to_string()) });
         let p = keep_draft(&m, 0, Side::Right, Side::Left, Bend::Straight, keep);
         (m, l, vec![p])
+    }
+
+    // Fails if the final check lets two lines that share no end turn at one point unnamed: drawn,
+    // the first half of one and the second half of the other read as one line.
+    #[test]
+    fn the_final_check_names_two_lines_sharing_no_end_that_turn_at_one_point() {
+        let (m, l) = scene(&[("a", 270, 0, S3), ("b", 600, 170, S3), ("c", 0, 170, S3), ("d", 270, 400, S3)], &[("a", "b", Rel::Main, ""), ("c", "d", Rel::Main, "")]);
+        let plans = vec![
+            keep_draft(&m, 0, Side::Bottom, Side::Left, Bend::Elbow, Keep::Whole),
+            keep_draft(&m, 1, Side::Right, Side::Top, Bend::Elbow, Keep::Whole),
+        ];
+        let (w, _) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        assert!(drawn(wire(&w, "a", "b"), &l).contains(&(300, 200)) && drawn(wire(&w, "c", "d"), &l).contains(&(300, 200)));
+        assert_eq!(audit(&m, &l, &w, &[]), vec!["edge-a-to-b".to_string(), "edge-c-to-d".to_string()]);
     }
 
     // Fails if a free line between two parts outside the VPC is drawn through the VPC's inside, or named.

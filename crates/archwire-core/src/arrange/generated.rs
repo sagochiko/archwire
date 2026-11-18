@@ -864,3 +864,20 @@ fn count_labels_by_names() {
     std::fs::write(&path, out).unwrap();
     std::fs::write(path.with_file_name("label-name-drawn.tsv"), drawn.iter().map(|(s, n)| format!("{s}\t{n}\n")).collect::<String>()).unwrap();
 }
+
+// Fails if two drawn lines that share no end turn at one point: drawn, the first half of one and
+// the second half of the other read as one line. The generated definitions 969 and 1031 (left to
+// right) and the named mixed definition (top to bottom) each had two such lines.
+#[test]
+fn lines_sharing_no_end_never_turn_at_one_point() {
+    let gen = crate::test_inputs::generated();
+    let named = mixed_representatives().into_iter().find(|(n, _)| *n == "function-before-web-3az").expect("a named definition").1;
+    let inputs = [(with_direction(&gen[969], "right"), Axis::Right), (with_direction(&gen[1031], "right"), Axis::Right), (named, Axis::Down)];
+    for (src, axis) in inputs {
+        let m = model_of(&src).expect("a model");
+        let (layout, wires) = routed(&m, axis).expect("laid out");
+        let (same, _) = meetings(&m, &layout, &wires);
+        let apart: Vec<&String> = same.iter().filter(|r| r.ends_with("\tfalse")).collect();
+        assert!(apart.is_empty(), "{axis:?}: {apart:?}\n{src}");
+    }
+}
