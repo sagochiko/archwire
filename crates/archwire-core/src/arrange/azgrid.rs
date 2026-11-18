@@ -269,6 +269,11 @@ struct Grid<'a> {
     /// Half the width of each private column.
     col_half: Vec<i32>,
     names_right: i32,
+    /// Whether the columns keep clear of the zone's and the subnets' names: a line comes down into
+    /// the first private column from above, past the names (from the public tier, a part spanning
+    /// the zones, or outside), or lines run down between private rows, whose labels beside them
+    /// take the room the names leave.
+    clear_names: bool,
     entry_half: i32,
     reps: Vec<usize>,
 }
@@ -395,10 +400,15 @@ impl<'a> Grid<'a> {
             names_right = names_right.max(SUB_INSET + frame_w(FrameKind::PrivateSubnet, rules.text("private_subnet", model.lang)));
         }
         let entry_half = groups.iter().filter(|g| g.place == Place::Entry).map(|g| g.half).max().unwrap_or(ICON / 2);
+        let place_of = |id: &str| index(id).and_then(|i| group_of[i]).map(|k| groups[k].place);
+        let clear_names = public
+            || rows > 1
+            || groups.iter().any(|g| matches!(g.place, Place::Entry | Place::Span))
+            || model.edges.iter().any(|e| place_of(&e.from).is_none() && place_of(&e.to) == Some(Place::Private));
         // With two zones, one part spanning them sits on the boundary between the zones; two or
         // more take the row above the zones, as with three zones.
         let boundary = model.azs.len() == 2 && groups.iter().filter(|g| g.place == Place::Span).count() == 1;
-        let mut g = Grid { model, rules, axis, boundary, groups, group_of, public, private, rows, col_half, names_right, entry_half, reps: Vec::new() };
+        let mut g = Grid { model, rules, axis, boundary, groups, group_of, public, private, rows, col_half, names_right, clear_names, entry_half, reps: Vec::new() };
         g.reps = g.drawn_inside();
         g
     }
@@ -461,7 +471,8 @@ impl<'a> Grid<'a> {
         // gateway passes them.
         let clear_of_spans = span_g.iter().zip(&span_off).map(|(g, off)| off + NAT_SHIFT.max(g.half + ROOM + 1)).max().unwrap_or(0);
         let c0_half = self.col_half.first().copied().unwrap_or(ICON / 2);
-        let col0 = (SUB_INSET + PAD + c0_half).max(self.names_right + ROOM + 1) + shift;
+        let clear_of_names = if self.clear_names { self.names_right + ROOM + 1 } else { 0 };
+        let col0 = (SUB_INSET + PAD + c0_half).max(clear_of_names) + shift;
         let mut pubs: Vec<i32> = Vec::new();
         for (k, p) in pubs_g.iter().enumerate() {
             let at = match k {
@@ -480,13 +491,24 @@ impl<'a> Grid<'a> {
             }
             cols.push(at);
         }
-        let right = cols
+        let mut right = cols
             .iter()
             .zip(self.col_half.iter().chain(std::iter::repeat(&(ICON / 2))))
             .map(|(c, h)| c + h)
             .chain(pubs.iter().zip(&pubs_g).map(|(c, p)| c + p.half))
             .max()
             .unwrap_or(col0 + ICON / 2);
+        // A zone the names make wider than its columns, its columns not keeping clear of them,
+        // holds its columns in the middle: half of what the names add on each side.
+        if !self.clear_names {
+            let spare = (self.names_right + PAD) - (right + PAD + SUB_INSET);
+            if spare > 1 {
+                for c in cols.iter_mut() {
+                    *c += spare / 2;
+                }
+                right += spare / 2;
+            }
+        }
         // Two or more parts spanning the zones stand in a row over the zone they start over,
         // which holds them all.
         let span_room = match (span_g.last(), span_off.last()) {
@@ -1993,6 +2015,60 @@ pub(in crate::arrange) mod tests {
         let p = on_the_boundary(Axis::Down);
         let y = |id: &str| icon(&p, id).rect.y;
         assert_eq!((y("alb"), y("nat-1c")), (y("nat-1a"), y("nat-1a")));
+    }
+
+    /// The parts in each private subnet of a placement, as the room left of them and right of them.
+    fn subnet_margins(p: &Placement) -> Vec<(String, i32, i32)> {
+        let mut out = Vec::new();
+        for f in p.layout.frames.iter().filter(|f| f.kind == FrameKind::PrivateSubnet) {
+            let parts: Vec<Rect> = p.layout.icons.iter().filter(|i| i.parent.as_deref() == Some(f.id.as_str())).map(|i| i.rect).collect();
+            let (Some(l), Some(r)) = (parts.iter().map(|r| r.x).min(), parts.iter().map(|r| r.x + r.w).max()) else { continue };
+            out.push((f.id.clone(), l - f.rect.x, f.rect.x + f.rect.w - r));
+        }
+        out
+    }
+
+    // Fails if, in a VPC no line comes down into from above (no public tier, nothing spanning the
+    // zones, no line from outside into a private part) and with one private row, the parts of a
+    // private subnet sit further from one side of it than from the other.
+    #[test]
+    fn a_subnet_no_line_comes_down_into_keeps_even_room_on_both_sides() {
+        let defs = [
+            "flows:\n  - ec2 -> ssm\n  - ec2 ~> cloudwatch\nchoose:\n  route.ec2.ssm: endpoint\n",
+            "flows:\n  - ec2 -> s3\nchoose:\n  route.ec2.s3: endpoint\n",
+            "flows:\n  - ec2 -> s3\n  - ec2 -> ssm\nset:\n  azs: 3\nchoose:\n  route.ec2.s3: endpoint\n  route.ec2.ssm: endpoint\n",
+        ];
+        for def in defs {
+            for lang in ["en", "ja"] {
+                let src = if def.contains("set:\n") { def.replace("set:\n", &format!("set:\n  lang: {lang}\n")) } else { format!("{def}set:\n  lang: {lang}\n") };
+                let (m, d) = grid(&src);
+                for axis in [Axis::Down, Axis::Right] {
+                    let p = lays_out_cleanly(&src, &m, &d, axis);
+                    let margins = subnet_margins(&p);
+                    assert!(!margins.is_empty(), "{src}");
+                    for (id, left, right) in margins {
+                        assert!((left - right).abs() <= 2, "{src}{axis:?} {id}: left {left}, right {right}");
+                    }
+                }
+            }
+        }
+    }
+
+    // Fails if a VPC with a line coming down into its first column, or with lines running down
+    // between private rows, stops keeping that column clear of the zone's and the subnet's names:
+    // the web example and EC2 over Aurora keep their parts where they were. The lines between the
+    // rows carry labels beside them, which take the room the names leave.
+    #[test]
+    fn a_subnet_a_line_comes_down_into_keeps_its_parts_clear_of_the_names() {
+        let p = on_the_boundary(Axis::Down);
+        let (ecs, pri) = (icon(&p, "ecs-1a").rect, frame(&p, "pri-1a"));
+        assert_eq!(ecs.x - pri.x, 141);
+        let src = "flows:\n  - ec2 -> aurora\n  - aurora -> ec2\nset:\n  azs: 3\n  lang: ja\n";
+        let (m, d) = grid(src);
+        let p = lays_out_cleanly(src, &m, &d, Axis::Down);
+        for id in ["ec2-1a", "aurora-1a"] {
+            assert_eq!(icon(&p, id).rect.x - frame(&p, "pri-1a").x, 141, "{id}");
+        }
     }
 
 
