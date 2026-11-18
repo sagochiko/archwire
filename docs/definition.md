@@ -25,7 +25,7 @@ A part is a service name made of `a-z`, `0-9` and `_`, optionally followed by a 
 
 There are three connection symbols.
 
-`->` is a main flow, the path traffic takes. `~>` is an auxiliary flow, such as logs going to CloudWatch. It is drawn as a dashed line, and archwire does not work out a network route for it. `--` is an association, for something attached to something else. Write the thing being attached first. An association is drawn as a dashed line without an arrowhead, because nothing flows along it. Which connections are accepted is listed under [Which connections are accepted](#which-connections-are-accepted). `waf`, `acm` and `cognito` are attachments: they may not be the source or the target of `->` or `~>`.
+`->` is a main flow, the path traffic takes. `~>` is an auxiliary flow, such as logs going to CloudWatch. It is drawn as a dashed line, and archwire does not work out a network route for it. `--` is an association, for something attached to something else. Write the thing being attached first. An association is drawn as a dashed line without an arrowhead, because nothing flows along it. Which connections are accepted is listed under [Which connections are accepted](#which-connections-are-accepted). `waf` and `acm` are attachments: they may not be the source or the target of `->` or `~>`. `cognito` is attached to API Gateway with `--`, and may be the target of one main flow only, the sign-in `user -> cognito`; it may not be the source of `->` or `~>`.
 
 One pair of parts can be connected with one relation only. `ecs -> s3` together with `ecs ~> s3` is the error `CONFLICTING_RELATION`. Direction matters. `ecs -> aurora` and `aurora -> ecs` are two different pairs.
 
@@ -243,7 +243,7 @@ archwire adds what the path needs and lays the parts out as described under [How
 
 ### A function attached to the VPC
 
-A Lambda function that sends a main flow to Aurora is attached to the VPC and drawn in the private subnet of each Availability Zone, one copy per zone, like ECS. Functions are never drawn in a public subnet. A function without a main flow to Aurora stays outside the VPC, even in a definition with one. The README's `mix.yaml` shows the first:
+A Lambda function that sends a main flow to Aurora is attached to the VPC and drawn in the private subnet of each Availability Zone, one copy per zone, like ECS. Functions are never drawn in a public subnet. A function without a main flow to Aurora stays outside the VPC, even in a definition with one. The `mix.yaml` of [the examples](examples.md#a-function-in-a-vpc) shows the first:
 
 ```yaml
 flows:
@@ -280,7 +280,7 @@ The Internet Gateway sits inside the VPC on the side where the traffic comes in:
 
 The load balancer spans the zones. With two zones it sits in the public tier on the border between them, level with the NAT gateways in a top-to-bottom diagram. With three zones it sits above the zone frames. Two or more load balancers stand in one row above the zone frames, with two zones or three and in both directions, in the order the definition first mentions them. The line from the Internet Gateway goes straight to the first one; the lines to the others leave the Internet Gateway at separate points on the side facing the flow (the bottom side in a top-to-bottom diagram, the right side in a left-to-right one) and enter each load balancer from the top.
 
-Certificate Manager and WAF attached to a load balancer stand one under the other to the right of the VPC, inside the Region frame, in both directions. Their dashed lines leave the load balancer from its right side, or from its bottom side when another part stands to its right in the same row. Their labels sit on the stretch of the line outside the VPC, where there is room, so they are not read as labels of the lines inside it. In a VPC without private subnets, the line of a load balancer with another load balancer to its right still leaves from the right side and crosses that load balancer, and a note names the line (see the limits in the [README](../README.md#what-this-version-does-not-do)). This definition and its expected output are the acceptance case `tests/cases/web-alb-attach-en`:
+Certificate Manager and WAF attached to a load balancer stand one under the other to the right of the VPC, inside the Region frame, in both directions. Their dashed lines leave the load balancer from its right side, or from its bottom side when another part stands to its right in the same row. Their labels sit on the stretch of the line outside the VPC, where there is room, so they are not read as labels of the lines inside it. In a VPC without private subnets, the line of a load balancer with another load balancer to its right crosses that load balancer, see [Limits](limits.md#several-load-balancers). This definition and its expected output are the acceptance case `tests/cases/web-alb-attach-en`:
 
 ```yaml
 flows:
@@ -295,20 +295,7 @@ flows:
 
 A line's label says which zones it stands for. With two zones, archwire draws the lines between parts in different zones. With three zones it draws no line between copies of two different services in different zones: the line inside the target's zone stands for the lines from every zone into the same part, and a note in the report says so. Two kinds of line still cross zones: the replication line from Aurora's writer to each reader, and a line from another zone when the target's zone has no sender, described below. A label ends with "(all AZs)" when the sender has a copy in every zone, and names the zones otherwise. For example, with `azs: 3` and `readers: 1`, Aurora has a copy in two zones only, and `aurora ~> cloudwatch` is labelled "Logs and metrics (from 1a, 1c)". When a target in one zone has no sender in the same zone, the line comes from a sender in another zone, and a note names it. With the same settings, `aurora -> ecs` gives the note "In ap-northeast-1d, ecs-1d has no aurora in its own zone, so the line from aurora-1a in another zone is drawn."
 
-Some diagrams are correct but harder to read than they could be. In a top-to-bottom diagram, WAF and Certificate Manager attached to CloudFront stand one under the other to its right, which makes the row of global services tall. An auxiliary line from the load balancer to a part right of the VPC, such as `alb ~> s3`, can go round the far side of that part and enter it from the right. With two zones, each NAT gateway sits to the right of the ECS copy in its zone, so in the first zone the line from the load balancer to ECS crosses the line from ECS to the NAT gateway. In a left-to-right diagram, S3 fed by CloudFront sits below the VPC, so the line to it is long.
-
-### Services behind one load balancer
-
-Every service behind the load balancer is copied into each zone, and the load balancer sends a line to each copy. The counts below are for this shape, with more `- alb -> ecs.sNN` lines added one at a time:
-
-```yaml
-flows:
-  - user -> cloudfront -> alb -> ecs.s01 -> aurora
-  - alb -> ecs.s02
-  - alb -> ecs.s03
-```
-
-With two zones up to six services, and with three zones up to three, are drawn without a note naming a line; notes that explain the drawing, such as the one on auxiliary flows or on three zones, may still be there. With seven services in two zones, or four in three, the diagram is still drawn, with notes naming the lines that could not avoid every icon, label and other line. From 51 services with two zones, and from 34 with three, the layout stops with `LAYOUT_FAILED`. The counts are the same in both directions. Writing fewer services avoids this; it is a limit of this layout, not of AWS.
+Some diagrams are correct but harder to read than they could be, and many services behind one load balancer crowd its lines. Both are described, with the counts measured, in [Limits](limits.md).
 
 ## Definitions without a VPC
 
@@ -399,6 +386,32 @@ choose:
 
 `choose` answers holes. There are two kinds of hole: the route of a main flow out of the VPC's private subnets, described here, and [the kind of API Gateway](#the-kind-of-api-gateway).
 
+A main flow from a part in the VPC's private subnets (ECS, EC2, Aurora, or a function attached to the VPC) to a Regional service outside the VPC can leave the VPC through a VPC endpoint or through a NAT gateway, and archwire does not pick. Save this as `route.yaml`:
+
+```yaml
+flows:
+  - user -> alb -> ecs
+  - ecs -> s3
+```
+
+`archwire compile route.yaml -o route.drawio` exits with 2. The report contains:
+
+```json
+"holes": [
+  {
+    "hole": "route.ecs.s3",
+    "at": "flows[1]",
+    "need": "Route from ecs to s3",
+    "choices": [
+      "endpoint",
+      "nat"
+    ]
+  }
+]
+```
+
+The diagram is still written. The undecided line is drawn grey and dashed with the label "Route undecided". Answer with `archwire set route.yaml choose.route.ecs.s3 endpoint`, which adds a `choose:` section with `route.ecs.s3: endpoint`, and compile again: the exit code is 0.
+
 For the route, the key is the hole id from the report, `route.<from>.<to>`, and the value is `endpoint` (the traffic goes through a VPC endpoint; archwire draws no endpoint icon, and the line's label adds "(via VPC endpoint)") or `nat` (it goes out through NAT gateways, which archwire adds). A named part is put in square brackets: `lambda.api -> s3` gives `route.[lambda.api].s3`, and `ecs -> s3.web` gives `route.ecs.[s3.web]`. The id depends on the part names only, so adding or moving lines does not change it. `archwire set <definition> choose.route.ecs.s3 endpoint` writes the entry for you. Quote a place with brackets, as in `archwire set mix.yaml 'choose.route.[lambda.api].s3' endpoint`: shells such as zsh read unquoted brackets as a file pattern and stop with `no matches found` before archwire runs, leaving the file as it was.
 
 ### Answering with nat
@@ -464,7 +477,7 @@ The place is `flows[i][j]`, `set.<key>` or `choose.<hole id>`. For `set` and `ch
 
 ## Errors
 
-When a definition has errors, `compile` writes no diagram, removes a diagram left at the `-o` path by an earlier compile, prints the report with an `errors` list, and exits with 1. Several errors can be reported at once. Each example below shows the report's `code`, `at` and `got`. The last column says whether `archwire set <definition> <at> <value>` can fix the error at the place the report gives, and what to do otherwise. The examples for `BAD_CHOICE` and `UNKNOWN_HOLE` assume the definition contains `ecs -> s3`, so that the hole `route.ecs.s3` exists.
+When a definition has errors, `compile` writes no diagram, removes a diagram left at the `-o` path by an earlier compile (when it cannot, the report adds `CANNOT_WRITE`), prints the report with an `errors` list, and exits with 1. Several errors can be reported at once. Each example below shows the report's `code`, `at` and `got`. The last column says whether `archwire set <definition> <at> <value>` can fix the error at the place the report gives, and what to do otherwise. The examples for `BAD_CHOICE` and `UNKNOWN_HOLE` assume the definition contains `ecs -> s3`, so that the hole `route.ecs.s3` exists.
 
 | Code | Meaning | Example and result | Fixed with `set` at `at`? |
 |---|---|---|---|
@@ -484,7 +497,7 @@ When a definition has errors, `compile` writes no diagram, removes a diagram lef
 | `UNKNOWN_HOLE` | an answer for a hole that does not exist | `route.ecs.rds: nat` gives `at` `choose.route.ecs.rds`; so does `kind.apigateway: http` when the definition already says `apigateway(http)` | No. `set` can change only the value; delete the line in the file, and answer a hole from `allowed` with `archwire set <definition> choose.<hole> <value>` |
 | `UNSUPPORTED` | a connection or shape this version does not draw | `- user -> dynamodb` gives `at` `flows[0]`; `- acm -- cloudfront` and `- acm -- alb` after `- user -> cloudfront -> alb -> ecs` give `at` `flows[2]`, `got` `acm`; more under [Which connections are accepted](#which-connections-are-accepted) | Sometimes. `at` is a flow line (`flows[i]`) or `flows`; change a part with `flows[i][j]`, or edit or remove the line in the file |
 | `TOO_MANY_ATTACHED` | more parts attached to one part than AWS allows | `- user -> cloudfront -> s3`, `- waf.front -- cloudfront` and `- waf.extra -- cloudfront` give `at` `flows[2]`, `got` `waf.extra`, `rule` `one-web-acl-per-resource` | No. Remove the extra line in the file |
-| `LAYOUT_FAILED` | archwire could not lay out the definition; the message names the parts or lines involved | 34 named services behind one load balancer with `azs: 3`, see [Services behind one load balancer](#services-behind-one-load-balancer) | No. Write fewer parts, or report the definition. Fewer parts is a way around a limit of the layout, not a limit of AWS |
+| `LAYOUT_FAILED` | archwire could not lay out the definition; the message names the parts or lines involved | 34 named services behind one load balancer with `azs: 3`, see [Services behind one load balancer](limits.md#services-behind-one-load-balancer) | No. Write fewer parts, or report the definition. Fewer parts is a way around a limit of the layout, not a limit of AWS |
 | `BAD_PATH` | the place given to `set` does not exist | `archwire set web.yaml 'flows[9][0]' x`, on a file with fewer flow lines | Run `set` again with an existing place |
 | `BAD_VALUE` | the value given to `set` is empty or has a line break or `#`, or a value for `flows[i][j]` does not read as one part | `archwire set web.yaml set.azs ""`; `archwire set api.yaml 'flows[0][2]' 's3.foo--bar'` | Run `set` again with one non-empty line, or one part |
 | `CANNOT_READ` | `compile` or `set` could not read the definition file | `archwire compile missing.yaml -o out.drawio` | No. Check the path and the file's permissions |
