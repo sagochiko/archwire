@@ -1,0 +1,5 @@
+flows:
+  - user -> cloudfront -> alb -> ecs -> aurora
+  - eventbridge -> sqs -> lambda -> aurora
+set:
+  lang: ja

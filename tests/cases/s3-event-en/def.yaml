@@ -1,0 +1,5 @@
+flows:
+  - user -> s3 -> lambda -> dynamodb
+  - lambda ~> cloudwatch
+set:
+  lang: en
