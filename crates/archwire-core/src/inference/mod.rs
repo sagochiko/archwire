@@ -530,8 +530,6 @@ mod tests {
             "waf -- apigateway",
             "sns -> eventbridge",
             "securityhub -> guardduty",
-            "eventbridge -> lambda",
-            "sns -> lambda",
             "guardduty ~> eventbridge",
             "s3 -> athena",
             "athena -- glue",
@@ -799,6 +797,140 @@ mod tests {
             assert!(m.is_none(), "{src}");
             assert_eq!(first(&d), ("UNSUPPORTED", Some("flows[1]"), Some(line)), "{src}: {:?}", d.errors);
             assert_eq!(d.errors[0].message, format!("`{line}` is not a supported connection"), "{src}");
+        }
+    }
+
+    // Fails if one of the event pairs between EventBridge, SNS, SQS, Lambda and S3 stops, gets
+    // another label, or is drawn without its label in English or Japanese. Each definition reaches
+    // the pair from a starting point, and the pair's label is the only one with that text.
+    #[test]
+    fn every_event_pair_is_accepted_with_its_label() {
+        let r = Rules::builtin();
+        let pairs = [
+            ("eventbridge", "lambda", "by_rule", "flows:\n  - eventbridge -> lambda -> dynamodb\n"),
+            ("eventbridge", "sqs", "by_rule", "flows:\n  - eventbridge -> sqs -> lambda\n"),
+            ("sns", "lambda", "notifications", "flows:\n  - user -> apigateway(http) -> lambda.api -> sns -> lambda\n"),
+            ("sns", "sqs", "notifications", "flows:\n  - user -> apigateway(http) -> lambda.api -> sns -> sqs -> lambda\n"),
+            ("sqs", "lambda", "messages", "flows:\n  - eventbridge -> sqs -> lambda\n"),
+            ("lambda", "sqs", "send_messages", "flows:\n  - user -> apigateway(http) -> lambda -> sqs -> lambda.worker\n"),
+            ("lambda", "sns", "publish", "flows:\n  - user -> apigateway(http) -> lambda -> sns\n"),
+            ("s3", "lambda", "event_notifications", "flows:\n  - user -> s3 -> lambda -> dynamodb\n"),
+            ("s3", "sqs", "event_notifications", "flows:\n  - user -> s3 -> sqs -> lambda\n"),
+            ("s3", "sns", "event_notifications", "flows:\n  - user -> s3 -> sns -> lambda\n"),
+        ];
+        for (from, to, key, flows) in pairs {
+            assert_eq!(r.link(from, to, Rel::Main).map(|l| l.label.as_str()), Some(key), "{from} -> {to}");
+            let (m, d) = run(flows);
+            assert!(d.errors.is_empty(), "{flows}: {:?}", d.errors);
+            let m = m.unwrap_or_else(|| panic!("{flows}: no model"));
+            let e = m.edges.iter().find(|e| e.from == from && e.to == to).unwrap_or_else(|| panic!("{flows}: no edge {from} -> {to}"));
+            assert_eq!((e.rel, e.label.as_str()), (Rel::Main, key), "{flows}");
+            for lang in [Lang::En, Lang::Ja] {
+                let text = r.text(key, lang);
+                let code = if lang == Lang::En { "en" } else { "ja" };
+                let out = crate::compile(&format!("{flows}set:\n  lang: {code}\n"));
+                assert_eq!(out.diagnostics.exit_code(), 0, "{flows} {code}: {:?}", out.diagnostics.errors);
+                let drawio = out.drawio.unwrap_or_else(|| panic!("{flows} {code}: no diagram"));
+                assert!(drawio.contains(&format!("value=\"{text}\"")), "{flows} {code}: no label {text}");
+            }
+        }
+        let texts = |key: &str| (r.text(key, Lang::En), r.text(key, Lang::Ja));
+        assert_eq!(texts("messages"), ("Messages".to_string(), "メッセージ".to_string()));
+        assert_eq!(texts("send_messages"), ("Send messages".to_string(), "メッセージ送信".to_string()));
+        assert_eq!(texts("event_notifications"), ("Event notifications".to_string(), "イベント通知".to_string()));
+    }
+
+    // Fails if a reversed or unlisted event pair is accepted. The list of connections is asked
+    // directly as well, because a line whose start is not reached would also stop later with the
+    // same code, place and text.
+    #[test]
+    fn event_pairs_left_out_stop() {
+        let r = Rules::builtin();
+        let base = "flows:\n  - user -> apigateway(http) -> lambda -> sqs\n  - lambda -> sns\n  - user -> s3 -> lambda.files\n  - eventbridge -> lambda.timer\n";
+        let defs = [
+            ("lambda -> eventbridge", "lambda", "eventbridge", Main),
+            ("sqs -> sns", "sqs", "sns", Main),
+            ("sqs -> s3", "sqs", "s3", Main),
+            ("sns -> s3", "sns", "s3", Main),
+            ("s3 -> eventbridge", "s3", "eventbridge", Main),
+            ("sns -> eventbridge", "sns", "eventbridge", Main),
+            ("sqs -> sqs.next", "sqs", "sqs", Main),
+            ("sqs ~> lambda", "sqs", "lambda", Aux),
+            ("sqs -- lambda", "sqs", "lambda", Rel::Assoc),
+        ];
+        for (line, from, to, rel) in defs {
+            assert!(r.link(from, to, rel).is_none(), "links.toml accepts `{line}`");
+            let src = format!("{base}  - {line}\n");
+            let (m, d) = run(&src);
+            assert!(m.is_none(), "{src}");
+            assert_eq!(first(&d), ("UNSUPPORTED", Some("flows[4]"), Some(line)), "{src}: {:?}", d.errors);
+            assert_eq!(d.errors[0].message, format!("`{line}` is not a supported connection"), "{src}");
+        }
+    }
+
+    // Fails if a queue becomes a starting point: nothing sends to it, so the flow still stops.
+    #[test]
+    fn a_queue_alone_does_not_start_a_flow() {
+        let (m, d) = run("flows:\n  - sqs -> lambda -> dynamodb\n");
+        assert!(m.is_none());
+        assert_eq!((d.errors[0].code.as_str(), d.errors[0].at.as_deref()), ("UNSUPPORTED", Some("flows[0]")));
+    }
+
+    // Fails if a definition whose flow comes back to the same function stops with a panic, loops, or
+    // is drawn with a broken diagram.
+    #[test]
+    fn a_flow_back_to_the_same_function_is_handled() {
+        // A line back to a part already on the flow runs against the direction of the drawing, which
+        // the layout refuses. The definition stops with LAYOUT_FAILED and no diagram, in either
+        // direction, with or without a VPC.
+        let defs = [
+            "flows:\n  - user -> apigateway(http) -> lambda.a -> sqs -> lambda.a\n",
+            "flows:\n  - user -> apigateway(http) -> lambda -> sqs\n  - sqs -> lambda\n",
+            "flows:\n  - user -> s3 -> lambda -> sns -> sqs -> lambda\n",
+            "flows:\n  - user -> apigateway(http) -> lambda -> aurora\n  - lambda -> sqs -> lambda\nchoose:\n  route.lambda.sqs: endpoint\n",
+        ];
+        for src in defs {
+            let (m, d) = run(src);
+            assert!(d.errors.is_empty() && m.is_some(), "{src}: {:?}", d.errors);
+            for direction in ["down", "right"] {
+                let out = crate::compile(&format!("{src}set:\n  direction: {direction}\n"));
+                let codes: Vec<_> = out.diagnostics.errors.iter().map(|e| e.code.as_str()).collect();
+                assert!(!codes.is_empty() && codes.iter().all(|c| *c == "LAYOUT_FAILED"), "{src} {direction}: {codes:?}");
+                assert!(out.drawio.is_none(), "{src} {direction}");
+                assert_eq!(out.diagnostics.exit_code(), 1, "{src} {direction}");
+            }
+        }
+    }
+
+    // Fails if a function in the VPC sends to a queue or a topic without the choice of a route, or
+    // a queue that invokes a function in the VPC is given a route to choose.
+    #[test]
+    fn a_function_in_the_vpc_needs_a_route_to_send_but_not_to_be_invoked() {
+        let (m, d) = run("flows:\n  - user -> apigateway(http) -> lambda -> aurora\n  - lambda -> sqs -> lambda.worker -> dynamodb\n  - lambda -> sns\n");
+        let m = m.unwrap_or_else(|| panic!("{:?}", d.errors));
+        assert_eq!(spot(&m, "lambda-1a"), (PRIVATE, Some(0), None));
+        let mut holes: Vec<_> = d.holes.iter().map(|h| (h.hole.as_str(), h.choices.clone())).collect();
+        holes.sort();
+        assert_eq!(holes, [("route.lambda.sns", strings(&["endpoint", "nat"])), ("route.lambda.sqs", strings(&["endpoint", "nat"]))]);
+        assert_eq!(d.exit_code(), 2);
+        let (m, d) = passes("flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - sqs -> lambda -> aurora\n  - eventbridge -> sqs\n");
+        assert_eq!(spot(&m, "lambda-1a"), (PRIVATE, Some(0), None));
+        assert!(d.holes.is_empty(), "{:?}", hole_ids(&d));
+        assert_eq!(d.exit_code(), 0);
+        assert!(m.edges.iter().any(|e| e.from == "sqs" && e.to == "lambda-1a" && e.label == "messages"));
+    }
+
+    // Fails if a service in the VPC other than Lambda is accepted to send to a queue or a topic.
+    #[test]
+    fn only_lambda_in_the_vpc_sends_to_queues_and_topics() {
+        let web = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n";
+        let ec2 = "flows:\n  - user -> alb -> ec2 -> aurora\n";
+        for (base, line, from, to) in [(web, "ecs -> sqs", "ecs", "sqs"), (web, "ecs -> sns", "ecs", "sns"), (ec2, "ec2 -> sqs", "ec2", "sqs"), (ec2, "ec2 -> sns", "ec2", "sns")] {
+            assert!(Rules::builtin().link(from, to, Main).is_none(), "links.toml accepts `{line}`");
+            let src = format!("{base}  - {line}\n");
+            let (m, d) = run(&src);
+            assert!(m.is_none(), "{src}");
+            assert_eq!(first(&d), ("UNSUPPORTED", Some("flows[1]"), Some(line)), "{src}: {:?}", d.errors);
         }
     }
 

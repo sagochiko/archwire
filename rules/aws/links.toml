@@ -426,6 +426,66 @@ rel = "main"
 label = "call"
 
 [[link]]
+from = "eventbridge"
+to = "lambda"
+rel = "main"
+label = "by_rule"
+
+[[link]]
+from = "eventbridge"
+to = "sqs"
+rel = "main"
+label = "by_rule"
+
+[[link]]
+from = "sns"
+to = "lambda"
+rel = "main"
+label = "notifications"
+
+[[link]]
+from = "sns"
+to = "sqs"
+rel = "main"
+label = "notifications"
+
+[[link]]
+from = "sqs"
+to = "lambda"
+rel = "main"
+label = "messages"
+
+[[link]]
+from = "lambda"
+to = "sqs"
+rel = "main"
+label = "send_messages"
+
+[[link]]
+from = "lambda"
+to = "sns"
+rel = "main"
+label = "publish"
+
+[[link]]
+from = "s3"
+to = "lambda"
+rel = "main"
+label = "event_notifications"
+
+[[link]]
+from = "s3"
+to = "sqs"
+rel = "main"
+label = "event_notifications"
+
+[[link]]
+from = "s3"
+to = "sns"
+rel = "main"
+label = "event_notifications"
+
+[[link]]
 from = "user"
 to = "cognito"
 rel = "main"

@@ -112,6 +112,18 @@ ja = "ルール"
 en = "Publish"
 ja = "発行"
 
+[messages]
+en = "Messages"
+ja = "メッセージ"
+
+[send_messages]
+en = "Send messages"
+ja = "メッセージ送信"
+
+[event_notifications]
+en = "Event notifications"
+ja = "イベント通知"
+
 [call]
 en = "Call"
 ja = "呼び出し"
