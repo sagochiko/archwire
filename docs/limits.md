@@ -1,6 +1,6 @@
 # Limits
 
-This page is for archwire 0.1.0 with rules data 2026.11.9. The counts below were measured on that version by compiling each definition and counting the notes that name a line (see [Notes](report.md#notes)). Notes that explain the drawing, such as the one on auxiliary flows or on three zones, may be there at any count and are not counted.
+This page is for archwire 0.1.0 with rules data 2026.11.10. The counts below were measured on that version by compiling each definition and counting the notes that name a line (see [Notes](report.md#notes)). Notes that explain the drawing, such as the one on auxiliary flows or on three zones, may be there at any count and are not counted.
 
 A note naming a line means the diagram is still written, but that line could not avoid every icon, label and other line; look at it in the diagram. `LAYOUT_FAILED` means no diagram is written. Writing fewer parts avoids both. They are limits of this layout, not of AWS.
 
@@ -51,6 +51,8 @@ A connection or shape not listed in [Which connections are accepted](definition.
 - The endpoint types of API Gateway (edge-optimized, Regional, private) and WebSocket APIs are not drawn. WAF does not attach to API Gateway; `waf` attaches only to `cloudfront` and `alb`. Which API types support AWS WAF is in the AWS comparison [Choose between REST APIs and HTTP APIs](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-vs-rest.html).
 - Cognito identity pools are not drawn; a user's upload straight to S3 is one line, `user -> s3`.
 - A KMS key attaches only to S3 and DynamoDB (`kms -- s3`, `kms -- dynamodb`). It cannot be attached to Aurora, ECS, Lambda or other services, and AWS Secrets Manager and multi-Region keys are not drawn.
-- Queues other than the one Security Lake notifies through, the subscribers of Security Lake, Lake Formation, rollup Regions, Glue crawlers or jobs, the kinds of SNS topics (standard or FIFO), Lambda functions invoked by EventBridge or SNS, and AI services are not drawn.
+- Events between EventBridge, SNS, SQS, Lambda and S3 are drawn only along the pairs in the list. The kinds of SNS topics and SQS queues (standard or FIFO) and dead-letter queues are not drawn. `s3 -> eventbridge` is not accepted, and ECS and EC2 do not send to queues or topics; only a Lambda function does (`lambda -> sqs`, `lambda -> sns`).
+- A line back to a part that is already before it on the flow, such as `lambda.a -> sqs -> lambda.a`, stops with `LAYOUT_FAILED`.
+- The subscribers of Security Lake, Lake Formation, rollup Regions, Glue crawlers or jobs, and AI services are not drawn.
 - More than one VPC, Transit Gateway, on-premises networks, several accounts and other clouds are not drawn.
 - archwire does not simulate failures, show migration stages, compare a diagram with Terraform, or read a `.drawio` file back into a definition.
