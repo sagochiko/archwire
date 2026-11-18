@@ -88,6 +88,28 @@ fn items(src: &str) -> Vec<(usize, Item)> {
     out
 }
 
+/// The lines that open or close a code block in a way `items` does not read: a fence with `~`,
+/// with more than three backticks or indented, or a language that is not lower case or is `yml`.
+/// Such a block could hold a definition that no check sees, so it is named instead.
+fn fence_problems(doc: &str, src: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (i, line) in src.lines().enumerate() {
+        let t = line.trim_start();
+        if !t.starts_with("```") && !t.starts_with("~~~") {
+            continue;
+        }
+        let lang = line.strip_prefix("```").filter(|rest| !rest.starts_with('`'));
+        let readable = lang.is_some_and(|l| l.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') && l != "yml");
+        if !readable {
+            problems.push(format!(
+                "{doc}:{}: the code fence `{line}` is not read by the document checks; write three backticks at the left edge, with a lower-case language such as `yaml`, `json` or `sh`",
+                i + 1
+            ));
+        }
+    }
+    problems
+}
+
 /// The code spans of a piece of inline Markdown, without their backticks. A span opened by N
 /// backticks closes at the next run of exactly N, and one space on each side is dropped when
 /// both are there, as CommonMark does.
@@ -178,11 +200,11 @@ fn cells(row: &str) -> Vec<String> {
 /// The rows of the first table whose header row is `header`, each as its cells.
 fn table(src: &str, header: &[&str]) -> Option<(usize, Vec<(usize, Vec<String>)>)> {
     let lines: Vec<&str> = src.lines().collect();
-    let start = lines.iter().position(|l| l.starts_with('|') && cells(l) == header)?;
+    let start = lines.iter().position(|l| l.trim_start().starts_with('|') && cells(l) == header)?;
     let rows = lines[start + 2..]
         .iter()
         .enumerate()
-        .take_while(|(_, l)| l.starts_with('|'))
+        .take_while(|(_, l)| l.trim_start().starts_with('|'))
         .map(|(i, l)| (start + 3 + i, cells(l)))
         .collect();
     Some((start + 1, rows))
@@ -459,6 +481,13 @@ fn check_report(place: &str, run: &Run, pairs: &BTreeMap<String, String>, proble
     }
 }
 
+/// `compile` and `run` must say which exit code the document expects.
+fn require_exit(place: &str, words: &str, pairs: &BTreeMap<String, String>, problems: &mut Vec<String>) {
+    if !pairs.contains_key("exit") {
+        problems.push(format!("{place}: the marker `{words}` has no `exit=`; `compile` and `run` must say which exit code the document expects"));
+    }
+}
+
 /// Compiles `file` in `work` and checks the result against the marker.
 fn compile_file(work: &Path, file: &str, place: &str, pairs: &BTreeMap<String, String>, problems: &mut Vec<String>) -> Run {
     let out = format!("{}.drawio", file.trim_end_matches(".yaml"));
@@ -477,14 +506,15 @@ fn unknown_keys(place: &str, pairs: &BTreeMap<String, String>, problems: &mut Ve
 
 /// Runs the examples of one document. Every `yaml` and `json` block must have a marker on the
 /// line just above it; the markers are described in CONTRIBUTING.md.
-fn check_examples(doc: &str, problems: &mut Vec<String>) -> usize {
+fn check_examples(doc: &str, src: &str, problems: &mut Vec<String>) -> usize {
     let work = std::env::temp_dir().join(format!("archwire-docs-{}-{}", std::process::id(), doc.replace(['/', '.'], "-")));
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work).unwrap();
-    let list = items(&read(doc));
+    let list = items(src);
     let mut last_report: Option<String> = None;
     let mut checked = 0;
     let mut scratch = 0;
+    problems.extend(fence_problems(doc, src));
 
     for (index, (line, item)) in list.iter().enumerate() {
         let place = format!("{doc}:{line}");
@@ -506,6 +536,7 @@ fn check_examples(doc: &str, problems: &mut Vec<String>) -> usize {
                 match (lang.as_str(), bare.first().map(String::as_str)) {
                     (_, Some("skip")) => {}
                     ("yaml", Some("compile")) => {
+                        require_exit(&place, words, &pairs, problems);
                         let file = match pairs.get("file") {
                             Some(f) => f.clone(),
                             None => {
@@ -561,6 +592,7 @@ fn check_examples(doc: &str, problems: &mut Vec<String>) -> usize {
                     problems.push(format!("{place}: a `sh` block takes only the marker `run`"));
                     continue;
                 }
+                require_exit(&place, words, &pairs, problems);
                 let commands: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#')).collect();
                 for (n, command) in commands.iter().enumerate() {
                     let mut words = shell_words(command);
@@ -617,6 +649,7 @@ fn check_examples(doc: &str, problems: &mut Vec<String>) -> usize {
                         }
                     }
                     (Some("compile"), Some(file)) => {
+                        require_exit(&place, words, &pairs, problems);
                         if !work.join(file).exists() {
                             problems.push(format!("{place}: `compile` of `{file}`, which no block above saved"));
                             continue;
@@ -639,7 +672,7 @@ fn every_example_in_the_documents_gives_what_the_document_says() {
     let mut problems = Vec::new();
     let mut checked = 0;
     for doc in documents() {
-        checked += check_examples(&doc, &mut problems);
+        checked += check_examples(&doc, &read(&doc), &mut problems);
     }
     finish(problems);
     assert!(checked >= 20, "only {checked} examples were checked; are the markers missing?");
@@ -723,30 +756,99 @@ fn the_two_readmes_have_the_same_code_blocks_markers_and_headings() {
 // ---------------------------------------------------------------------------------------------
 // 4. Links.
 
-/// The anchor GitHub gives a heading: lower case, inline code marks and punctuation dropped,
-/// spaces turned into hyphens.
+/// The text of inline links, `[text](target)`, without the targets.
+fn link_texts(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(open) = rest.find('[') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find("](") else { break };
+        let Some(end) = after[close + 2..].find(')') else { break };
+        out.push_str(&rest[..open]);
+        out.push_str(&after[..close]);
+        rest = &after[close + 2 + end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A heading's text as GitHub renders it: link targets, emphasis marks (`*`, and `_` at the
+/// edge of a word) and the backticks of code spans dropped. Inside a code span nothing is dropped.
+fn rendered_heading(heading: &str) -> String {
+    let text = link_texts(heading);
+    let mut out = String::new();
+    for (i, piece) in text.split('`').enumerate() {
+        if i % 2 == 1 {
+            out.push_str(piece);
+            continue;
+        }
+        let chars: Vec<char> = piece.chars().collect();
+        for (j, &c) in chars.iter().enumerate() {
+            if c == '*' {
+                continue;
+            }
+            if c == '_' {
+                let before = chars[..j].iter().rev().find(|&&b| b != '_');
+                let after = chars[j + 1..].iter().find(|&&a| a != '_');
+                let inside_word = before.is_some_and(|b| b.is_alphanumeric()) && after.is_some_and(|a| a.is_alphanumeric());
+                if !inside_word {
+                    continue;
+                }
+            }
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The anchor GitHub gives a heading before repeats are numbered: the rendered text in lower
+/// case, punctuation dropped, spaces turned into hyphens.
 fn slug(heading: &str) -> String {
-    let text = heading.replace('`', "");
-    text.to_lowercase()
+    rendered_heading(heading)
+        .to_lowercase()
         .chars()
         .filter(|&c| c.is_alphanumeric() || c == '-' || c == '_' || c == ' ')
         .map(|c| if c == ' ' { '-' } else { c })
         .collect()
 }
 
-/// The anchors of every heading of a document, with `-1`, `-2` and so on for repeated ones.
+/// The anchors of every heading of a document. A repeated anchor gets `-1`, `-2` and so on,
+/// skipping any that an earlier heading already has, as GitHub does.
 fn anchors(src: &str) -> BTreeSet<String> {
-    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut out = BTreeSet::new();
     for (_, item) in items(src) {
         if let Item::Heading { text, .. } = item {
             let base = slug(&text);
-            let n = seen.entry(base.clone()).or_insert(0);
-            out.insert(if *n == 0 { base.clone() } else { format!("{base}-{n}") });
-            *n += 1;
+            let mut anchor = base.clone();
+            while out.contains(&anchor) {
+                let n = counts.entry(base.clone()).or_insert(0);
+                *n += 1;
+                anchor = format!("{base}-{n}");
+            }
+            out.insert(anchor);
         }
     }
     out
+}
+
+/// A link fragment with its `%XX` escapes decoded, so that `#%E4%BE%8B` reads as `#例`.
+fn decoded(fragment: &str) -> String {
+    let bytes = fragment.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Some(b) = fragment.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The targets of the inline links and images on one line of text, outside code spans.
@@ -768,45 +870,115 @@ fn link_targets(line: &str) -> Vec<String> {
     out
 }
 
+/// The reference definitions of a document, `[label]: target`, by label in lower case.
+fn reference_definitions(src: &str) -> BTreeMap<String, (usize, String)> {
+    let mut defs = BTreeMap::new();
+    for (line, item) in items(src) {
+        let Item::Text { text } = item else { continue };
+        let t = text.trim_start();
+        if text.len() - t.len() > 3 || !t.starts_with('[') {
+            continue;
+        }
+        let Some((label, rest)) = t[1..].split_once("]:") else { continue };
+        if let Some(target) = rest.split_whitespace().next() {
+            defs.insert(label.to_lowercase(), (line, target.trim_matches(['<', '>']).to_string()));
+        }
+    }
+    defs
+}
+
+/// The labels used by reference links on one line, `[text][label]` and `[text][]`.
+fn reference_labels(line: &str) -> Vec<String> {
+    let text = without_code_spans(line);
+    let mut out = Vec::new();
+    let mut rest = text.as_str();
+    while let Some(p) = rest.find("][") {
+        let after = &rest[p + 2..];
+        let Some(end) = after.find(']') else { break };
+        let label = match &after[..end] {
+            "" => rest[..p].rsplit_once('[').map(|(_, t)| t.to_string()).unwrap_or_default(),
+            l => l.to_string(),
+        };
+        out.push(label);
+        rest = &after[end + 1..];
+    }
+    out
+}
+
+/// The problems with the relative links of one document; returns them and how many links were seen.
+/// Links are read from text and headings, inline and in reference form. A target starting with
+/// `/` is read from the top folder of the repository, as GitHub does.
+fn link_problems(doc: &str, src: &str) -> (Vec<String>, usize) {
+    let mut problems = Vec::new();
+    let defs = reference_definitions(src);
+    let mut targets: Vec<(usize, String)> = Vec::new();
+    for (line, item) in items(src) {
+        let text = match item {
+            Item::Text { text } => text,
+            Item::Heading { text, .. } => text,
+            _ => continue,
+        };
+        targets.extend(link_targets(&text).into_iter().map(|t| (line, t)));
+        for label in reference_labels(&text) {
+            if !defs.contains_key(&label.to_lowercase()) {
+                problems.push(format!("{doc}:{line}: the reference link `[{label}]` has no definition `[{label}]: ...` in the document"));
+            }
+        }
+    }
+    targets.extend(defs.values().cloned());
+    targets.sort();
+
+    let mut checked = 0;
+    let dir = Path::new(doc).parent().unwrap().to_path_buf();
+    for (line, target) in targets {
+        if target.contains("://") || target.starts_with("mailto:") {
+            continue;
+        }
+        checked += 1;
+        let (path, anchor) = match target.split_once('#') {
+            Some((p, a)) => (p, Some(decoded(a))),
+            None => (target.as_str(), None),
+        };
+        let file = match path.strip_prefix('/') {
+            _ if path.is_empty() => PathBuf::from(doc),
+            Some(from_root) => PathBuf::from(from_root),
+            None => dir.join(path),
+        };
+        let target_src = if path.is_empty() {
+            Some(src.to_string())
+        } else {
+            let full = root().join(&file);
+            if !full.exists() {
+                problems.push(format!("{doc}:{line}: the link `{target}` leads to `{}`, which does not exist", file.display()));
+                continue;
+            }
+            std::fs::read_to_string(&full).ok()
+        };
+        if let Some(anchor) = anchor {
+            let Some(target_src) = target_src else {
+                problems.push(format!("{doc}:{line}: the link `{target}` has an anchor, but `{}` is not a text file", file.display()));
+                continue;
+            };
+            let found = anchors(&target_src);
+            if !found.contains(&anchor) {
+                problems.push(format!(
+                    "{doc}:{line}: the link `{target}` names the heading `#{anchor}`, which `{}` does not have; it has {found:?}",
+                    file.display()
+                ));
+            }
+        }
+    }
+    (problems, checked)
+}
+
 #[test]
 fn every_relative_link_leads_to_a_file_and_heading_that_exist() {
     let mut problems = Vec::new();
     let mut checked = 0;
     for doc in documents() {
-        let src = read(&doc);
-        let dir = Path::new(&doc).parent().unwrap().to_path_buf();
-        for (line, item) in items(&src) {
-            let Item::Text { text } = item else { continue };
-            for target in link_targets(&text) {
-                if target.contains("://") || target.starts_with("mailto:") {
-                    continue;
-                }
-                checked += 1;
-                let (path, anchor) = match target.split_once('#') {
-                    Some((p, a)) => (p, Some(a)),
-                    None => (target.as_str(), None),
-                };
-                let file = if path.is_empty() { PathBuf::from(&doc) } else { dir.join(path) };
-                let full = root().join(&file);
-                if !full.exists() {
-                    problems.push(format!("{doc}:{line}: the link `{target}` leads to `{}`, which does not exist", file.display()));
-                    continue;
-                }
-                if let Some(anchor) = anchor {
-                    let Ok(target_src) = std::fs::read_to_string(&full) else {
-                        problems.push(format!("{doc}:{line}: the link `{target}` has an anchor, but `{}` is not a text file", file.display()));
-                        continue;
-                    };
-                    let found = anchors(&target_src);
-                    if !found.contains(anchor) {
-                        problems.push(format!(
-                            "{doc}:{line}: the link `{target}` names the heading `#{anchor}`, which `{}` does not have; it has {found:?}",
-                            file.display()
-                        ));
-                    }
-                }
-            }
-        }
+        let (p, n) = link_problems(&doc, &read(&doc));
+        problems.extend(p);
+        checked += n;
     }
     assert!(checked >= 20, "only {checked} links were checked");
     finish(problems);
@@ -824,4 +996,62 @@ fn the_heading_anchors_follow_github() {
     assert_eq!(code_spans("``\"`a -> b` is\"`` and `c`"), ["\"`a -> b` is\"", "c"]);
     assert_eq!(cells("| `a` | ``b | c`` |"), ["`a`", "``b | c``"]);
     assert_eq!(shell_words("set 'flows[0][1]' \"a b\" c"), ["set", "flows[0][1]", "a b", "c"]);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The readers above, tried on small documents.
+
+fn example_problems(src: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    check_examples("try.md", src, &mut problems);
+    problems
+}
+
+#[test]
+fn a_code_fence_the_checks_cannot_read_is_named() {
+    for fence in ["~~~yaml\nflows:\n  - user -> alb -> ecs\n~~~\n", "````yaml\nflows:\n  - user -> alb -> ecs\n````\n", "  ```yaml\nflows:\n  - user -> alb -> ecs\n  ```\n", "```yml\nflows:\n  - user -> alb -> ecs\n```\n", "```YAML\nflows:\n  - user -> alb -> ecs\n```\n"] {
+        let problems = example_problems(fence);
+        assert!(problems.iter().any(|p| p.contains("try.md:1:")), "not named: {fence:?} gave {problems:?}");
+    }
+    assert!(example_problems("```sh\nls\n```\n\n```text\nx\n```\n").is_empty());
+}
+
+#[test]
+fn a_compile_or_run_marker_without_exit_is_named() {
+    let compile = example_problems("<!-- archwire-test: compile -->\n```yaml\nflows:\n  - user -> alb -> ecs\n```\n");
+    assert!(compile.iter().any(|p| p.contains("`exit=`")), "{compile:?}");
+    let run = example_problems("<!-- archwire-test: compile exit=0 file=a.yaml -->\n```yaml\nflows:\n  - user -> alb -> ecs\n```\n\n<!-- archwire-test: run -->\n```sh\narchwire compile a.yaml -o a.drawio\n```\n");
+    assert!(run.iter().any(|p| p.contains("`exit=`")), "{run:?}");
+    let standalone = example_problems("<!-- archwire-test: compile exit=0 file=a.yaml -->\n```yaml\nflows:\n  - user -> alb -> ecs\n```\n\n<!-- archwire-test: compile file=a.yaml -->\n");
+    assert!(standalone.iter().any(|p| p.contains("`exit=`")), "{standalone:?}");
+}
+
+#[test]
+fn a_table_row_indented_by_a_space_is_still_read() {
+    let (_, rows) = table("| H |\n|---|\n| a |\n | b |\n| c |\n", &["H"]).unwrap();
+    assert_eq!(rows.iter().map(|(_, r)| r[0].as_str()).collect::<Vec<_>>(), ["a", "b", "c"]);
+    let (_, rows) = table(" | H |\n |---|\n | a |\n", &["H"]).unwrap();
+    assert_eq!(rows.len(), 1);
+}
+
+#[test]
+fn anchors_drop_emphasis_and_do_not_collide() {
+    let set = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<BTreeSet<String>>();
+    assert_eq!(anchors("# _Setup_\n# **Bold** and *it*\n# snake_case\n# `from_rule`\n"), set(&["setup", "bold-and-it", "snake_case", "from_rule"]));
+    assert_eq!(anchors("# A\n# A\n# A-1\n"), set(&["a", "a-1", "a-1-1"]));
+    assert_eq!(anchors("# See [the rules](rules.md)\n"), set(&["see-the-rules"]));
+}
+
+#[test]
+fn links_are_read_in_headings_reference_form_and_from_the_root() {
+    let (p, _) = link_problems("docs/try.md", "# 例\n\n[x](#%E4%BE%8B)\n");
+    assert!(p.is_empty(), "{p:?}");
+    let (p, _) = link_problems("docs/try.md", "## See [x](no-such-file.md)\n");
+    assert!(p.iter().any(|p| p.contains("no-such-file.md")), "heading link not read: {p:?}");
+    let (p, _) = link_problems("docs/try.md", "[x][r]\n\n[r]: no-such-file.md\n");
+    assert!(p.iter().any(|p| p.contains("no-such-file.md")), "reference definition not read: {p:?}");
+    let (p, _) = link_problems("docs/try.md", "[x][missing]\n");
+    assert!(p.iter().any(|p| p.contains("missing")), "undefined reference not named: {p:?}");
+    let (p, n) = link_problems("docs/try.md", "[x](/README.md) and [y](/docs/definition.md#services)\n");
+    assert!(p.is_empty() && n == 2, "root links: {p:?}");
 }
