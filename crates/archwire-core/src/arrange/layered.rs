@@ -908,51 +908,62 @@ fn flow_of(model: &Model, piece: Option<&Piece>, axis: Axis, lone_right: i32, ro
     Flow { parts, col, preds, succs, block }
 }
 
-/// The cross coordinate of every part of `f`, a step `r` apart in each rank (more after the VPC),
-/// with the smallest at 0.
-pub(super) fn rows(f: &Flow, r: i32, sweep_back: bool) -> Vec<i32> {
+/// From the first rank: its parts one after another, every other part level with the middle of
+/// its predecessors, at least a step past the part before it and at least at its `least`.
+fn forward_rows(f: &Flow, r: i32, least: &[Option<i32>]) -> Vec<i32> {
+    let last = f.col.iter().copied().max().unwrap_or(0);
+    let mut v = vec![0; f.parts.len()];
+    for c in 1..=last {
+        let mut before: Option<usize> = None;
+        for i in (0..f.parts.len()).filter(|&i| f.col[i] == c) {
+            let at = after(before.map(|b| v[b]), mid(f.preds[i].iter().map(|&(p, d)| v[p] + d)), before.map_or(r, |b| f.step(b, r)));
+            v[i] = least[i].map_or(at, |l| at.max(l));
+            before = Some(i);
+        }
+    }
+    v
+}
+
+/// The least cross coordinate of each part, so that a part whose main lines all go to its own
+/// targets (those it alone flows into) comes past the own targets of the parts before it in its
+/// rank, and their lines do not meet where they turn. None when the moves do not settle within
+/// `rounds`.
+///
+/// A rank is looked at only when, in the next rank, every own target of its parts comes in the
+/// order of its part: a part moved there then moves only parts after the targets it is moved
+/// past. A part is moved only when all its targets and those it is moved past are in the next
+/// rank. A part sharing a target with others is left where it is: its line crosses theirs
+/// wherever it lies, and moving it only spreads the drawing.
+fn least_rows(f: &Flow, r: i32, rounds: usize) -> Option<Vec<Option<i32>>> {
     let last = f.col.iter().copied().max().unwrap_or(0);
     let in_rank = |c: usize| -> Vec<usize> { (0..f.parts.len()).filter(|&i| f.col[i] == c).collect() };
-    let n = f.parts.len();
-    let mut v = vec![0; n];
-    // The least cross coordinate of each part, raised below when a part lies within the targets
-    // of a part before it in its rank.
-    let mut least: Vec<Option<i32>> = vec![None; n];
-    // A part's own targets: those whose only predecessor it is.
     let own = |i: usize| -> Vec<usize> { f.succs[i].iter().map(|s| s.0).filter(|&s| f.preds[s].iter().all(|&(p, _)| p == i)).collect() };
-    // Each round raises one least coordinate or ends. A raised part's targets come after the
-    // targets it is moved past, so moving it never moves those again; the bound only guards
-    // against a mistake.
-    for _ in 0..=n * n {
-        // From the first rank: its parts one after another, every other part level with the middle
-        // of its predecessors, and at least a step past the part before it.
-        for c in 1..=last {
-            let mut before: Option<usize> = None;
-            for i in in_rank(c) {
-                let at = after(before.map(|b| v[b]), mid(f.preds[i].iter().map(|&(p, d)| v[p] + d)), before.map_or(r, |b| f.step(b, r)));
-                v[i] = least[i].map_or(at, |l| at.max(l));
-                before = Some(i);
-            }
-        }
-        // A part whose targets are all its own, lying level with or before the furthest own target
-        // of a part before it in its rank, would have its lines meet that part's where they turn:
-        // it moves a step past that target, so each part's own targets come before the next
-        // part's. A part sharing a target with parts before it is left where it is: its line
-        // crosses theirs wherever it lies, and moving it only spreads the drawing.
+    let ordered: Vec<bool> = (0..=last)
+        .map(|c| {
+            let rank = in_rank(c);
+            let parents: Vec<usize> = in_rank(c + 1)
+                .into_iter()
+                .filter_map(|t| match f.preds[t].as_slice() {
+                    [(p, _), rest @ ..] if rest.iter().all(|q| q.0 == *p) => rank.iter().position(|&i| i == *p),
+                    _ => None,
+                })
+                .collect();
+            parents.windows(2).all(|w| w[0] <= w[1])
+        })
+        .collect();
+    let mut least: Vec<Option<i32>> = vec![None; f.parts.len()];
+    for _ in 0..rounds {
+        let v = forward_rows(f, r, &least);
         let mut raised = false;
-        'ranks: for c in 1..=last {
+        'ranks: for c in (1..=last).filter(|&c| ordered[c]) {
             let rank = in_rank(c);
             for (k, &j) in rank.iter().enumerate() {
                 if f.succs[j].is_empty() || own(j).len() < f.succs[j].len() {
                     continue;
                 }
-                // Only when every target involved is in the next rank and the part's targets come
-                // after the others there: otherwise moving the part moves its targets past the
-                // others' and the others' past them again, without end.
                 let earlier: Vec<usize> = rank[..k].iter().flat_map(|&i| own(i)).collect();
                 let next = |t: &usize| f.col[*t] == c + 1;
-                let first_own = f.succs[j].iter().map(|s| s.0).min();
-                if !earlier.iter().all(next) || !f.succs[j].iter().all(|s| next(&s.0)) || earlier.iter().any(|&t| Some(t) > first_own) {
+                if !earlier.iter().all(next) || !f.succs[j].iter().all(|s| next(&s.0)) {
                     continue;
                 }
                 let far = earlier.iter().map(|&t| v[t] + f.step(t, r)).max();
@@ -964,9 +975,22 @@ pub(super) fn rows(f: &Flow, r: i32, sweep_back: bool) -> Vec<i32> {
             }
         }
         if !raised {
-            break;
+            return Some(least);
         }
     }
+    None
+}
+
+/// The cross coordinate of every part of `f`, a step `r` apart in each rank (more after the VPC),
+/// with the smallest at 0.
+pub(super) fn rows(f: &Flow, r: i32, sweep_back: bool) -> Vec<i32> {
+    let last = f.col.iter().copied().max().unwrap_or(0);
+    let in_rank = |c: usize| -> Vec<usize> { (0..f.parts.len()).filter(|&i| f.col[i] == c).collect() };
+    let n = f.parts.len();
+    // Moves that do not settle within the bound are dropped, and the parts are placed as if none
+    // were made: a drawing that kept growing is worse than lines that meet.
+    let least = least_rows(f, r, n * n + 1).unwrap_or_else(|| vec![None; n]);
+    let mut v = forward_rows(f, r, &least);
     // From the last rank back: a part with two or more targets moves toward their middle, as far
     // as the part before it (already moved) and the part after it (not yet moved) leave a step.
     if sweep_back {
@@ -1778,6 +1802,9 @@ set:
                     continue;
                 }
             };
+            if let Some(spread) = super::super::spread_too_far(&p.layout) {
+                failed.push(format!("size: {spread}\n{src}"));
+            }
             // A note that names a line by its id says the line or its label could not be drawn
             // clear. The note on lines drawn as one names parts, not a line id, and does not count.
             let (wires, notes) = crate::route::route_planned(&m, &p.layout, &r, &p.lines);
@@ -2246,5 +2273,39 @@ set:
             let region = at(&p, "region");
             assert!(region.w < 2000 && region.h < 2000, "{axis:?}: {region:?}");
         }
+    }
+
+    // Fails if moving a part past the targets before it moves a later part of its rank whose
+    // target comes before those targets in the next rank, which moves them on and the first part
+    // again: the Region frame of these eight parts grew to 22,325 pixels.
+    #[test]
+    fn moves_that_push_each_other_through_the_ranks_do_not_spread_the_drawing() {
+        let src = "flows:
+  - eventbridge.a -> stepfunctions.a1
+  - eventbridge.a -> stepfunctions.a2
+  - eventbridge.b -> stepfunctions.b
+  - stepfunctions.b -> sns.z
+  - stepfunctions.a1 -> sns.x
+  - stepfunctions.a2 -> sns.y
+";
+        for axis in [Axis::Down, Axis::Right] {
+            let (_, p) = arranged(src, axis);
+            let region = at(&p, "region");
+            assert!(region.w < 2000 && region.h < 2000, "{axis:?}: {region:?}");
+        }
+    }
+
+    // Fails if moves that have not settled within their bound are kept, or if those of the two
+    // flows from CloudTrail and Config do not settle once one move is allowed and checked.
+    #[test]
+    fn moves_that_do_not_settle_are_dropped() {
+        let r = Rules::builtin();
+        let (m, _) = crate::inference::infer(&crate::def::parse(TWO_ORIGINS).unwrap(), &r);
+        let m = m.unwrap();
+        let f = flow(&m);
+        let rs = cross_step(&m, &r, Axis::Right);
+        assert_eq!(least_rows(&f, rs, 1), None);
+        let settled = least_rows(&f, rs, 2).expect("one move, then a round that moves nothing");
+        assert_eq!(settled.iter().filter(|l| l.is_some()).count(), 1);
     }
 }

@@ -149,6 +149,22 @@ fn parts(items: &[Item]) -> Vec<usize> {
         .collect()
 }
 
+/// How wide or tall a drawing may be per part before a test takes it for one that kept growing.
+/// Measured on 2026-11-18, the generated definitions with a VPC took at most 188 pixels across
+/// and 144 down per part, and those without one at most 232 and 185.
+#[cfg(test)]
+const MOST_PER_PART: i32 = 300;
+
+/// The size of a laid-out drawing, when it is wider or taller than `MOST_PER_PART` per part.
+#[cfg(test)]
+pub(crate) fn spread_too_far(layout: &Layout) -> Option<String> {
+    let rects: Vec<crate::layout::Rect> = layout.icons.iter().map(|i| i.rect).chain(layout.frames.iter().map(|f| f.rect)).collect();
+    let (x0, y0) = (rects.iter().map(|r| r.x).min()?, rects.iter().map(|r| r.y).min()?);
+    let (x1, y1) = (rects.iter().map(|r| r.x + r.w).max()?, rects.iter().map(|r| r.y + r.h).max()?);
+    let most = MOST_PER_PART * layout.icons.len() as i32;
+    (x1 - x0 > most || y1 - y0 > most).then(|| format!("{} by {} pixels for {} parts, more than {most}", x1 - x0, y1 - y0, layout.icons.len()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::azgrid::tests::{grid, inputs};
@@ -249,6 +265,9 @@ mod tests {
         for src in defs {
             for &axis in axes {
                 let (m, d) = grid(src);
+                if let Some(spread) = super::arrange(&m, &r, axis).ok().and_then(|p| super::spread_too_far(&p.layout)) {
+                    failed.push(format!("{axis:?}: {spread}\n{src}"));
+                }
                 match crate::arranged_drawio(&m, &d, &r, axis) {
                     Ok((_, notes)) => {
                         let broken: Vec<&String> = notes.iter().filter(|n| n.contains("edge-")).collect();
@@ -263,7 +282,8 @@ mod tests {
         failed
     }
 
-    // Fails if a generated definition with two zones fails to lay out or breaks a line, along either axis.
+    // Fails if a generated definition with two zones fails to lay out, breaks a line, or is drawn
+    // wider or taller than its parts can take up, along either axis.
     #[test]
     fn generated_two_zone_definitions_draw_cleanly() {
         let defs: Vec<String> = generated_with_a_vpc().into_iter().filter(|s| s.contains("  azs: 2\n")).collect();
@@ -275,8 +295,8 @@ mod tests {
     /// How many generated definitions have two zones.
     const TWO_ZONE_DEFINITIONS: usize = 336;
 
-    // Fails if any generated definition fails to lay out or breaks a line, along either axis.
-    // It takes minutes, so it runs only when named:
+    // Fails if any generated definition fails to lay out, breaks a line, or is drawn wider or
+    // taller than its parts can take up, along either axis. It takes minutes, so it runs only when named:
     //     cargo test -p archwire-core generated_definitions_all_draw_cleanly -- --ignored
     #[test]
     #[ignore]
