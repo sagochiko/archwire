@@ -1,0 +1,7 @@
+flows:
+  - user -> apigateway(http) -> lambda -> dynamodb
+  - user -> cloudfront -> s3
+  - kms -- dynamodb
+  - kms -- s3
+set:
+  lang: ja

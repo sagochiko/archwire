@@ -116,4 +116,5 @@ Every folder under `tests/cases` holds a definition (`def.yaml`) and the output 
 | `ec2-ssm-en`, `ec2-internet-en`, `web-ec2-ja` | EC2 instances in private subnets |
 | `web-two-albs-ja`, `web-alb-attach-en` | two load balancers, and a certificate and web ACL attached to a load balancer |
 | `signin-api-ja`, `direct-upload-en` | users signing in to Cognito, and uploading straight to S3 |
+| `api-kms-ja`, `web-kms-en` | a KMS key attached to S3 and DynamoDB without a VPC, and to S3 in a Web architecture with a VPC |
 | `err-unknown-service`, `err-unsupported` | definitions that stop with an error |
