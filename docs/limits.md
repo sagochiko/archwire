@@ -37,7 +37,7 @@ In a VPC without private subnets, a line from a load balancer to a part outside 
 
 Each of these diagrams is correct.
 
-- In a top-to-bottom diagram, WAF, Certificate Manager and Route 53 attached to CloudFront stand one under the other to its right, which makes the row of global services tall ([issue #4](https://github.com/sagochiko/archwire/issues/4)).
+- In a top-to-bottom diagram without a VPC, or where a line from the users comes down past them, two or more parts attached to CloudFront (WAF, Certificate Manager, Route 53) stand one under the other to its right, which makes the row of global services tall ([issue #4](https://github.com/sagochiko/archwire/issues/4)). With a VPC they sit in CloudFront's row, which makes the diagram wider than the Region: one step for each part past the first.
 - An auxiliary line from the load balancer to a part right of the VPC, such as `alb ~> s3`, can go round the far side of that part and enter it from the right ([issue #5](https://github.com/sagochiko/archwire/issues/5)).
 - With two zones, each NAT gateway sits to the right of the ECS copy in its zone, so in the first zone the line from the load balancer to ECS crosses the line from ECS to the NAT gateway ([issue #6](https://github.com/sagochiko/archwire/issues/6)).
 - In a left-to-right diagram, S3 fed by CloudFront sits below the VPC, so the line to it is long ([issue #15](https://github.com/sagochiko/archwire/issues/15)).
