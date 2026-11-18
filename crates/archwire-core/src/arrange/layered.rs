@@ -1272,8 +1272,8 @@ fn over_the_row(model: &Model, layout: &Layout, edge: usize, axis: Axis) -> Opti
         return None;
     }
     let (m, part) = (layout.rect(main_id), layout.rect(if &e.from == main_id { &e.to } else { &e.from }));
-    let lines = far as i32 + 2;
-    let pos = (100 * (far as i32 + 1 - j as i32) / lines) as u8;
+    // The ports spread evenly from a quarter to three quarters down the side, the nearest part's lowest.
+    let pos = (75 - 50 * j as i32 / far as i32) as u8;
     let side_x = right(m);
     let (bend, main_side, part_side) = if j == 0 {
         (Bend::Straight, Side::Right, Side::Left)
