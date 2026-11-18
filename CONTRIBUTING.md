@@ -48,6 +48,33 @@ sh tools/check_generated.sh out/gen
 
 `check_generated.sh` exits with 0 when every diagram passes, 1 when a diagram has a blocking fault or is missing or the folder does not hold 160 definitions, and 2 when `drawio` is not on PATH.
 
+## Checking the documents
+
+`cargo test --workspace` also checks the documents (`README.md`, `README.ja.md`, `CONTRIBUTING.md` and `docs/*.md`) against the rules data and against what archwire does, in `crates/archwire/tests/docs.rs`. A change to the rules or to the behaviour that leaves a document behind fails these tests, and so does a document edited without the code.
+
+- The service table and the connection table in `docs/definition.md` must list exactly the writable services and their kinds in `rules/aws/services.toml`, and exactly the connections in `rules/aws/links.toml` with their English labels from `rules/aws/labels.toml`. A TOML block in a document must be copied from `rules/aws/`.
+- Every `yaml` and `json` code block needs a marker on the line just above it, saying how it is checked. The marker is an HTML comment, so GitHub does not show it.
+- Each row of the table of `UNSUPPORTED` examples in `docs/definition.md` is compiled, and must stop with that `at` and that message.
+- `README.md` and `README.ja.md` must have the same code blocks and markers in the same order, and the same number of headings at the same levels.
+- A relative link must lead to a file that exists, and a link with `#anchor` to a heading that exists, with the anchor GitHub makes from the heading.
+
+The markers are these. Each document is run in a folder of its own, from top to bottom, so a file saved by one block can be used by the blocks after it.
+
+```markdown
+<!-- archwire-test: compile exit=0 -->              before a yaml block: compile it, expect this exit code
+<!-- archwire-test: compile exit=2 file=web.yaml holes=route.ecs.s3 -->
+<!-- archwire-test: compile exit=1 errors=UNKNOWN_SERVICE@flows[0][1] -->
+<!-- archwire-test: compile exit=0 case=web-named-ja --> the block must equal tests/cases/web-named-ja/def.yaml
+<!-- archwire-test: skip -->                         before a yaml or json block that is not checked, such as a part of a definition
+<!-- archwire-test: report -->                       before a json block: the whole report of the last compile above
+<!-- archwire-test: report-part -->                  before a json block: lines found together in that report
+<!-- archwire-test: run exit=0 -->                   before a sh block: run its archwire commands; only the last may fail
+<!-- archwire-test: append file=web.yaml line="  - ecs -> s3" -->   on its own: add a line to a saved file
+<!-- archwire-test: compile file=web.yaml exit=2 -->                on its own: compile a saved file again
+```
+
+`file=` saves the block under that name. `holes=` and `errors=` list the hole ids, or the error codes with their `at`, in the order of the report; `holes=` with nothing after it means no holes. A `sh` block without a marker is not run. When you add an example, give it a marker; when you change one in `README.md`, change `README.ja.md` the same way.
+
 ## Reporting a problem
 
 Open an [issue](https://github.com/sagochiko/archwire/issues) with:
