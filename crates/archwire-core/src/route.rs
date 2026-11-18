@@ -11,6 +11,8 @@
 //! A line's label stays at the line's middle unless a frame side cuts it there or something
 //! covers it; then it moves along the line to the nearest stretch where nothing does.
 
+use std::collections::BTreeMap;
+
 use crate::audit::audit;
 use crate::def::Rel;
 use crate::ids::edge_id;
@@ -234,15 +236,100 @@ fn lay_one(ctx: &Ctx, specs: &[Line], i: usize, d: &Draft, ports: &[(Port, Port)
     }
 }
 
+/// Lays first, among the lines of one rank leaving one side of a part outside the Region (the
+/// users or a global part), those whose ports lie farthest toward the way they turn. The first
+/// line laid takes the turn its draft plans and the next ones mostly turn farther on, so an outer
+/// line laid after an inner one could turn past it and cross it: from the users, the line to the
+/// second part to the right turned first and the line to the third, leaving right of it, came
+/// down through it. Lines that run straight on come last; the places in the order the lines of a
+/// side take stay the same.
+fn outer_first(ctx: &Ctx, specs: &[Line], drafts: &[Draft], ports: &[(Port, Port)], order: &mut [usize]) {
+    let outside = |id: &str| outside_the_region(ctx, id);
+    let mut sides: BTreeMap<(&str, u8, u8), Vec<usize>> = BTreeMap::new();
+    for (at, &i) in order.iter().enumerate() {
+        if outside(&specs[i].from) {
+            sides.entry((specs[i].from.as_str(), ports[i].0.side as u8, drafts[i].rank)).or_default().push(at);
+        }
+    }
+    for places in sides.values().filter(|p| p.len() > 1) {
+        let lines: Vec<usize> = places.iter().map(|&at| order[at]).collect();
+        // How far each port lies along its side and which way its line turns from it.
+        let turns: Vec<(i32, i32)> = lines
+            .iter()
+            .map(|&i| {
+                let (from, to) = (&specs[i].from, &specs[i].to);
+                let (p, t) = (port_point(ctx.layout.rect(from), ports[i].0), crate::path::center(ctx.layout.rect(to)));
+                let (along, toward) = match ports[i].0.side {
+                    Side::Top | Side::Bottom => (p.0, t.0),
+                    Side::Left | Side::Right => (p.1, t.1),
+                };
+                let way = if (toward - along).abs() <= LEVEL { 0 } else { (toward - along).signum() };
+                (along, way)
+            })
+            .collect();
+        // Among the lines turning one way, how many lie farther toward it.
+        let outer = |k: usize| {
+            let (along, way) = turns[k];
+            if way == 0 {
+                return usize::MAX;
+            }
+            turns.iter().filter(|&&(a, w)| w == way && (a - along) * way > 0).count()
+        };
+        let mut sorted: Vec<usize> = (0..lines.len()).collect();
+        sorted.sort_by_key(|&k| (outer(k), lines[k]));
+        for (&at, &k) in places.iter().zip(&sorted) {
+            order[at] = lines[k];
+        }
+    }
+}
+
 /// Shares out the ports, lays every line, places the labels and runs the final check, which
 /// also looks at how each line keeps its draft in `plans` (none when no plans are given).
-pub(crate) fn draw(ctx: &Ctx, specs: &[Line], drafts: &[Draft], plans: &[LinePlan], mut notes: Vec<String>) -> (Vec<Wire>, Vec<String>) {
+/// When two lines leaving one side of a part outside the Region cross, the lines are laid again
+/// with the outer lines of each such side first, and that drawing is kept when it has fewer
+/// crossing lines and no more notes.
+pub(crate) fn draw(ctx: &Ctx, specs: &[Line], drafts: &[Draft], plans: &[LinePlan], notes: Vec<String>) -> (Vec<Wire>, Vec<String>) {
+    let first = draw_in_order(ctx, specs, drafts, plans, notes.clone(), false);
+    let crossings = |wires: &[Wire], paths: &[Vec<Pt>], only_one_side: bool| {
+        let mut n = 0;
+        for a in 0..paths.len() {
+            for b in a + 1..paths.len() {
+                let one_side = specs[a].from == specs[b].from && wires[a].exit.side == wires[b].exit.side && outside_the_region(ctx, &specs[a].from);
+                if only_one_side && !one_side {
+                    continue;
+                }
+                n += paths[a].windows(2).flat_map(|s| paths[b].windows(2).map(move |t| (s, t))).filter(|(s, t)| crate::path::crosses(s[0], s[1], t[0], t[1])).count();
+            }
+        }
+        n
+    };
+    if crossings(&first.0, &first.2, true) == 0 {
+        return (first.0, first.1);
+    }
+    let again = draw_in_order(ctx, specs, drafts, plans, notes, true);
+    if again.1.len() <= first.1.len() && crossings(&again.0, &again.2, false) < crossings(&first.0, &first.2, false) {
+        (again.0, again.1)
+    } else {
+        (first.0, first.1)
+    }
+}
+
+fn outside_the_region(ctx: &Ctx, id: &str) -> bool {
+    matches!(ctx.node(id).area, Area::Outside | Area::Cloud)
+}
+
+/// `draw`, laying the outer lines of each side of a part outside the Region first when `outer`
+/// is set, and giving the drawn paths too.
+fn draw_in_order(ctx: &Ctx, specs: &[Line], drafts: &[Draft], plans: &[LinePlan], mut notes: Vec<String>, outer: bool) -> (Vec<Wire>, Vec<String>, Vec<Vec<Pt>>) {
     let (model, layout, rules, lang) = (ctx.model, ctx.layout, ctx.rules, ctx.model.lang);
     let mut ports = ctx.share_out(specs, drafts);
     ctx.straighten_level_lines(specs, drafts, &mut ports);
 
     let mut order: Vec<usize> = (0..specs.len()).collect();
     order.sort_by_key(|&i| (drafts[i].rank, i));
+    if outer {
+        outer_first(ctx, specs, drafts, &ports, &mut order);
+    }
     let mut paths: Vec<Vec<Pt>> = vec![Vec::new(); specs.len()];
     let mut placed: Vec<Vec<Pt>> = Vec::new();
     let mut laid: Vec<usize> = Vec::new();
@@ -370,7 +457,7 @@ pub(crate) fn draw(ctx: &Ctx, specs: &[Line], drafts: &[Draft], plans: &[LinePla
             notes.push(note);
         }
     }
-    (wires, notes)
+    (wires, notes, paths)
 }
 
 impl<'a> Ctx<'a> {

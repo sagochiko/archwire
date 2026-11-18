@@ -2499,4 +2499,55 @@ set:
         let settled = least_rows(&f, rs, 2).expect("one move, then a round that moves nothing");
         assert_eq!(settled.iter().filter(|l| l.is_some()).count(), 1);
     }
+
+    const USERS_TO_FOUR_PARTS: &str = "flows:
+  - user -> cloudfront -> s3
+  - user -> cognito
+  - user -> s3.uploads
+  - user -> athena -> s3.logs
+  - cloudtrail -> s3.logs
+set:
+  lang: ja
+";
+
+    // Fails if two lines leaving one side of the users cross: down the page, the line to S3
+    // uploads turned right first, above the Region, and the line to Athena, leaving right of it,
+    // came down through it to turn lower.
+    #[test]
+    fn lines_leaving_one_side_of_the_users_do_not_cross() {
+        for axis in [Axis::Down, Axis::Right] {
+            let (m, p) = arranged(USERS_TO_FOUR_PARTS, axis);
+            let (wires, notes) = route_planned(&m, &p.layout, &Rules::builtin(), &p.lines);
+            assert!(notes.iter().all(|n| !n.contains("edge-")), "{axis:?}: {notes:?}");
+            let path = |w: &Wire| {
+                let mut v = vec![port_point(p.layout.rect(&w.from), w.exit)];
+                v.extend(w.points.iter().copied());
+                v.push(port_point(p.layout.rect(&w.to), w.entry));
+                v
+            };
+            let from_users: Vec<&Wire> = wires.iter().filter(|w| w.from == "user").collect();
+            assert_eq!(from_users.len(), 4);
+            for (k, a) in from_users.iter().enumerate() {
+                for b in &from_users[k + 1..] {
+                    for s in path(a).windows(2) {
+                        for t in path(b).windows(2) {
+                            assert!(!segments_cross(s, t), "{axis:?}: {} crosses {}: {s:?} {t:?}", a.id, b.id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether a level and an upright segment cross inside both.
+    fn segments_cross(s: &[(i32, i32)], t: &[(i32, i32)]) -> bool {
+        let level = |q: &[(i32, i32)]| q[0].1 == q[1].1 && q[0].0 != q[1].0;
+        let (h, v) = if level(s) { (s, t) } else if level(t) { (t, s) } else { return false };
+        if v[0].0 != v[1].0 || level(v) {
+            return false;
+        }
+        let (x0, x1) = (h[0].0.min(h[1].0), h[0].0.max(h[1].0));
+        let (y0, y1) = (v[0].1.min(v[1].1), v[0].1.max(v[1].1));
+        x0 < v[0].0 && v[0].0 < x1 && y0 < h[0].1 && h[0].1 < y1
+    }
 }

@@ -118,7 +118,7 @@ pub(crate) fn alongside(a: Pt, b: Pt, c: Pt, d: Pt) -> i32 {
 }
 
 /// True if a vertical and a horizontal segment cross inside both.
-fn crosses(a: Pt, b: Pt, c: Pt, d: Pt) -> bool {
+pub(crate) fn crosses(a: Pt, b: Pt, c: Pt, d: Pt) -> bool {
     let cross = |v: (Pt, Pt), h: (Pt, Pt)| {
         let (x, y) = (v.0 .0, h.0 .1);
         v.0 .0 == v.1 .0 && h.0 .1 == h.1 .1
