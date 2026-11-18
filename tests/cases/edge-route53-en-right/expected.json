@@ -1,0 +1,60 @@
+{
+  "versions": {
+    "archwire": "0.1.0",
+    "rules": "2026.11.11"
+  },
+  "derived": [
+    {
+      "target": "aws-cloud",
+      "added": true,
+      "kind": "default",
+      "rule": "resources-inside-aws-cloud-frame",
+      "reason": "AWS resources are drawn inside the AWS Cloud frame.",
+      "source": null
+    },
+    {
+      "target": "region",
+      "added": true,
+      "kind": "default",
+      "rule": "resources-inside-region-frame",
+      "reason": "AWS resources that belong to a Region are drawn inside that Region's frame.",
+      "source": null
+    },
+    {
+      "target": "region",
+      "added": true,
+      "kind": "default",
+      "rule": "default-region",
+      "reason": "No Region was given, so ap-northeast-1 (Tokyo) is used.",
+      "source": null
+    },
+    {
+      "target": "cloudfront",
+      "added": false,
+      "kind": "default",
+      "rule": "global-service-outside-region",
+      "reason": "AWS lists Amazon CloudFront and AWS WAF for CloudFront among the global services, whose resources are not Region-specific. archwire draws global services inside the AWS Cloud frame and outside the Region frame.",
+      "source": "https://docs.aws.amazon.com/whitepapers/latest/aws-fault-isolation-boundaries/global-services.html"
+    },
+    {
+      "target": "s3",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "Regional services that are not placed in a VPC subnet are drawn inside the Region frame and outside the VPC frame.",
+      "source": null
+    },
+    {
+      "target": "route53",
+      "added": false,
+      "kind": "default",
+      "rule": "global-service-outside-region",
+      "reason": "AWS lists Amazon CloudFront and AWS WAF for CloudFront among the global services, whose resources are not Region-specific. archwire draws global services inside the AWS Cloud frame and outside the Region frame.",
+      "source": "https://docs.aws.amazon.com/whitepapers/latest/aws-fault-isolation-boundaries/global-services.html"
+    }
+  ],
+  "holes": [],
+  "errors": [],
+  "warnings": [],
+  "notes": []
+}

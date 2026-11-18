@@ -1,0 +1,6 @@
+flows:
+  - user -> cloudfront -> s3
+  - route53 -- cloudfront
+set:
+  lang: en
+  direction: right

@@ -118,14 +118,13 @@ fn case_list_is_what_the_plan_says() {
         [
             "api-fanout-en-right", "api-http-ja", "api-http-ja-down", "api-kms-ja", "api-merged-ja", "api-merged-ja-down", "api-min-en",
             "api-names-ja", "api-queue-ja", "api-rest-en", "aux-to-side", "cloudfront-lines-ja", "detect-hub-ja", "detect-respond-en",
-            "detect-trail-en", "direct-upload-en", "ec2-aurora-ja", "ec2-internet-en", "ec2-s3-endpoint-ja", "ec2-ssm-en", "edge-waf-en",
-            "endpoint-3az-en", "endpoint-3az-ja", "endpoint-ja", "endpoint-ja-right", "err-unknown-service", "err-unsupported", "hole-apigateway",
-            "hole-s3", "mix-beside-ja", "mix-logs-ja", "mix-min-en", "mix-nat-ja", "mix-queue-ja", "mix-vpc-ja",
-            "mix-vpc-ja-right", "mix-web-ja", "mix-web-ja-right", "s3-event-en", "security-lake-en", "signin-api-ja", "trail-athena-ja",
-            "user-lines-api-ja", "user-lines-ja", "user-lines-web-ja", "web-2az-en", "web-2az-ja", "web-2az-ja-right", "web-3az-en",
-            "web-3az-en-right", "web-3az-ja", "web-alb-attach-en", "web-attach-en", "web-detect-ja", "web-ec2-ja", "web-kms-en",
-            "web-named-ja",
-            "web-two-albs-ja",
+            "detect-trail-en", "direct-upload-en", "ec2-aurora-ja", "ec2-internet-en", "ec2-s3-endpoint-ja", "ec2-ssm-en", "edge-route53-en-right",
+            "edge-waf-en", "endpoint-3az-en", "endpoint-3az-ja", "endpoint-ja", "endpoint-ja-right", "err-unknown-service", "err-unsupported",
+            "hole-apigateway", "hole-s3", "mix-beside-ja", "mix-logs-ja", "mix-min-en", "mix-nat-ja", "mix-queue-ja",
+            "mix-vpc-ja", "mix-vpc-ja-right", "mix-web-ja", "mix-web-ja-right", "s3-event-en", "security-lake-en", "signin-api-ja",
+            "trail-athena-ja", "user-lines-api-ja", "user-lines-ja", "user-lines-web-ja", "web-2az-en", "web-2az-ja", "web-2az-ja-right",
+            "web-3az-en", "web-3az-en-right", "web-3az-ja", "web-alb-attach-en", "web-attach-en", "web-detect-ja", "web-ec2-ja",
+            "web-kms-en", "web-named-ja", "web-route53-ja", "web-two-albs-ja",
         ]
     );
 }

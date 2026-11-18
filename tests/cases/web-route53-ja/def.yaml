@@ -1,0 +1,7 @@
+flows:
+  - user -> cloudfront -> alb -> ecs(fargate) -> aurora
+  - route53 -- cloudfront
+  - acm -- cloudfront
+  - waf -- cloudfront
+set:
+  lang: ja

@@ -119,4 +119,5 @@ Every folder under `tests/cases` holds a definition (`def.yaml`) and the output 
 | `signin-api-ja`, `direct-upload-en` | users signing in to Cognito, and uploading straight to S3 |
 | `api-queue-ja`, `api-fanout-en-right`, `s3-event-en`, `mix-queue-ja` | events: a queue between two functions, a topic fanned out to two queues, event notifications from a bucket, and a queue invoking a function attached to the VPC |
 | `api-kms-ja`, `web-kms-en` | a KMS key attached to S3 and DynamoDB without a VPC, and to S3 in a Web architecture with a VPC |
+| `web-route53-ja`, `edge-route53-en-right` | Route 53 attached to CloudFront, next to a certificate and a web ACL in a Web architecture, and on a static site drawn from left to right |
 | `err-unknown-service`, `err-unsupported` | definitions that stop with an error |
