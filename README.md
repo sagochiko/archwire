@@ -86,7 +86,7 @@ How to write a definition and answer each hole is in [Writing a definition](docs
 - Log analysis with Security Lake, Athena and the Glue Data Catalog
 - A KMS key attached to an S3 bucket or a DynamoDB table
 - Route 53 attached to a CloudFront distribution, drawn as an association because DNS only answers the name and the users' traffic does not pass through it
-- Events between EventBridge, SNS, SQS, Lambda and S3, such as a queue between two functions, a topic fanned out to queues, or event notifications from a bucket
+- Events between EventBridge, SNS, SQS, Lambda and S3, such as a queue between two functions, a topic fanned out to queues, event notifications from a bucket, the stream of a DynamoDB table, or events a function sends to an event bus
 - EC2 instances in private subnets that start flows of their own
 
 A diagram has at most one VPC. The Region is `ap-northeast-1`, the only one in this version. Labels are in English, or in Japanese with `lang: ja` under `set`. Diagrams run from top to bottom, or from left to right with `direction: right`. Every service and setting is listed in [Writing a definition](docs/definition.md#services).

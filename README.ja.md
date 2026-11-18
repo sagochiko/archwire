@@ -86,7 +86,7 @@ archwire compile web.yaml -o web.drawio
 - Security Lake、Athena、Glue Data Catalog を使うログ分析
 - S3 のバケットや DynamoDB のテーブルに付ける KMS のキー
 - CloudFront のディストリビューションに付ける Route 53。DNS は名前を引くだけで利用者の通信は通らないので、本流ではなく関連の点線で描く
-- EventBridge、SNS、SQS、Lambda、S3 のあいだのイベント。2つの関数のあいだにキューを挟む形、トピックから複数のキューに分ける形、バケットのイベント通知など
+- EventBridge、SNS、SQS、Lambda、S3 のあいだのイベント。2つの関数のあいだにキューを挟む形、トピックから複数のキューに分ける形、バケットのイベント通知、DynamoDB のテーブルのストリーム、関数がイベントバスへ送るイベントなど
 - 自分から通信を始める、プライベートサブネットの EC2 インスタンス
 
 1つの図に描ける VPC は1つまで。リージョンは `ap-northeast-1` で、この版ではほかを選べない。ラベルは英語で、`set` の下に `lang: ja` と書けば日本語になる。図は上から下へ流れ、`direction: right` と書けば左から右へ流れる。サービスと設定の一覧は [Writing a definition](docs/definition.md#services) にある。
