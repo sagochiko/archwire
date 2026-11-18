@@ -124,7 +124,7 @@ fn case_list_is_what_the_plan_says() {
             "mix-vpc-ja", "mix-vpc-ja-right", "mix-web-ja", "mix-web-ja-right", "s3-event-en", "security-lake-en", "signin-api-ja",
             "trail-athena-ja", "user-lines-api-ja", "user-lines-ja", "user-lines-web-ja", "web-2az-en", "web-2az-ja", "web-2az-ja-right",
             "web-3az-en", "web-3az-en-right", "web-3az-ja", "web-alb-attach-en", "web-attach-en", "web-detect-ja", "web-ec2-ja",
-            "web-kms-en", "web-named-ja", "web-route53-ja", "web-two-albs-ja",
+            "web-kms-en", "web-named-ja", "web-queue-ja", "web-route53-ja", "web-two-albs-ja",
         ]
     );
 }

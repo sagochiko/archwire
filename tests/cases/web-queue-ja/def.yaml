@@ -1,0 +1,7 @@
+flows:
+  - user -> cloudfront -> alb -> ecs(fargate) -> aurora
+  - ecs -> sqs -> lambda -> dynamodb
+set:
+  lang: ja
+choose:
+  route.ecs.sqs: endpoint
