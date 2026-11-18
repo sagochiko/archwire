@@ -1301,7 +1301,7 @@ pub(crate) mod tests {
     }
 
     /// Where a line's label sits, by the same measure the router uses.
-    fn label_area_of(x: &Wire, l: &Layout) -> Rect {
+    pub(crate) fn label_area_of(x: &Wire, l: &Layout) -> Rect {
         let p = full_path(x, l);
         let len = path_length(&p);
         let d = match (x.label_at, x.label_near_source) {

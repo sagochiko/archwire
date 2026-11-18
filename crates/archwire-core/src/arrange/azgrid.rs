@@ -18,8 +18,8 @@ use crate::diag::Problem;
 use crate::ids::edge_id;
 use crate::def::Rel;
 use crate::layout::{icon, Frame, FrameKind, Icon, Layout, Rect};
-use crate::lines::gather;
-use crate::measure::{frame_name_box, name_area};
+use crate::lines::{gather, label_parts, Line};
+use crate::measure::{frame_name_box, name_area, wire_label_area};
 use crate::model::{Area, Axis, Model, Tier};
 use crate::path::{grow, hits};
 use crate::route::{port_point, Bend, Keep, LinePlan, Port, Side, Through, Track, LABEL_FIRST, LABEL_LINE};
@@ -271,8 +271,8 @@ struct Grid<'a> {
     names_right: i32,
     /// Whether the columns keep clear of the zone's and the subnets' names: a line comes down into
     /// the first private column from above, past the names (from the public tier, a part spanning
-    /// the zones, or outside), or lines run down between private rows, whose labels beside them
-    /// take the room the names leave.
+    /// the zones, or outside). Else the columns sit in the middle of their zone, widened for the
+    /// labels of the lines between private parts.
     clear_names: bool,
     entry_half: i32,
     reps: Vec<usize>,
@@ -402,15 +402,53 @@ impl<'a> Grid<'a> {
         let entry_half = groups.iter().filter(|g| g.place == Place::Entry).map(|g| g.half).max().unwrap_or(ICON / 2);
         let place_of = |id: &str| index(id).and_then(|i| group_of[i]).map(|k| groups[k].place);
         let clear_names = public
-            || rows > 1
             || groups.iter().any(|g| matches!(g.place, Place::Entry | Place::Span))
             || model.edges.iter().any(|e| place_of(&e.from).is_none() && place_of(&e.to) == Some(Place::Private));
         // With two zones, one part spanning them sits on the boundary between the zones; two or
         // more take the row above the zones, as with three zones.
         let boundary = model.azs.len() == 2 && groups.iter().filter(|g| g.place == Place::Span).count() == 1;
         let mut g = Grid { model, rules, axis, boundary, groups, group_of, public, private, rows, col_half, names_right, clear_names, entry_half, reps: Vec::new() };
-        g.reps = g.drawn_inside();
+        let lines = g.drawn_inside();
+        g.reps = lines.iter().map(|l| l.rep).collect();
+        if !g.clear_names {
+            g.widen_for_labels_beside(&lines);
+        }
         g
+    }
+
+    /// Widens each private column, on both sides alike, by the room the labels of the lines
+    /// between private parts take: a line between parts of two rows, or one leaving a part down
+    /// into the band below its row, carries its label beside it, on the right or the left; a line
+    /// straight across to the next zone, above it. Only for columns that keep no room clear of
+    /// the names, where that room no longer holds them.
+    fn widen_for_labels_beside(&mut self, lines: &[Line]) {
+        let mut wide: Vec<(usize, i32)> = Vec::new();
+        for l in lines {
+            let e = &self.model.edges[l.rep];
+            let (f, t) = (self.index(&e.from), self.index(&e.to));
+            if self.place(f) != Some(Place::Private) || self.place(t) != Some(Place::Private) {
+                continue;
+            }
+            let (gf, gt) = (self.group(f), self.group(t));
+            let text = label_parts(l, self.model, self.rules).join(" ");
+            if text.is_empty() {
+                continue;
+            }
+            // Straight across to the same column of the next zone, the label sits above the line,
+            // between the two parts: it keeps clear of the frame sides beside the part it reaches
+            // when the room left of that part holds it.
+            let reach = if gf.row == gt.row && self.az(f).abs_diff(self.az(t)) == 1 && gf.col == gt.col && !self.between(f, t) {
+                ICON / 2 + wire_label_area(&text, (0, 0), true, false).w
+            } else {
+                let (right, left) = (wire_label_area(&text, (0, 0), false, false), wire_label_area(&text, (0, 0), false, true));
+                ICON / 2 + (right.x + right.w).max(-left.x)
+            };
+            wide.push((gf.col, reach));
+            wide.push((gt.col, reach));
+        }
+        for (c, reach) in wide {
+            self.col_half[c] = self.col_half[c].max(reach);
+        }
     }
 
     fn zones(&self) -> usize {
@@ -442,10 +480,10 @@ impl<'a> Grid<'a> {
         self.model.nodes.iter().position(|n| n.id == id).expect("edge ends are nodes")
     }
 
-    /// The edges with both ends inside that are drawn once lines are gathered. Which copy stands
-    /// for a merged line inside the VPC follows from the zones alone, so a rough layout of the
-    /// inside is enough to tell.
-    fn drawn_inside(&self) -> Vec<usize> {
+    /// The lines drawn once the edges are gathered, each drawn as one of its edges. Which copy
+    /// stands for a merged line inside the VPC follows from the zones alone, so a rough layout of
+    /// the inside is enough to tell.
+    fn drawn_inside(&self) -> Vec<Line> {
         let mut icons = Vec::new();
         for (k, g) in self.groups.iter().enumerate() {
             for &i in &g.nodes {
@@ -454,7 +492,7 @@ impl<'a> Grid<'a> {
             }
         }
         let layout = Layout { frames: Vec::new(), icons };
-        gather(self.model, &layout, self.rules).0.iter().map(|l| l.rep).collect()
+        gather(self.model, &layout, self.rules).0
     }
 
     fn across(&self, extra: i32, gap: i32, shift: i32) -> Across {
@@ -2054,21 +2092,52 @@ pub(in crate::arrange) mod tests {
         }
     }
 
-    // Fails if a VPC with a line coming down into its first column, or with lines running down
-    // between private rows, stops keeping that column clear of the zone's and the subnet's names:
-    // the web example and EC2 over Aurora keep their parts where they were. The lines between the
-    // rows carry labels beside them, which take the room the names leave.
+    // Fails if, in a VPC no line comes down into from above but with lines running down between
+    // private rows (EC2 over Aurora), the parts of a private subnet sit further from one side of it
+    // than from the other, or the label of a line between two of them runs over a frame side.
+    #[test]
+    fn rows_no_line_comes_down_into_keep_even_room_and_their_labels_inside() {
+        let defs = [
+            "flows:\n  - ec2 -> aurora\n  - ec2 -> s3\nchoose:\n  route.ec2.s3: endpoint\n",
+            "flows:\n  - ec2 -> aurora\n  - ec2 -> s3\nset:\n  azs: 3\nchoose:\n  route.ec2.s3: endpoint\n",
+            "flows:\n  - ec2 -> aurora\n  - aurora -> ec2\n  - ec2 -> ssm\nset:\n  azs: 3\n",
+            "flows:\n  - ec2 -> aurora\n",
+        ];
+        let r = Rules::builtin();
+        for def in defs {
+            for lang in ["en", "ja"] {
+                let src = if def.contains("set:\n") { def.replace("set:\n", &format!("set:\n  lang: {lang}\n")) } else { format!("{def}set:\n  lang: {lang}\n") };
+                let (m, d) = grid(&src);
+                for axis in [Axis::Down, Axis::Right] {
+                    let p = lays_out_cleanly(&src, &m, &d, axis);
+                    let margins = subnet_margins(&p);
+                    assert!(!margins.is_empty(), "{src}");
+                    for (id, left, right) in margins {
+                        assert!((left - right).abs() <= 2, "{src}{axis:?} {id}: left {left}, right {right}");
+                    }
+                    let (w, _) = crate::route::route_planned(&m, &p.layout, &r, &p.lines);
+                    let in_subnet = |id: &str| m.nodes.iter().any(|n| n.id == id && matches!(n.area, Area::Subnet(_)));
+                    for x in w.iter().filter(|x| !x.label.is_empty() && in_subnet(&x.from) && in_subnet(&x.to)) {
+                        let b = crate::route::tests::label_area_of(x, &p.layout);
+                        for f in &p.layout.frames {
+                            let o = f.rect;
+                            let meets = b.x < o.x + o.w && o.x < b.x + b.w && b.y < o.y + o.h && o.y < b.y + b.h;
+                            let within = b.x >= o.x && b.x + b.w <= o.x + o.w && b.y >= o.y && b.y + b.h <= o.y + o.h;
+                            assert!(!meets || within, "{src}{axis:?} the label of {} runs over the side of {}", x.id, f.id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fails if a VPC with a line coming down into its first column stops keeping that column
+    // clear of the zone's and the subnet's names: the web example keeps its parts where they were.
     #[test]
     fn a_subnet_a_line_comes_down_into_keeps_its_parts_clear_of_the_names() {
         let p = on_the_boundary(Axis::Down);
         let (ecs, pri) = (icon(&p, "ecs-1a").rect, frame(&p, "pri-1a"));
         assert_eq!(ecs.x - pri.x, 141);
-        let src = "flows:\n  - ec2 -> aurora\n  - aurora -> ec2\nset:\n  azs: 3\n  lang: ja\n";
-        let (m, d) = grid(src);
-        let p = lays_out_cleanly(src, &m, &d, Axis::Down);
-        for id in ["ec2-1a", "aurora-1a"] {
-            assert_eq!(icon(&p, id).rect.x - frame(&p, "pri-1a").x, 141, "{id}");
-        }
     }
 
 
