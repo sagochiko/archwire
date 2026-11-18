@@ -1562,6 +1562,68 @@ pub(crate) mod tests {
         }
     }
 
+    /// A part outside the Region (area `area`) with two lines leaving one side, `side`, and turning
+    /// the same way, `way`, to parts beyond it: the inner line is planned to turn nearer the part
+    /// than the outer one, so drawn as planned the outer line runs out through the inner one.
+    fn two_turning_one_way(area: Area, side: Side, way: i32) -> (Model, Layout, Vec<LinePlan>) {
+        // A point at this depth out from the side and this place along it.
+        let at = |depth: i32, along: i32| match side {
+            Side::Bottom => (along, depth),
+            Side::Top => (along, -depth),
+            Side::Right => (depth, along),
+            Side::Left => (-depth, along),
+        };
+        let icon = |depth: i32, along: i32| {
+            let (x, y) = at(depth, along);
+            (x - 30, y - 30)
+        };
+        let (u, i, o) = (icon(0, 0), icon(320, 160 * way), icon(320, 340 * way));
+        let (mut m, mut l) = scene(
+            &[("u", u.0, u.1, S3), ("inner", i.0, i.1, S3), ("outer", o.0, o.1, S3)],
+            &[("u", "inner", Rel::Main, "https"), ("u", "outer", Rel::Main, "https")],
+        );
+        m.nodes[0].area = area;
+        l.frames[0].rect = Rect { x: -1000, y: -1000, w: 2000, h: 2000 };
+        let bend = |depth: i32| match side {
+            Side::Top | Side::Bottom => Bend::AtY(at(depth, 0).1),
+            Side::Left | Side::Right => Bend::AtX(at(depth, 0).0),
+        };
+        let entry = opposite(side);
+        let plans = vec![plan("u", "inner", side, entry, bend(120)), plan("u", "outer", side, entry, bend(200))];
+        (m, l, plans)
+    }
+
+    // Fails if, of two lines leaving one side of the users or a global part and turning the same
+    // way, the inner line turns nearer the part than the outer one and is crossed by it, on any
+    // side and either way.
+    #[test]
+    fn of_two_lines_leaving_a_part_outside_the_region_the_outer_turns_nearer_it() {
+        for area in [Area::Outside, Area::Cloud] {
+            for side in [Side::Bottom, Side::Top, Side::Right, Side::Left] {
+                for way in [-1, 1] {
+                    let (m, l, plans) = two_turning_one_way(area, side, way);
+                    let (w, notes) = route_by_ends(&m, &l, &Rules::builtin(), &plans);
+                    let case = format!("{area:?} {side:?} {way}");
+                    assert!(notes.is_empty(), "{case}: {notes:?}");
+                    let (inner, outer) = (full_path(wire(&w, "u", "inner"), &l), full_path(wire(&w, "u", "outer"), &l));
+                    let crossing = inner.windows(2).any(|s| outer.windows(2).any(|t| crate::path::crosses(s[0], s[1], t[0], t[1])));
+                    assert!(!crossing, "{case}: {inner:?} {outer:?}");
+                    assert_eq!((inner.len(), outer.len()), (4, 4), "{case}: {inner:?} {outer:?}");
+                }
+            }
+        }
+    }
+
+    // Fails if lines leaving a part inside the Region are turned again: the rule is for the parts
+    // outside it, whose lines fan out over the Region.
+    #[test]
+    fn lines_leaving_a_part_in_the_region_keep_their_planned_turns() {
+        let (m, l, plans) = two_turning_one_way(Area::Region, Side::Bottom, 1);
+        let (w, _) = route_by_ends(&m, &l, &Rules::builtin(), &plans);
+        assert_eq!(full_path(wire(&w, "u", "inner"), &l)[1].1, 120);
+        assert_eq!(full_path(wire(&w, "u", "outer"), &l)[1].1, 200);
+    }
+
     #[test]
     fn two_lines_into_one_side_share_it() {
         let (m, l, plans) = two_into_one();

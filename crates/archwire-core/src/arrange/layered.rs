@@ -2536,6 +2536,17 @@ set:
         v
     }
 
+    // A distribution in front of the web stack, two buckets and an API: four lines leave the
+    // bottom of CloudFront, or its right side left to right.
+    const CLOUDFRONT_TO_FOUR_PARTS: &str = "flows:
+  - user -> cloudfront -> alb -> ecs -> aurora
+  - cloudfront -> s3
+  - cloudfront -> s3.media
+  - cloudfront -> apigateway(http) -> lambda -> dynamodb
+set:
+  lang: ja
+";
+
     /// The crossings of the lines leaving `from` with each other, each named with the segments
     /// that cross; with `turning`, only of lines that turn on their way. Also the notes that name
     /// a line, and how many lines leave `from`.
@@ -2592,6 +2603,15 @@ set:
         for (src, lines) in [(USERS_TO_THE_WEB_AND_THREE_PARTS, 4), (english.as_str(), 4), (USERS_TO_THE_API_AND_FOUR_PARTS, 5)] {
             assert_no_crossing_from(src, "user", lines, false);
         }
+    }
+
+    // Fails if two lines leaving CloudFront that both turn cross: the lines to the buckets and
+    // the API turned in the order they were laid. The line straight on to the web stack is left
+    // out: it leaves the middle of the side, and lines leaving left of it to parts on its right
+    // cross it whatever their turns.
+    #[test]
+    fn turning_lines_from_cloudfront_do_not_cross() {
+        assert_no_crossing_from(CLOUDFRONT_TO_FOUR_PARTS, "cloudfront", 4, true);
     }
 
     /// Whether a level and an upright segment cross inside both.
