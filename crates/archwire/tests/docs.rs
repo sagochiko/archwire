@@ -507,7 +507,10 @@ fn unknown_keys(place: &str, pairs: &BTreeMap<String, String>, problems: &mut Ve
 /// Runs the examples of one document. Every `yaml` and `json` block must have a marker on the
 /// line just above it; the markers are described in CONTRIBUTING.md.
 fn check_examples(doc: &str, src: &str, problems: &mut Vec<String>) -> usize {
-    let work = std::env::temp_dir().join(format!("archwire-docs-{}-{}", std::process::id(), doc.replace(['/', '.'], "-")));
+    // Tests run side by side, some on the same document name, so each call gets its own folder.
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let work = std::env::temp_dir().join(format!("archwire-docs-{}-{call}-{}", std::process::id(), doc.replace(['/', '.'], "-")));
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work).unwrap();
     let list = items(src);
