@@ -1,0 +1,7 @@
+flows:
+  - user -> cloudfront -> alb -> ecs -> aurora
+  - cloudfront -> s3
+  - cloudfront -> s3.media
+  - cloudfront -> apigateway(http) -> lambda -> dynamodb
+set:
+  lang: ja

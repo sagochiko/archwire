@@ -1,0 +1,9 @@
+flows:
+  - user -> apigateway(http) -> lambda -> dynamodb
+  - user -> cognito
+  - user -> s3.uploads
+  - user -> athena -> s3.logs
+  - cloudtrail -> s3.logs
+  - user -> cloudfront -> s3
+set:
+  lang: ja

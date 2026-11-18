@@ -1,0 +1,116 @@
+{
+  "versions": {
+    "archwire": "0.1.0",
+    "rules": "2026.11.9"
+  },
+  "derived": [
+    {
+      "target": "aws-cloud",
+      "added": true,
+      "kind": "default",
+      "rule": "resources-inside-aws-cloud-frame",
+      "reason": "AWS のリソースは AWS Cloud の枠の中に描く。",
+      "source": null
+    },
+    {
+      "target": "region",
+      "added": true,
+      "kind": "default",
+      "rule": "resources-inside-region-frame",
+      "reason": "リージョンに属する AWS のリソースは、そのリージョンの枠の中に描く。",
+      "source": null
+    },
+    {
+      "target": "region",
+      "added": true,
+      "kind": "default",
+      "rule": "default-region",
+      "reason": "リージョンの指定が無いので、ap-northeast-1（東京）にする。",
+      "source": null
+    },
+    {
+      "target": "apigateway",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "VPC のサブネットに置かないリージョンのサービスは、リージョンの枠の中、VPC の枠の外に描く。",
+      "source": null
+    },
+    {
+      "target": "lambda",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "VPC のサブネットに置かないリージョンのサービスは、リージョンの枠の中、VPC の枠の外に描く。",
+      "source": null
+    },
+    {
+      "target": "dynamodb",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "VPC のサブネットに置かないリージョンのサービスは、リージョンの枠の中、VPC の枠の外に描く。",
+      "source": null
+    },
+    {
+      "target": "cognito",
+      "added": false,
+      "kind": "constraint",
+      "rule": "cognito-user-pool-in-one-region",
+      "reason": "Amazon Cognito のユーザープールは、それぞれ1つの AWS リージョンに作られる。archwire はユーザープールをリージョンの枠の中に描く。",
+      "source": "https://docs.aws.amazon.com/cognito/latest/developerguide/security-cognito-regional-data-considerations.html"
+    },
+    {
+      "target": "s3.uploads",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "VPC のサブネットに置かないリージョンのサービスは、リージョンの枠の中、VPC の枠の外に描く。",
+      "source": null
+    },
+    {
+      "target": "athena",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "VPC のサブネットに置かないリージョンのサービスは、リージョンの枠の中、VPC の枠の外に描く。",
+      "source": null
+    },
+    {
+      "target": "s3.logs",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "VPC のサブネットに置かないリージョンのサービスは、リージョンの枠の中、VPC の枠の外に描く。",
+      "source": null
+    },
+    {
+      "target": "cloudtrail",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "VPC のサブネットに置かないリージョンのサービスは、リージョンの枠の中、VPC の枠の外に描く。",
+      "source": null
+    },
+    {
+      "target": "cloudfront",
+      "added": false,
+      "kind": "default",
+      "rule": "global-service-outside-region",
+      "reason": "AWS は Amazon CloudFront と AWS WAF for CloudFront を、リソースがリージョンに属さないグローバルサービスに挙げている。archwire はグローバルサービスを AWS Cloud の枠の中、リージョンの枠の外に描く。",
+      "source": "https://docs.aws.amazon.com/whitepapers/latest/aws-fault-isolation-boundaries/global-services.html"
+    },
+    {
+      "target": "s3",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "VPC のサブネットに置かないリージョンのサービスは、リージョンの枠の中、VPC の枠の外に描く。",
+      "source": null
+    }
+  ],
+  "holes": [],
+  "errors": [],
+  "warnings": [],
+  "notes": []
+}
