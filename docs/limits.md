@@ -54,6 +54,6 @@ A connection or shape not listed in [Which connections are accepted](definition.
 - A KMS key attaches only to S3 and DynamoDB (`kms -- s3`, `kms -- dynamodb`). It cannot be attached to Aurora, ECS, Lambda or other services, and AWS Secrets Manager and multi-Region keys are not drawn.
 - Events between EventBridge, SNS, SQS, Lambda and S3 are drawn only along the pairs in the list. The kinds of SNS topics and SQS queues (standard or FIFO) and dead-letter queues are not drawn. `s3 -> eventbridge` is not accepted, and ECS and EC2 do not send to queues or topics; only a Lambda function does (`lambda -> sqs`, `lambda -> sns`).
 - A main flow back to a part it left through a part outside the subnets of the VPC, such as `lambda.a -> sqs -> lambda.a`, stops with `UNSUPPORTED`.
-- The subscribers of Security Lake, Lake Formation, rollup Regions, Glue crawlers or jobs, and AI services are not drawn.
+- The settings of Security Lake's subscribers are not drawn; a function that reads the queue Security Lake notifies through can be drawn after it, as `securitylake -> sqs -> lambda`. Lake Formation, rollup Regions, Glue crawlers or jobs, and AI services are not drawn.
 - More than one VPC, Transit Gateway, on-premises networks, several accounts and other clouds are not drawn.
 - archwire does not simulate failures, show migration stages, compare a diagram with Terraform, or read a `.drawio` file back into a definition.
