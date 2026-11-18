@@ -920,6 +920,32 @@ mod tests {
         assert!(m.edges.iter().any(|e| e.from == "sqs" && e.to == "lambda-1a" && e.label == "messages"));
     }
 
+    // Fails if a line from a queue, a topic, an EventBridge rule or a bucket to a function in the
+    // VPC leaves a route to choose, or adds an Internet Gateway or a NAT gateway: the services
+    // invoke the function, it sends nothing out of the VPC.
+    #[test]
+    fn invoking_a_function_in_the_vpc_needs_no_route() {
+        let cases = [
+            ("sqs", "messages", "flows:\n  - eventbridge -> sqs -> lambda -> aurora\n"),
+            ("sns", "notifications", "flows:\n  - eventbridge -> sns -> lambda -> aurora\n"),
+            ("eventbridge", "by_rule", "flows:\n  - eventbridge -> lambda -> aurora\n"),
+            ("s3", "event_notifications", "flows:\n  - user -> s3 -> lambda -> aurora\n"),
+        ];
+        for (from, label, src) in cases {
+            let (m, d) = passes(src);
+            assert_eq!(spot(&m, "lambda-1a"), (PRIVATE, Some(0), None), "{src}");
+            assert_eq!(spot(&m, "lambda-1c"), (PRIVATE, Some(1), None), "{src}");
+            assert!(d.holes.is_empty(), "{src}: {:?}", hole_ids(&d));
+            assert_eq!(d.exit_code(), 0, "{src}");
+            for to in ["lambda-1a", "lambda-1c"] {
+                assert!(m.edges.iter().any(|e| e.from == from && e.to == to && e.label == label), "{src}: no {from} -> {to}");
+            }
+            let added: Vec<_> = m.nodes.iter().filter(|n| n.added).map(|n| n.id.as_str()).collect();
+            assert!(added.iter().all(|id| !id.starts_with("igw") && !id.starts_with("nat")), "{src}: {added:?}");
+            assert!(m.nodes.iter().all(|n| !matches!(n.area, Area::Subnet(Tier::Public) | Area::VpcEdge)), "{src}: {:?}", node_ids(&m));
+        }
+    }
+
     // Fails if a service in the VPC other than Lambda is accepted to send to a queue or a topic.
     #[test]
     fn only_lambda_in_the_vpc_sends_to_queues_and_topics() {
