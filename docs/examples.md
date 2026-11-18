@@ -114,6 +114,7 @@ Every folder under `tests/cases` holds a definition (`def.yaml`) and the output 
 | `detect-hub-ja`, `detect-respond-en`, `detect-trail-en` | a flow from detection to notification, with no users |
 | `security-lake-en`, `trail-athena-ja` | log analysis with Security Lake, Athena and the Glue Data Catalog |
 | `ec2-ssm-en`, `ec2-internet-en`, `web-ec2-ja` | EC2 instances in private subnets |
+| `ec2-aurora-ja` | EC2 above Aurora in a VPC with no public subnet, in the middle of the subnets |
 | `web-two-albs-ja`, `web-alb-attach-en` | two load balancers, and a certificate and web ACL attached to a load balancer |
 | `signin-api-ja`, `direct-upload-en` | users signing in to Cognito, and uploading straight to S3 |
 | `api-queue-ja`, `api-fanout-en-right`, `s3-event-en`, `mix-queue-ja` | events: a queue between two functions, a topic fanned out to two queues, event notifications from a bucket, and a queue invoking a function attached to the VPC |

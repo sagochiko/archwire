@@ -41,6 +41,7 @@ Each of these diagrams is correct.
 - An auxiliary line from the load balancer to a part right of the VPC, such as `alb ~> s3`, can go round the far side of that part and enter it from the right ([issue #5](https://github.com/sagochiko/archwire/issues/5)).
 - With two zones, each NAT gateway sits to the right of the ECS copy in its zone, so in the first zone the line from the load balancer to ECS crosses the line from ECS to the NAT gateway ([issue #6](https://github.com/sagochiko/archwire/issues/6)).
 - In a left-to-right diagram, S3 fed by CloudFront sits below the VPC, so the line to it is long ([issue #15](https://github.com/sagochiko/archwire/issues/15)).
+- In a left-to-right Japanese diagram with two zones, EC2 above Aurora and no public subnet, the label of a line from EC2 to S3 or Systems Manager through a VPC endpoint is written on one line and crosses the sides of the private subnet, the zone and the VPC. The gap between the VPC and the part right of it is too narrow for the label stacked in three lines.
 
 ## What this version does not draw
 
