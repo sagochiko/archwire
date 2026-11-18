@@ -65,7 +65,7 @@
       "added": false,
       "kind": "default",
       "rule": "global-service-outside-region",
-      "reason": "AWS は Amazon CloudFront と AWS WAF for CloudFront を、リソースがリージョンに属さないグローバルサービスに挙げている。archwire はグローバルサービスを AWS Cloud の枠の中、リージョンの枠の外に描く。",
+      "reason": "AWS は Amazon CloudFront、Amazon Route 53、AWS WAF for CloudFront を、リソースがリージョンに属さないグローバルサービスに挙げている。archwire はグローバルサービスを AWS Cloud の枠の中、リージョンの枠の外に描く。",
       "source": "https://docs.aws.amazon.com/whitepapers/latest/aws-fault-isolation-boundaries/global-services.html"
     },
     {

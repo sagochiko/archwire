@@ -57,7 +57,7 @@
       "added": false,
       "kind": "default",
       "rule": "global-service-outside-region",
-      "reason": "AWS lists Amazon CloudFront and AWS WAF for CloudFront among the global services, whose resources are not Region-specific. archwire draws global services inside the AWS Cloud frame and outside the Region frame.",
+      "reason": "AWS lists Amazon CloudFront, Amazon Route 53 and AWS WAF for CloudFront among the global services, whose resources are not Region-specific. archwire draws global services inside the AWS Cloud frame and outside the Region frame.",
       "source": "https://docs.aws.amazon.com/whitepapers/latest/aws-fault-isolation-boundaries/global-services.html"
     },
     {
