@@ -1,7 +1,7 @@
 {
   "versions": {
     "archwire": "0.1.0",
-    "rules": "2026.11.8"
+    "rules": "2026.11.9"
   },
   "derived": [],
   "holes": [],
@@ -29,6 +29,7 @@
         "guardduty",
         "inspector",
         "internet",
+        "kms",
         "lambda",
         "s3",
         "securityhub",

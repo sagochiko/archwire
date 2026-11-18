@@ -456,6 +456,18 @@ rel = "assoc"
 label = "table_definitions"
 
 [[link]]
+from = "kms"
+to = "s3"
+rel = "assoc"
+label = "encryption_key"
+
+[[link]]
+from = "kms"
+to = "dynamodb"
+rel = "assoc"
+label = "encryption_key"
+
+[[link]]
 from = "cloudtrail"
 to = "securitylake"
 rel = "main"

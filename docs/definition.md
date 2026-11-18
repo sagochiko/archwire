@@ -66,6 +66,7 @@ The other services can be written in either. In a definition with a VPC, a Lambd
 | `ssm` | AWS Systems Manager | | in the Region |
 | `athena` | Amazon Athena | | in the Region |
 | `glue` | AWS Glue Data Catalog. Only as `glue -- athena` | | in the Region |
+| `kms` | AWS KMS key. Only as `kms -- s3` or `kms -- dynamodb` | | in the Region |
 | `securitylake` | Amazon Security Lake | | in the Region |
 | `sqs` | Amazon SQS. Only as the target of `securitylake -> sqs` | | in the Region |
 
@@ -76,6 +77,7 @@ A kind is written once or on every mention of the part. `ecs(fargate)` on one li
 A certificate used with CloudFront lives in US East (N. Virginia), whatever Region the diagram shows, so archwire draws `acm` outside the Region frame with `us-east-1` on the line under its name, and records the reason with its AWS source.
 
 A certificate attached to a load balancer, `acm -- alb`, is drawn inside the Region frame, because certificates in Certificate Manager are Regional resources; its reason is `alb-certificate-in-load-balancer-region`. A web ACL attached to a load balancer, `waf -- alb`, is drawn inside the Region frame too, because a web ACL is in the same Region as the resources it protects; its reason is `regional-web-acl-in-resource-region`. One part is drawn in one place, so one `acm` or `waf` cannot be attached to both CloudFront and a load balancer, see [Which connections are accepted](#which-connections-are-accepted).
+
 
 ### Naming parts
 
@@ -198,6 +200,8 @@ The accepted connections are listed pair by pair in `rules/aws/links.toml`, and 
 | `athena` | `->` | `s3` | Query |
 | `athena` | `->` | `securitylake` | Query |
 | `glue` | `--` | `athena` | Table definitions |
+| `kms` | `--` | `s3` | Encryption key |
+| `kms` | `--` | `dynamodb` | Encryption key |
 | `cloudtrail` | `->` | `securitylake` | Logs |
 | `securityhub` | `->` | `securitylake` | Findings |
 | `securitylake` | `->` | `s3` | Data lake |
@@ -567,7 +571,7 @@ flows:
 {
   "versions": {
     "archwire": "0.1.0",
-    "rules": "2026.11.8"
+    "rules": "2026.11.9"
   },
   "derived": [],
   "holes": [],
@@ -595,6 +599,7 @@ flows:
         "guardduty",
         "inspector",
         "internet",
+        "kms",
         "lambda",
         "s3",
         "securityhub",

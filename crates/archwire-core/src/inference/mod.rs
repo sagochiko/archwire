@@ -729,6 +729,74 @@ mod tests {
         assert_eq!(d.errors[0].code, "UNSUPPORTED");
     }
 
+    // Fails if one of the pairs with a KMS key stops, gets another label, or is drawn without its
+    // label in English or Japanese, with or without a VPC. The key hangs on a part that a main flow
+    // reaches.
+    #[test]
+    fn every_kms_pair_is_accepted_with_its_label() {
+        let r = Rules::builtin();
+        let pairs = [
+            ("s3", "flows:\n  - user -> cloudfront -> s3\n  - kms -- s3\n"),
+            ("dynamodb", "flows:\n  - user -> apigateway(http) -> lambda -> dynamodb\n  - kms -- dynamodb\n"),
+            ("s3", "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - kms -- s3\n"),
+            ("dynamodb", "flows:\n  - user -> apigateway(http) -> lambda -> aurora\n  - lambda -> dynamodb\n  - kms -- dynamodb\nchoose:\n  route.lambda.dynamodb: endpoint\n"),
+        ];
+        assert_eq!(r.link("kms", "s3", Rel::Assoc).map(|l| l.label.as_str()), Some("encryption_key"));
+        assert_eq!(r.link("kms", "dynamodb", Rel::Assoc).map(|l| l.label.as_str()), Some("encryption_key"));
+        let (en, ja) = ("Encryption key", "暗号化キー");
+        assert_eq!((r.text("encryption_key", Lang::En).as_str(), r.text("encryption_key", Lang::Ja).as_str()), (en, ja));
+        for (to, flows) in pairs {
+            let (m, d) = run(flows);
+            assert!(d.errors.is_empty(), "{flows}: {:?}", d.errors);
+            let m = m.unwrap_or_else(|| panic!("{flows}: no model"));
+            let e = m.edges.iter().find(|e| e.from == "kms" && e.to == to).unwrap_or_else(|| panic!("{flows}: no edge kms -- {to}"));
+            assert_eq!((e.rel, e.label.as_str()), (Rel::Assoc, "encryption_key"), "{flows}");
+            for (lang, text) in [("en", en), ("ja", ja)] {
+                let out = crate::compile(&format!("{flows}set:\n  lang: {lang}\n"));
+                assert_eq!(out.diagnostics.exit_code(), 0, "{flows} {lang}: {:?}", out.diagnostics.errors);
+                let drawio = out.drawio.unwrap_or_else(|| panic!("{flows} {lang}: no diagram"));
+                assert!(drawio.contains(&format!("value=\"{text}\"")), "{flows} {lang}: no label {text}");
+            }
+        }
+    }
+
+    // Fails if one key cannot serve both S3 and DynamoDB, or a named key stops.
+    #[test]
+    fn one_kms_key_serves_s3_and_dynamodb() {
+        let defs = [
+            "flows:\n  - user -> apigateway(http) -> lambda -> dynamodb\n  - user -> cloudfront -> s3\n  - kms -- dynamodb\n  - kms -- s3\nset:\n  lang: ja\n",
+            "flows:\n  - user -> cloudfront -> s3\n  - kms.assets -- s3\n",
+        ];
+        for src in defs {
+            let (m, d) = run(src);
+            assert!(d.errors.is_empty(), "{src}: {:?}", d.errors);
+            assert!(m.is_some(), "{src}");
+            assert_eq!(d.exit_code(), 0, "{src}");
+        }
+    }
+
+    // Fails if a KMS key is accepted on a part or in a direction left out on purpose.
+    #[test]
+    fn kms_attaches_only_to_s3_and_dynamodb() {
+        let web = "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n";
+        let api = "flows:\n  - user -> apigateway(http) -> lambda -> dynamodb\n";
+        let edge = "flows:\n  - user -> cloudfront -> s3\n";
+        let defs = [
+            (web, "kms -- aurora"),
+            (web, "kms -- ecs"),
+            (api, "kms -- lambda"),
+            (edge, "s3 -- kms"),
+            (edge, "kms -> s3"),
+            (edge, "kms ~> s3"),
+        ];
+        for (base, line) in defs {
+            let src = format!("{base}  - {line}\n");
+            let (m, d) = run(&src);
+            assert!(m.is_none(), "{src}");
+            assert_eq!(first(&d), ("UNSUPPORTED", Some("flows[1]"), Some(line)), "{src}: {:?}", d.errors);
+        }
+    }
+
     // Fails if one of the pairs with EC2 stops, gets another label, or is drawn without its label
     // in English or Japanese. EC2 starts flows of its own; the load balancer reaches it from the user.
     #[test]
@@ -1596,7 +1664,7 @@ mod tests {
         let (_, d) = run("flows:\n  - user -> cloudfrnt -> alb -> ecs(lambda)\n");
         let services = [
             "acm", "alb", "apigateway", "athena", "aurora", "cloudfront", "cloudtrail", "cloudwatch", "cognito", "config", "dynamodb",
-            "ec2", "ecs", "eventbridge", "glue", "guardduty", "inspector", "internet", "lambda", "s3", "securityhub", "securitylake", "sns",
+            "ec2", "ecs", "eventbridge", "glue", "guardduty", "inspector", "internet", "kms", "lambda", "s3", "securityhub", "securitylake", "sns",
             "sqs", "ssm", "stepfunctions", "user", "waf",
         ];
         assert_eq!(d.errors, [

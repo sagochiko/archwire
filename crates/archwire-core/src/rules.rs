@@ -574,7 +574,7 @@ mod tests {
             r.service_keys(),
             [
                 "acm", "alb", "apigateway", "athena", "aurora", "cloudfront", "cloudtrail", "cloudwatch", "cognito", "config", "dynamodb",
-                "ec2", "ecs", "eventbridge", "glue", "guardduty", "igw", "inspector", "internet", "lambda", "nat", "s3",
+                "ec2", "ecs", "eventbridge", "glue", "guardduty", "igw", "inspector", "internet", "kms", "lambda", "nat", "s3",
                 "securityhub", "securitylake", "sns", "sqs", "ssm", "stepfunctions", "user", "waf",
             ]
         );

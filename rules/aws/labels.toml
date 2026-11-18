@@ -132,6 +132,10 @@ ja = "クエリ"
 en = "Table definitions"
 ja = "テーブル定義"
 
+[encryption_key]
+en = "Encryption key"
+ja = "暗号化キー"
+
 [data_lake]
 en = "Data lake"
 ja = "データレイク"

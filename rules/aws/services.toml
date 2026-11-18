@@ -303,6 +303,15 @@ color = "#8C4FFF"
 label = "AWS Glue Data Catalog"
 
 [[service]]
+key = "kms"
+scope = "regional"
+place = "single"
+icon = "service"
+shape = "key_management_service"
+color = "#DD344C"
+label = "AWS KMS"
+
+[[service]]
 key = "securitylake"
 scope = "regional"
 place = "single"
