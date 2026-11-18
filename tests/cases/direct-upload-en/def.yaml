@@ -1,0 +1,3 @@
+flows:
+  - user -> cognito
+  - user -> s3

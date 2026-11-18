@@ -117,9 +117,9 @@ fn case_list_is_what_the_plan_says() {
         names,
         [
             "api-http-ja", "api-http-ja-down", "api-merged-ja", "api-merged-ja-down", "api-min-en", "api-names-ja", "api-rest-en",
-            "aux-to-side", "detect-hub-ja", "detect-respond-en", "detect-trail-en", "edge-waf-en", "endpoint-3az-en", "endpoint-3az-ja", "endpoint-ja", "endpoint-ja-right", "err-unknown-service",
+            "aux-to-side", "detect-hub-ja", "detect-respond-en", "detect-trail-en", "direct-upload-en", "edge-waf-en", "endpoint-3az-en", "endpoint-3az-ja", "endpoint-ja", "endpoint-ja-right", "err-unknown-service",
             "err-unsupported", "hole-apigateway", "hole-s3", "mix-beside-ja", "mix-logs-ja", "mix-min-en", "mix-nat-ja",
-            "mix-vpc-ja", "mix-vpc-ja-right", "mix-web-ja", "mix-web-ja-right", "web-2az-en", "web-2az-ja", "web-2az-ja-right",
+            "mix-vpc-ja", "mix-vpc-ja-right", "mix-web-ja", "mix-web-ja-right", "security-lake-en", "signin-api-ja", "trail-athena-ja", "web-2az-en", "web-2az-ja", "web-2az-ja-right",
             "web-3az-en", "web-3az-en-right", "web-3az-ja", "web-alb-attach-en", "web-attach-en", "web-detect-ja", "web-named-ja",
             "web-two-albs-ja",
         ]

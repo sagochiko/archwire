@@ -1,0 +1,6 @@
+flows:
+  - cloudtrail -> s3
+  - user -> athena -> s3
+  - glue -- athena
+set:
+  lang: ja

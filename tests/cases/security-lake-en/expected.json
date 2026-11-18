@@ -1,0 +1,84 @@
+{
+  "versions": {
+    "archwire": "0.1.0",
+    "rules": "2026.11.7"
+  },
+  "derived": [
+    {
+      "target": "aws-cloud",
+      "added": true,
+      "kind": "default",
+      "rule": "resources-inside-aws-cloud-frame",
+      "reason": "AWS resources are drawn inside the AWS Cloud frame.",
+      "source": null
+    },
+    {
+      "target": "region",
+      "added": true,
+      "kind": "default",
+      "rule": "resources-inside-region-frame",
+      "reason": "AWS resources that belong to a Region are drawn inside that Region's frame.",
+      "source": null
+    },
+    {
+      "target": "region",
+      "added": true,
+      "kind": "default",
+      "rule": "default-region",
+      "reason": "No Region was given, so ap-northeast-1 (Tokyo) is used.",
+      "source": null
+    },
+    {
+      "target": "cloudtrail",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "Regional services that are not placed in a VPC subnet are drawn inside the Region frame and outside the VPC frame.",
+      "source": null
+    },
+    {
+      "target": "securitylake",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "Regional services that are not placed in a VPC subnet are drawn inside the Region frame and outside the VPC frame.",
+      "source": null
+    },
+    {
+      "target": "securityhub",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "Regional services that are not placed in a VPC subnet are drawn inside the Region frame and outside the VPC frame.",
+      "source": null
+    },
+    {
+      "target": "s3",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "Regional services that are not placed in a VPC subnet are drawn inside the Region frame and outside the VPC frame.",
+      "source": null
+    },
+    {
+      "target": "sqs",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "Regional services that are not placed in a VPC subnet are drawn inside the Region frame and outside the VPC frame.",
+      "source": null
+    },
+    {
+      "target": "athena",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "Regional services that are not placed in a VPC subnet are drawn inside the Region frame and outside the VPC frame.",
+      "source": null
+    }
+  ],
+  "holes": [],
+  "errors": [],
+  "warnings": [],
+  "notes": []
+}

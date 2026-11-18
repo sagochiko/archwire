@@ -1,0 +1,6 @@
+flows:
+  - cloudtrail -> securitylake
+  - securityhub -> securitylake
+  - securitylake -> s3
+  - securitylake -> sqs
+  - user -> athena -> securitylake

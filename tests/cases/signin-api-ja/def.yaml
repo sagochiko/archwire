@@ -1,0 +1,6 @@
+flows:
+  - user -> cloudfront -> apigateway(rest) -> lambda -> dynamodb
+  - user -> cognito
+  - cognito -- apigateway
+set:
+  lang: ja
