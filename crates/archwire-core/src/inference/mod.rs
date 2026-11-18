@@ -1005,6 +1005,52 @@ mod tests {
         }
     }
 
+    // Fails if a main flow that leaves the subnets of the VPC and comes back into them is not
+    // stopped by the checks, at the line that comes back, naming the part it left from, with
+    // two or three zones and in either direction; or if such a definition still reaches the layout.
+    #[test]
+    fn a_main_flow_back_into_the_subnets_stops() {
+        let web = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n";
+        let api = "flows:\n  - user -> apigateway(http) -> lambda.api -> aurora\n";
+        let cases = [
+            (format!("{web}  - ecs -> s3 -> lambda -> aurora\nchoose:\n  route.ecs.s3: endpoint\n"), "s3 -> lambda", "ecs"),
+            (format!("{web}  - ecs -> sqs -> lambda -> aurora\nchoose:\n  route.ecs.sqs: endpoint\n"), "sqs -> lambda", "ecs"),
+            (format!("{web}  - ecs -> sns -> lambda -> aurora\nchoose:\n  route.ecs.sns: nat\n"), "sns -> lambda", "ecs"),
+            (format!("{web}  - ecs -> sns -> sqs -> lambda -> aurora\nchoose:\n  route.ecs.sns: endpoint\n"), "sqs -> lambda", "ecs"),
+            ("flows:\n  - user -> alb -> ec2 -> aurora\n  - ec2 -> sqs -> lambda -> aurora\nchoose:\n  route.ec2.sqs: endpoint\n".to_string(), "sqs -> lambda", "ec2"),
+            (format!("{api}  - lambda.api -> sqs -> lambda.w -> aurora\nchoose:\n  route.[lambda.api].sqs: endpoint\n"), "sqs -> lambda.w", "lambda.api"),
+        ];
+        for (src, got, left) in &cases {
+            let (m, d) = run(src);
+            assert!(m.is_none(), "{src}");
+            assert_eq!(d.errors.len(), 1, "{src}: {:?}", d.errors);
+            assert_eq!(first(&d), ("UNSUPPORTED", Some("flows[1]"), Some(*got)), "{src}: {:?}", d.errors);
+            assert_eq!(
+                d.errors[0].message,
+                format!("`{got}` brings a main flow (->) that left the subnets of the VPC at `{left}` back into them; this version does not draw main flows that leave the subnets and come back"),
+                "{src}"
+            );
+            for set in ["direction: down\n  azs: 2", "direction: right\n  azs: 3"] {
+                let out = crate::compile(&format!("{src}set:\n  {set}\n"));
+                let codes: Vec<_> = out.diagnostics.errors.iter().map(|e| e.code.as_str()).collect();
+                assert_eq!(codes, ["UNSUPPORTED"], "{src} {set}");
+                assert!(out.drawio.is_none(), "{src} {set}");
+            }
+        }
+        // Leaving the subnets without coming back, and coming in from outside, are drawn.
+        for src in [
+            format!("{web}  - ecs -> s3\nchoose:\n  route.ecs.s3: endpoint\n"),
+            format!("{web}  - ecs -> sqs -> lambda.x\nchoose:\n  route.ecs.sqs: endpoint\n"),
+            format!("{web}  - eventbridge -> sqs -> lambda -> aurora\n"),
+        ] {
+            for set in ["direction: down\n  azs: 2", "direction: right\n  azs: 3"] {
+                let out = crate::compile(&format!("{src}set:\n  {set}\n"));
+                assert_eq!(out.diagnostics.exit_code(), 0, "{src} {set}: {:?}", out.diagnostics.errors);
+                assert!(out.drawio.is_some(), "{src} {set}");
+            }
+        }
+    }
+
     // Fails if a loop of main flows that stays inside the subnets of the VPC, which is drawn, is
     // stopped as a loop.
     #[test]

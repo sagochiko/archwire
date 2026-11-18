@@ -882,7 +882,8 @@ fn lines_sharing_no_end_never_turn_at_one_point() {
     }
 }
 
-// Fails if the check on loops of main flows stops a definition that is drawn: a fixed case, a
+// Fails if the check on loops of main flows, or on main flows back into the subnets of the VPC,
+// stops a definition that is drawn: a fixed case, a
 // generated definition with a VPC, mixed with one or without one. Each set is counted, so a set
 // that shrinks by accident fails too. Loops inside the subnets of the VPC, such as `ec2 -> aurora`
 // with `aurora -> ec2`, are among them.
@@ -923,11 +924,11 @@ fn the_loop_check_stops_no_drawn_definition() {
                 looped += 1;
             }
             let (_, d) = crate::inference::infer(&def, &r);
-            if d.errors.iter().any(|e| e.message.contains("closes a loop of main flows")) {
+            if d.errors.iter().any(|e| e.message.contains("closes a loop of main flows") || e.message.contains("back into them")) {
                 stopped.push(src.clone());
             }
         }
-        assert!(stopped.is_empty(), "{name}: {} stopped as loops:\n{}", stopped.len(), stopped.join("\n"));
+        assert!(stopped.is_empty(), "{name}: {} stopped as loops or as flows back into the subnets:\n{}", stopped.len(), stopped.join("\n"));
         counts.push((name, defs.len(), looped));
     }
     // The fixed cases grow with every shape that is added, so their number is not held here.

@@ -136,7 +136,8 @@ pub(super) fn check_links<'a>(
     }
     check_egress(rules, &accepted, errors);
     check_main_flows(def, rules, parts, &accepted, errors);
-    check_loops(rules, &accepted, errors);
+    let closing = check_loops(rules, &accepted, errors);
+    check_reentry(rules, &accepted, &closing, errors);
     check_limits(&accepted, errors);
     check_places(rules, &accepted, errors);
     accepted
@@ -311,12 +312,56 @@ pub(super) fn main_flow_loops<'a>(rules: &Rules, accepted: &[(&'a Link, &LinkRul
 /// A loop of main flows through a part outside the subnets of the VPC stops at the line that
 /// closes it: the parts of the diagram outside the VPC are laid out along the flows, so a line back
 /// to a part it left has nowhere to go. A loop that stays inside the subnets is drawn.
-fn check_loops(rules: &Rules, accepted: &[(&Link, &LinkRule)], errors: &mut Vec<Problem>) {
+/// Returns the lines it stopped.
+fn check_loops<'a>(rules: &Rules, accepted: &[(&'a Link, &LinkRule)], errors: &mut Vec<Problem>) -> Vec<&'a Link> {
+    let mut closing = Vec::new();
     for lp in main_flow_loops(rules, accepted).into_iter().filter(|lp| !lp.in_subnets) {
         let got = written(lp.line);
         let through = lp.through.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ");
         let message = format!("`{got}` closes a loop of main flows (->) through {through}; this version does not draw main flows that come back to a part");
         errors.push(problem("UNSUPPORTED", &lp.line.at, &got, Vec::new(), message));
+        closing.push(lp.line);
+    }
+    closing
+}
+
+/// A main flow that leaves the subnets of the VPC and comes back into them stops at the line that
+/// comes back: a main flow from a part outside the subnets to a part in them, when that outside
+/// part is reached from a part in the subnets along main flows through parts outside them. The
+/// parts outside the subnets are laid out apart from the zones, after the parts that flow into
+/// them, so a line from them back into a zone has nowhere to go. The lines are read in the order
+/// written, and the part named is the first part in the subnets found going back from the line,
+/// each step taken in the order written. A line that closes a loop is left to the check on loops.
+fn check_reentry(rules: &Rules, accepted: &[(&Link, &LinkRule)], closing: &[&Link], errors: &mut Vec<Problem>) {
+    let main: Vec<&Link> = accepted.iter().filter(|(l, _)| l.rel == Rel::Main).map(|(l, _)| *l).collect();
+    let in_subnet = |r: &Ref| matches!(area(rules, accepted, r), Some(Area::Subnet(_)));
+    for l in main.iter().filter(|l| !in_subnet(&l.from) && in_subnet(&l.to)) {
+        if closing.iter().any(|c| std::ptr::eq(*c, *l)) {
+            continue;
+        }
+        // Back from the line's `from` part through parts outside the subnets, to a part in them.
+        let mut outside: Vec<&str> = vec![&l.from.name];
+        let mut left: Option<&str> = None;
+        let mut k = 0;
+        while k < outside.len() && left.is_none() {
+            let here = outside[k];
+            for m in main.iter().filter(|m| m.to.name == here) {
+                if in_subnet(&m.from) {
+                    left = Some(&m.from.name);
+                    break;
+                }
+                if !outside.contains(&m.from.name.as_str()) {
+                    outside.push(&m.from.name);
+                }
+            }
+            k += 1;
+        }
+        let Some(left) = left else { continue };
+        let got = written(l);
+        let message = format!(
+            "`{got}` brings a main flow (->) that left the subnets of the VPC at `{left}` back into them; this version does not draw main flows that leave the subnets and come back"
+        );
+        errors.push(problem("UNSUPPORTED", &l.at, &got, Vec::new(), message));
     }
 }
 
