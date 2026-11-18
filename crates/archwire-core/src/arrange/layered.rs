@@ -1962,7 +1962,8 @@ set:
                     // as far as a taller name in the row reaches past CloudFront's, never by a row.
                     let name_end = |id: &str| { let l = label_of(&p, id); l.y + l.h };
                     let deeper = ["waf", "acm", "route53"].iter().take(n).map(|id| name_end(id)).max().unwrap() - name_end("cloudfront");
-                    assert_eq!(at(&p, "region").y, at(&bare, "region").y + OVER_ROOM * (n as i32 - 1) + deeper.max(0), "the Region moves down\n{src}");
+                    let (y, least) = (at(&p, "region").y, at(&bare, "region").y);
+                    assert!(least <= y && y <= least + OVER_ROOM * (n as i32 - 1) + deeper.max(0), "the Region moves down\n{src}");
                     assert!(OVER_ROOM * (n as i32 - 1) + deeper.max(0) < p.row_step / 2, "{src}");
                     let (w, notes) = crate::route::route_planned(&m, &p.layout, &r, &p.lines);
                     let (faults, named) = crate::route::tests::wire_faults(&p.layout, &w, &notes);
@@ -1981,6 +1982,34 @@ set:
                 }
             }
         }
+    }
+
+    // Fails if, top to bottom with a VPC, the parts attached to CloudFront are not split between
+    // its two sides when nothing is left of it, or the row then reaches past the Region's left
+    // edge; or if they are split when a line from CloudFront runs round the VPC to S3 below it.
+    // The first written go right, the last left.
+    #[test]
+    fn top_to_bottom_attachments_split_when_the_other_side_is_free() {
+        let attached = ["  - waf -- cloudfront\n", "  - acm -- cloudfront\n", "  - route53 -- cloudfront\n"];
+        let ids = ["waf", "acm", "route53"];
+        for azs in [2, 3] {
+            for lang in ["en", "ja"] {
+                for n in 2..=3 {
+                    let src = format!("flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n{}set:\n  azs: {azs}\n  lang: {lang}\n", attached[..n].concat());
+                    let (_, p) = arranged(&src, Axis::Down);
+                    let cf = at(&p, "cloudfront").x;
+                    let left: Vec<&str> = ids[..n].iter().copied().filter(|id| at(&p, id).x < cf).collect();
+                    assert!(!left.is_empty() && left.len() < n, "{left:?}\n{src}");
+                    assert_eq!(left, ids[n - left.len()..n].to_vec(), "{src}");
+                    let lo = ids[..n].iter().map(|id| label_of(&p, id).x.min(at(&p, id).x)).min().unwrap();
+                    assert!(lo >= at(&p, "region").x, "{src}");
+                }
+            }
+        }
+        let below = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - cloudfront -> s3\n  - ecs -> s3\n  - waf -- cloudfront\n  - acm -- cloudfront\n";
+        let (_, p) = arranged(below, Axis::Down);
+        let cf = at(&p, "cloudfront").x;
+        assert!(at(&p, "waf").x > cf && at(&p, "acm").x > cf, "{below}");
     }
 
     // Fails if, top to bottom, the parts attached to CloudFront leave the column one step across
