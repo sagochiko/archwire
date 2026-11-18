@@ -599,6 +599,54 @@ mod tests {
     }
 
     // Fails if an alarm reached only by a side line cannot start the notification.
+    // Fails if one of the pairs of the detection flows stops, gets another label, or is drawn
+    // without its label in English or Japanese. A pair from Step Functions, which starts no flow,
+    // is reached through EventBridge.
+    #[test]
+    fn every_detection_pair_is_accepted_with_its_label() {
+        let r = Rules::builtin();
+        let pairs = [
+            ("guardduty", "eventbridge", "findings", "Findings", "検出結果"),
+            ("guardduty", "securityhub", "findings", "Findings", "検出結果"),
+            ("inspector", "eventbridge", "findings", "Findings", "検出結果"),
+            ("inspector", "securityhub", "findings", "Findings", "検出結果"),
+            ("securityhub", "eventbridge", "findings", "Findings", "検出結果"),
+            ("config", "eventbridge", "compliance_changes", "Compliance changes", "準拠状態の変化"),
+            ("config", "securityhub", "findings", "Findings", "検出結果"),
+            ("config", "sns", "notifications", "Notifications", "通知"),
+            ("config", "ssm", "remediation", "Remediation", "自動修復"),
+            ("cloudtrail", "s3", "log_files", "Log files", "ログファイル"),
+            ("cloudtrail", "cloudwatch", "logs", "Logs", "ログ"),
+            ("cloudtrail", "eventbridge", "api_calls", "API calls", "API 呼び出し"),
+            ("cloudwatch", "sns", "alarms", "Alarms", "アラーム"),
+            ("eventbridge", "sns", "by_rule", "Rule", "ルール"),
+            ("eventbridge", "stepfunctions", "by_rule", "Rule", "ルール"),
+            ("eventbridge", "ssm", "by_rule", "Rule", "ルール"),
+            ("stepfunctions", "sns", "publish", "Publish", "発行"),
+            ("stepfunctions", "lambda", "invoke", "Invoke", "呼び出し"),
+            ("stepfunctions", "ssm", "call", "Call", "呼び出し"),
+        ];
+        assert_eq!(pairs.len(), 19);
+        for (from, to, key, en, ja) in pairs {
+            let flows = if from == "stepfunctions" {
+                format!("flows:\n  - eventbridge -> stepfunctions\n  - stepfunctions -> {to}\n")
+            } else {
+                format!("flows:\n  - {from} -> {to}\n")
+            };
+            let (m, d) = run(&flows);
+            assert!(d.errors.is_empty(), "{from} -> {to}: {:?}", d.errors);
+            let m = m.unwrap_or_else(|| panic!("{from} -> {to}: no model"));
+            assert_eq!(label(&m, from, to), key, "{from} -> {to}");
+            assert_eq!((r.text(key, Lang::En).as_str(), r.text(key, Lang::Ja).as_str()), (en, ja), "{from} -> {to}");
+            for (lang, text) in [("en", en), ("ja", ja)] {
+                let out = crate::compile(&format!("{flows}set:\n  lang: {lang}\n"));
+                assert_eq!(out.diagnostics.exit_code(), 0, "{from} -> {to} {lang}: {:?}", out.diagnostics.errors);
+                let drawio = out.drawio.unwrap_or_else(|| panic!("{from} -> {to} {lang}: no diagram"));
+                assert!(drawio.contains(&format!("value=\"{text}\"")), "{from} -> {to} {lang}: no label {text}");
+            }
+        }
+    }
+
     #[test]
     fn an_alarm_reached_by_a_side_line_notifies() {
         let (m, d) = run("flows:\n  - user -> alb -> ecs\n  - ecs ~> cloudwatch\n  - cloudwatch -> sns\n");
