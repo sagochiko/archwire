@@ -930,8 +930,8 @@ fn the_loop_check_stops_no_drawn_definition() {
         assert!(stopped.is_empty(), "{name}: {} stopped as loops:\n{}", stopped.len(), stopped.join("\n"));
         counts.push((name, defs.len(), looped));
     }
-    assert_eq!(
-        counts,
-        [("fixed cases", 55, 0), ("with a VPC", 1008, 0), ("mixed", 865, 1), ("without a VPC", 1212, 0), ("loops inside the subnets", 4, 4)]
-    );
+    // The fixed cases grow with every shape that is added, so their number is not held here.
+    let (name, fixed, looped) = counts.remove(0);
+    assert!(name == "fixed cases" && fixed > 0 && looped == 0, "{name}: {fixed} definitions, {looped} with a loop inside the subnets");
+    assert_eq!(counts, [("with a VPC", 1008, 0), ("mixed", 865, 1), ("without a VPC", 1212, 0), ("loops inside the subnets", 4, 4)]);
 }
