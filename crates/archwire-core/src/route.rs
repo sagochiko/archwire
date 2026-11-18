@@ -1607,7 +1607,9 @@ pub(crate) mod tests {
 
     // Fails if, of two lines leaving one side of the users or a global part and turning the same
     // way, the inner line turns nearer the part than the outer one and is crossed by it, on any
-    // side and either way.
+    // side and either way. The turns are planned, so laying the outer line first does not help:
+    // this holds the turns shared out again (`nest_turns`) on its own, where the tests of real
+    // layouts in `arrange::layered` look only at the finished lines.
     #[test]
     fn of_two_lines_leaving_a_part_outside_the_region_the_outer_turns_nearer_it() {
         for area in [Area::Outside, Area::Cloud] {

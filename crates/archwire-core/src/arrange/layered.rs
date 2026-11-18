@@ -2574,6 +2574,12 @@ set:
     /// Asserts that no two lines leaving `from` cross (with `turning`, no two that turn) and that
     /// no note names a line, top to bottom and left to right, after looking at both.
     fn assert_no_crossing_from(src: &str, from: &str, lines: usize, turning: bool) {
+        let faults = crossing_faults_from(src, from, lines, turning);
+        assert!(faults.is_empty(), "{faults:#?}");
+    }
+
+    /// The crossings and notes `assert_no_crossing_from` looks for, top to bottom and left to right.
+    fn crossing_faults_from(src: &str, from: &str, lines: usize, turning: bool) -> Vec<String> {
         let mut faults = Vec::new();
         for axis in [Axis::Down, Axis::Right] {
             let (found, named, n) = crossings_from(src, axis, from, turning);
@@ -2581,12 +2587,13 @@ set:
             faults.extend(found);
             faults.extend(named.into_iter().map(|n| format!("{axis:?}: {n}")));
         }
-        assert!(faults.is_empty(), "{faults:#?}");
+        faults
     }
 
     // Fails if two lines leaving one side of the users cross: down the page, the line to S3
     // uploads turned right first, above the Region, and the line to Athena, leaving right of it,
-    // came down through it to turn lower.
+    // came down through it to turn lower. Laying the outer lines first is enough here, so this
+    // holds whether or not the turns are shared out again.
     #[test]
     fn lines_leaving_one_side_of_the_users_do_not_cross() {
         assert_no_crossing_from(USERS_TO_FOUR_PARTS, "user", 4, false);
@@ -2597,18 +2604,25 @@ set:
     // the page, the line to Cognito turned above the line to S3 uploads leaving right of it, and
     // in English the line to S3 uploads turned above the line to Athena. Left to right, the lines
     // to the web stack's neighbours crossed when laid in the order they are planned.
+    // These tests look only at the finished lines. Top to bottom, all three definitions need the
+    // turns shared out again (`nest_turns`): laying the outer lines first leaves the crossings
+    // above. Left to right, laying the outer lines first is enough, so those diagrams hold
+    // whether or not the turns are shared out again. Sharing out alone is held, on every side and
+    // both ways, by `of_two_lines_leaving_a_part_outside_the_region_the_outer_turns_nearer_it` in
+    // the router's tests.
     #[test]
     fn lines_from_the_users_beside_a_web_stack_or_an_api_do_not_cross() {
         let english = USERS_TO_THE_WEB_AND_THREE_PARTS.replace("lang: ja", "lang: en");
-        for (src, lines) in [(USERS_TO_THE_WEB_AND_THREE_PARTS, 4), (english.as_str(), 4), (USERS_TO_THE_API_AND_FOUR_PARTS, 5)] {
-            assert_no_crossing_from(src, "user", lines, false);
-        }
+        let defs = [("web, ja", USERS_TO_THE_WEB_AND_THREE_PARTS, 4), ("web, en", english.as_str(), 4), ("api", USERS_TO_THE_API_AND_FOUR_PARTS, 5)];
+        let faults: Vec<String> = defs.iter().flat_map(|&(name, src, lines)| crossing_faults_from(src, "user", lines, false).into_iter().map(move |f| format!("{name}: {f}"))).collect();
+        assert!(faults.is_empty(), "{faults:#?}");
     }
 
     // Fails if two lines leaving CloudFront that both turn cross: the lines to the buckets and
     // the API turned in the order they were laid. The line straight on to the web stack is left
     // out: it leaves the middle of the side, and lines leaving left of it to parts on its right
-    // cross it whatever their turns.
+    // cross it whatever their turns. Laying the outer lines first leaves a crossing in both
+    // directions, so this holds the turns shared out again for a real layout.
     #[test]
     fn turning_lines_from_cloudfront_do_not_cross() {
         assert_no_crossing_from(CLOUDFRONT_TO_FOUR_PARTS, "cloudfront", 4, true);
