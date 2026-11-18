@@ -101,7 +101,7 @@ pub(super) struct Piece<'a> {
 
 /// The Region's parts on a main flow and the main lines between them.
 pub(super) struct Flow {
-    /// Indexes into `Model.nodes`, in model order.
+    /// Indexes into `Model.nodes`, rank by rank, each rank in the order its parts are placed across.
     pub(super) parts: Vec<usize>,
     /// The rank of each part, from 1.
     pub(super) col: Vec<usize>,
@@ -897,6 +897,58 @@ fn flow_of(model: &Model, piece: Option<&Piece>, axis: Axis, lone_right: i32, ro
             col[i] = preds[i].iter().map(|&(p, _)| col[p] + 1).max().unwrap_or(1);
         }
     }
+    // A rank after the first is put in the order of its parts' predecessors in the rank before,
+    // by the middle of the first and the last of them, in model order between parts level so,
+    // with the VPC first; but only when that leaves fewer pairs of lines from the rank before
+    // that cross, and no part of the rank is reached by a main line from outside these parts,
+    // whose line comes in from where the order does not see. In model order, a part could come
+    // before the parts its predecessor's neighbours before it lead to, and its line crossed theirs.
+    let from_outside: Vec<bool> = (0..n)
+        .map(|k| {
+            model.edges.iter().any(|e| {
+                e.rel == Rel::Main && index(&e.to).and_then(local) == Some(k) && index(&e.from).and_then(local).is_none()
+            })
+        })
+        .collect();
+    let last = col.iter().copied().max().unwrap_or(0);
+    let mut order: Vec<usize> = Vec::with_capacity(n);
+    let mut pos = vec![0usize; n];
+    for c in 1..=last {
+        let mut rank: Vec<usize> = (0..n).filter(|&i| col[i] == c).collect();
+        if c > 1 && !rank.iter().any(|&i| from_outside[i]) {
+            let before: Vec<Vec<usize>> = (0..n).map(|i| preds[i].iter().filter(|&&(p, _)| col[p] == c - 1).map(|&(p, _)| pos[p]).collect()).collect();
+            let mut sorted = rank.clone();
+            sorted.sort_by_key(|&i| {
+                let (lo, hi) = (before[i].iter().min().copied().unwrap_or(0), before[i].iter().max().copied().unwrap_or(0));
+                (parts[i] != vpc_id, lo + hi)
+            });
+            // Pairs of lines from the rank before, sharing no end, whose ends come in opposite orders.
+            let crossings = |r: &[usize]| {
+                let ls: Vec<(usize, usize)> = r.iter().enumerate().flat_map(|(k, &i)| before[i].iter().map(move |&p| (p, k))).collect();
+                let mut count = 0;
+                for (a, x) in ls.iter().enumerate() {
+                    count += ls[a + 1..].iter().filter(|y| x.0 != y.0 && x.1 != y.1 && (x.0 < y.0) != (x.1 < y.1)).count();
+                }
+                count
+            };
+            if crossings(&sorted) < crossings(&rank) {
+                rank = sorted;
+            }
+        }
+        for (k, &i) in rank.iter().enumerate() {
+            pos[i] = k;
+        }
+        order.extend(rank);
+    }
+    let mut new_of = vec![0usize; n];
+    for (k, &i) in order.iter().enumerate() {
+        new_of[i] = k;
+    }
+    let relink = |ls: &Vec<Link>| -> Vec<Link> { ls.iter().map(|&(p, d)| (new_of[p], d)).collect() };
+    let parts: Vec<usize> = order.iter().map(|&i| parts[i]).collect();
+    let col: Vec<usize> = order.iter().map(|&i| col[i]).collect();
+    let preds: Vec<Vec<Link>> = order.iter().map(|&i| relink(&preds[i])).collect();
+    let succs: Vec<Vec<Link>> = order.iter().map(|&i| relink(&succs[i])).collect();
     // A part after the VPC across in its rank whose main lines go on along the main axis would run
     // them through the parts right of the VPC if it shared their place across, so the VPC's size
     // across then takes them in. Across the main axis running right, that size is the VPC's height
@@ -2208,7 +2260,6 @@ set:
     // line to it and Config's line to Systems Manager turned at one point.
     #[test]
     fn flows_from_two_origins_keep_their_lines_apart() {
-        let r = Rules::builtin();
         for axis in [Axis::Down, Axis::Right] {
             let (m, p) = arranged(TWO_ORIGINS, axis);
             let across = |id: &str| {
@@ -2226,30 +2277,61 @@ set:
                     }
                 }
             }
-            let (wires, _) = route_planned(&m, &p.layout, &r, &p.lines);
-            let path = |w: &Wire| {
-                let mut v = vec![port_point(p.layout.rect(&w.from), w.exit)];
-                v.extend(w.points.iter().copied());
-                v.push(port_point(p.layout.rect(&w.to), w.entry));
-                v
-            };
-            let main: Vec<&Wire> = wires.iter().filter(|w| w.style == crate::route::WireStyle::Main).collect();
-            for (k, a) in main.iter().enumerate() {
-                for b in &main[k + 1..] {
-                    if [&a.from, &a.to].iter().any(|x| **x == b.from || **x == b.to) {
-                        continue;
-                    }
-                    let (pa, pb) = (path(a), path(b));
-                    for s in pa.windows(2) {
-                        for t in pb.windows(2) {
-                            let box_of = |q: &[(i32, i32)]| (q[0].0.min(q[1].0), q[0].0.max(q[1].0), q[0].1.min(q[1].1), q[0].1.max(q[1].1));
-                            let ((sx0, sx1, sy0, sy1), (tx0, tx1, ty0, ty1)) = (box_of(s), box_of(t));
-                            let meet = sx0 <= tx1 && tx0 <= sx1 && sy0 <= ty1 && ty0 <= sy1;
-                            assert!(!meet, "{axis:?}: {} and {} meet: {s:?} {t:?}", a.id, b.id);
-                        }
+            assert_unshared_main_lines_apart(&m, &p, axis);
+        }
+    }
+
+    /// No two drawn main lines that share no end meet or cross anywhere.
+    fn assert_unshared_main_lines_apart(m: &Model, p: &Placement, axis: Axis) {
+        let (wires, _) = route_planned(m, &p.layout, &Rules::builtin(), &p.lines);
+        let path = |w: &Wire| {
+            let mut v = vec![port_point(p.layout.rect(&w.from), w.exit)];
+            v.extend(w.points.iter().copied());
+            v.push(port_point(p.layout.rect(&w.to), w.entry));
+            v
+        };
+        let main: Vec<&Wire> = wires.iter().filter(|w| w.style == crate::route::WireStyle::Main).collect();
+        for (k, a) in main.iter().enumerate() {
+            for b in &main[k + 1..] {
+                if [&a.from, &a.to].iter().any(|x| **x == b.from || **x == b.to) {
+                    continue;
+                }
+                let (pa, pb) = (path(a), path(b));
+                for s in pa.windows(2) {
+                    for t in pb.windows(2) {
+                        let box_of = |q: &[(i32, i32)]| (q[0].0.min(q[1].0), q[0].0.max(q[1].0), q[0].1.min(q[1].1), q[0].1.max(q[1].1));
+                        let ((sx0, sx1, sy0, sy1), (tx0, tx1, ty0, ty1)) = (box_of(s), box_of(t));
+                        let meet = sx0 <= tx1 && tx0 <= sx1 && sy0 <= ty1 && ty0 <= sy1;
+                        assert!(!meet, "{axis:?}: {} and {} meet: {s:?} {t:?}", a.id, b.id);
                     }
                 }
             }
+        }
+    }
+
+    const PARENTS_IN_ANOTHER_ORDER: &str = "flows:
+  - eventbridge.a -> stepfunctions.a1
+  - eventbridge.a -> stepfunctions.a2
+  - eventbridge.b -> stepfunctions.b
+  - stepfunctions.b -> sns.z
+  - stepfunctions.a1 -> sns.x
+  - stepfunctions.a2 -> sns.y
+";
+
+    // Fails if the parts of a rank keep the order the definition wrote them in when their
+    // predecessors come in another order: here sns.z came first, under stepfunctions.a1, and the
+    // lines from a1 and a2 crossed the line from b.
+    #[test]
+    fn parts_in_a_rank_follow_the_order_of_their_predecessors() {
+        for axis in [Axis::Down, Axis::Right] {
+            let (m, p) = arranged(PARENTS_IN_ANOTHER_ORDER, axis);
+            let across = |id: &str| {
+                let a = at(&p, id);
+                uv(axis, (a.x, a.y)).1
+            };
+            let order = ["sns.x", "sns.y", "sns.z"].map(across);
+            assert!(order[0] < order[1] && order[1] < order[2], "{axis:?}: sns.x, sns.y, sns.z across at {order:?}");
+            assert_unshared_main_lines_apart(&m, &p, axis);
         }
     }
 
