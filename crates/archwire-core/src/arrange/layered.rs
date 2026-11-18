@@ -913,15 +913,58 @@ fn flow_of(model: &Model, piece: Option<&Piece>, axis: Axis, lone_right: i32, ro
 pub(super) fn rows(f: &Flow, r: i32, sweep_back: bool) -> Vec<i32> {
     let last = f.col.iter().copied().max().unwrap_or(0);
     let in_rank = |c: usize| -> Vec<usize> { (0..f.parts.len()).filter(|&i| f.col[i] == c).collect() };
-    let mut v = vec![0; f.parts.len()];
-    // From the first rank: its parts one after another, every other part level with the middle
-    // of its predecessors, and at least a step past the part before it.
-    for c in 1..=last {
-        let mut before: Option<usize> = None;
-        for i in in_rank(c) {
-            let at = after(before.map(|b| v[b]), mid(f.preds[i].iter().map(|&(p, d)| v[p] + d)), before.map_or(r, |b| f.step(b, r)));
-            v[i] = at;
-            before = Some(i);
+    let n = f.parts.len();
+    let mut v = vec![0; n];
+    // The least cross coordinate of each part, raised below when a part lies within the targets
+    // of a part before it in its rank.
+    let mut least: Vec<Option<i32>> = vec![None; n];
+    // A part's own targets: those whose only predecessor it is.
+    let own = |i: usize| -> Vec<usize> { f.succs[i].iter().map(|s| s.0).filter(|&s| f.preds[s].iter().all(|&(p, _)| p == i)).collect() };
+    // Each round raises one least coordinate or ends. A raised part's targets come after the
+    // targets it is moved past, so moving it never moves those again; the bound only guards
+    // against a mistake.
+    for _ in 0..=n * n {
+        // From the first rank: its parts one after another, every other part level with the middle
+        // of its predecessors, and at least a step past the part before it.
+        for c in 1..=last {
+            let mut before: Option<usize> = None;
+            for i in in_rank(c) {
+                let at = after(before.map(|b| v[b]), mid(f.preds[i].iter().map(|&(p, d)| v[p] + d)), before.map_or(r, |b| f.step(b, r)));
+                v[i] = least[i].map_or(at, |l| at.max(l));
+                before = Some(i);
+            }
+        }
+        // A part whose targets are all its own, lying level with or before the furthest own target
+        // of a part before it in its rank, would have its lines meet that part's where they turn:
+        // it moves a step past that target, so each part's own targets come before the next
+        // part's. A part sharing a target with parts before it is left where it is: its line
+        // crosses theirs wherever it lies, and moving it only spreads the drawing.
+        let mut raised = false;
+        'ranks: for c in 1..=last {
+            let rank = in_rank(c);
+            for (k, &j) in rank.iter().enumerate() {
+                if f.succs[j].is_empty() || own(j).len() < f.succs[j].len() {
+                    continue;
+                }
+                // Only when every target involved is in the next rank and the part's targets come
+                // after the others there: otherwise moving the part moves its targets past the
+                // others' and the others' past them again, without end.
+                let earlier: Vec<usize> = rank[..k].iter().flat_map(|&i| own(i)).collect();
+                let next = |t: &usize| f.col[*t] == c + 1;
+                let first_own = f.succs[j].iter().map(|s| s.0).min();
+                if !earlier.iter().all(next) || !f.succs[j].iter().all(|s| next(&s.0)) || earlier.iter().any(|&t| Some(t) > first_own) {
+                    continue;
+                }
+                let far = earlier.iter().map(|&t| v[t] + f.step(t, r)).max();
+                if let Some(far) = far.filter(|&far| v[j] < far) {
+                    least[j] = Some(far);
+                    raised = true;
+                    break 'ranks;
+                }
+            }
+        }
+        if !raised {
+            break;
         }
     }
     // From the last rank back: a part with two or more targets moves toward their middle, as far
@@ -942,6 +985,9 @@ pub(super) fn rows(f: &Flow, r: i32, sweep_back: bool) -> Vec<i32> {
                 }
                 if k + 1 < rank.len() {
                     at = at.min(v[rank[k + 1]] - f.step(i, r));
+                }
+                if let Some(l) = least[i] {
+                    at = at.max(l);
                 }
                 v[i] = at;
             }
@@ -2117,6 +2163,88 @@ set:
             path.extend(w.points.iter().copied());
             path.push(port_point(p.layout.rect(&w.to), w.entry));
             assert!(!path.windows(2).any(|s| crate::path::hits(s[0], s[1], vpc)), "{axis:?} drawn {path:?} runs through the VPC {vpc:?}");
+        }
+    }
+
+    const TWO_ORIGINS: &str = "flows:
+  - cloudtrail -> cloudwatch -> sns
+  - cloudtrail -> s3
+  - config -> ssm
+set:
+  lang: en
+";
+
+    // Fails if, for two flows that start side by side and share no part, a part lies level across
+    // with a part of the rank before that is not one of its predecessors while that part has
+    // targets of its own, or two drawn main lines that share no end meet or cross anywhere, along
+    // either axis. Laid out one rank at a time, S3 (CloudTrail's) was put under Config, and the
+    // line to it and Config's line to Systems Manager turned at one point.
+    #[test]
+    fn flows_from_two_origins_keep_their_lines_apart() {
+        let r = Rules::builtin();
+        for axis in [Axis::Down, Axis::Right] {
+            let (m, p) = arranged(TWO_ORIGINS, axis);
+            let across = |id: &str| {
+                let a = at(&p, id);
+                uv(axis, (a.x + ICON / 2, a.y + ICON / 2))
+            };
+            let mains: Vec<&crate::model::Edge> = m.edges.iter().filter(|e| e.rel == Rel::Main).collect();
+            for e in &mains {
+                let (bu, bv) = across(&e.to);
+                for other in &mains {
+                    let (ou, ov) = across(&other.from);
+                    let feeds = mains.iter().any(|x| x.from == other.from && x.to == e.to);
+                    if !feeds && ov == bv && ou < bu && ou > across(&e.from).0 - 1 {
+                        panic!("{axis:?}: {} lies level with {}, which does not feed it", e.to, other.from);
+                    }
+                }
+            }
+            let (wires, _) = route_planned(&m, &p.layout, &r, &p.lines);
+            let path = |w: &Wire| {
+                let mut v = vec![port_point(p.layout.rect(&w.from), w.exit)];
+                v.extend(w.points.iter().copied());
+                v.push(port_point(p.layout.rect(&w.to), w.entry));
+                v
+            };
+            let main: Vec<&Wire> = wires.iter().filter(|w| w.style == crate::route::WireStyle::Main).collect();
+            for (k, a) in main.iter().enumerate() {
+                for b in &main[k + 1..] {
+                    if [&a.from, &a.to].iter().any(|x| **x == b.from || **x == b.to) {
+                        continue;
+                    }
+                    let (pa, pb) = (path(a), path(b));
+                    for s in pa.windows(2) {
+                        for t in pb.windows(2) {
+                            let box_of = |q: &[(i32, i32)]| (q[0].0.min(q[1].0), q[0].0.max(q[1].0), q[0].1.min(q[1].1), q[0].1.max(q[1].1));
+                            let ((sx0, sx1, sy0, sy1), (tx0, tx1, ty0, ty1)) = (box_of(s), box_of(t));
+                            let meet = sx0 <= tx1 && tx0 <= sx1 && sy0 <= ty1 && ty0 <= sy1;
+                            assert!(!meet, "{axis:?}: {} and {} meet: {s:?} {t:?}", a.id, b.id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fails if a part whose target comes before another part's own target in the next rank is
+    // moved past it: each move then moves the other target past its own again, and the
+    // drawing grew to tens of thousands of pixels.
+    #[test]
+    fn a_part_whose_target_comes_first_is_not_moved_past_the_others() {
+        let src = "flows:
+  - user -> apigateway(http) -> lambda.f1
+  - apigateway -> lambda.f2
+  - lambda.f1 -> dynamodb.t1
+  - lambda.f2 -> dynamodb.t2
+  - user -> cloudfront -> s3.web
+  - lambda.f1 -> s3.web
+set:
+  lang: ja
+";
+        for axis in [Axis::Down, Axis::Right] {
+            let (_, p) = arranged(src, axis);
+            let region = at(&p, "region");
+            assert!(region.w < 2000 && region.h < 2000, "{axis:?}: {region:?}");
         }
     }
 }
