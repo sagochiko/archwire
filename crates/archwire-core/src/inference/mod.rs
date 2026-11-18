@@ -1066,17 +1066,47 @@ mod tests {
         }
     }
 
-    // Fails if a service in the VPC other than Lambda is accepted to send to a queue or a topic.
+    // Fails if ECS or EC2 in a private subnet cannot send to a queue or a topic, if such a line
+    // leaves no route to choose, if it is drawn without its label once the route is chosen, or if
+    // a part that sends nothing of its own (the database, the load balancer) is accepted to send.
     #[test]
-    fn only_lambda_in_the_vpc_sends_to_queues_and_topics() {
+    fn ecs_and_ec2_send_to_queues_and_topics_through_a_route_to_choose() {
+        let r = Rules::builtin();
         let web = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n";
         let ec2 = "flows:\n  - user -> alb -> ec2 -> aurora\n";
-        for (base, line, from, to) in [(web, "ecs -> sqs", "ecs", "sqs"), (web, "ecs -> sns", "ecs", "sns"), (ec2, "ec2 -> sqs", "ec2", "sqs"), (ec2, "ec2 -> sns", "ec2", "sns")] {
-            assert!(Rules::builtin().link(from, to, Main).is_none(), "links.toml accepts `{line}`");
+        let cases = [
+            (web, "ecs", "sqs", "send_messages"),
+            (web, "ecs", "sns", "publish"),
+            (ec2, "ec2", "sqs", "send_messages"),
+            (ec2, "ec2", "sns", "publish"),
+        ];
+        for (base, from, to, label) in cases {
+            assert_eq!(r.link(from, to, Main).map(|l| l.label.as_str()), Some(label), "{from} -> {to}");
+            let hole = format!("route.{from}.{to}");
+            let src = format!("{base}  - {from} -> {to}\n");
+            let (_, d) = run(&src);
+            assert!(d.errors.is_empty(), "{src}: {:?}", d.errors);
+            assert_eq!(hole_ids(&d), [hole.as_str()], "{src}");
+            assert_eq!(d.exit_code(), 2, "{src}");
+            for answer in ["endpoint", "nat"] {
+                let src = format!("{src}choose:\n  {hole}: {answer}\n");
+                let (m, d) = passes(&src);
+                assert!(d.holes.is_empty(), "{src}: {:?}", hole_ids(&d));
+                assert_eq!(d.exit_code(), 0, "{src}");
+                for zone in ["1a", "1c"] {
+                    let part = format!("{from}-{zone}");
+                    assert!(m.edges.iter().any(|e| e.from == part && e.to == to && e.label == label), "{src}: no {part} -> {to}");
+                }
+            }
+        }
+        let stopped = [(web, "aurora -> sqs", "aurora", "sqs"), (web, "alb -> sns", "alb", "sns"), (web, "sqs -> ecs", "sqs", "ecs"), (ec2, "sns -> ec2", "sns", "ec2")];
+        for (base, line, from, to) in stopped {
+            assert!(r.link(from, to, Main).is_none(), "links.toml accepts `{line}`");
             let src = format!("{base}  - {line}\n");
             let (m, d) = run(&src);
             assert!(m.is_none(), "{src}");
             assert_eq!(first(&d), ("UNSUPPORTED", Some("flows[1]"), Some(line)), "{src}: {:?}", d.errors);
+            assert_eq!(d.errors[0].message, format!("`{line}` is not a supported connection"), "{src}");
         }
     }
 

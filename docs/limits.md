@@ -1,6 +1,6 @@
 # Limits
 
-This page is for archwire 0.1.0 with rules data 2026.11.11. The counts below were measured on that version by compiling each definition and counting the notes that name a line (see [Notes](report.md#notes)). Notes that explain the drawing, such as the one on auxiliary flows or on three zones, may be there at any count and are not counted.
+This page is for archwire 0.1.0 with rules data 2026.11.12. The counts below were measured on that version by compiling each definition and counting the notes that name a line (see [Notes](report.md#notes)). Notes that explain the drawing, such as the one on auxiliary flows or on three zones, may be there at any count and are not counted.
 
 A note naming a line means the diagram is still written, but that line could not avoid every icon, label and other line; look at it in the diagram. `LAYOUT_FAILED` means no diagram is written. Writing fewer parts avoids both. They are limits of this layout, not of AWS.
 
@@ -53,7 +53,7 @@ A connection or shape not listed in [Which connections are accepted](definition.
 - Cognito identity pools are not drawn; a user's upload straight to S3 is one line, `user -> s3`.
 - Route 53 attaches only to CloudFront (`route53 -- cloudfront`). It cannot be attached to a load balancer or API Gateway, and it cannot be written on a main or auxiliary flow, such as `user -> route53` or `route53 -> cloudfront`. Hosted zone types, health checks and routing policies are not drawn.
 - A KMS key attaches only to S3 and DynamoDB (`kms -- s3`, `kms -- dynamodb`). It cannot be attached to Aurora, ECS, Lambda or other services, and AWS Secrets Manager and multi-Region keys are not drawn.
-- Events between EventBridge, SNS, SQS, Lambda and S3 are drawn only along the pairs in the list. The kinds of SNS topics and SQS queues (standard or FIFO) and dead-letter queues are not drawn. `s3 -> eventbridge` is not accepted, and ECS and EC2 do not send to queues or topics; only a Lambda function does (`lambda -> sqs`, `lambda -> sns`).
+- Events between EventBridge, SNS, SQS, Lambda and S3 are drawn only along the pairs in the list. The kinds of SNS topics and SQS queues (standard or FIFO) and dead-letter queues are not drawn. `s3 -> eventbridge` is not accepted. A queue or a topic does not send to ECS or EC2 (`sqs -> ecs` stops); a service that reads a queue is written as the function it invokes.
 - A main flow back to a part it left through a part outside the subnets of the VPC, such as `lambda.a -> sqs -> lambda.a`, stops with `UNSUPPORTED`.
 - The settings of Security Lake's subscribers are not drawn; a function that reads the queue Security Lake notifies through can be drawn after it, as `securitylake -> sqs -> lambda`. Lake Formation, rollup Regions, Glue crawlers or jobs, and AI services are not drawn.
 - More than one VPC, Transit Gateway, on-premises networks, several accounts and other clouds are not drawn.

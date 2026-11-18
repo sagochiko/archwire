@@ -580,3 +580,27 @@ from = "writer"
 to = "reader"
 rel = "aux"
 label = "replication"
+
+[[link]]
+from = "ecs"
+to = "sqs"
+rel = "main"
+label = "send_messages"
+
+[[link]]
+from = "ecs"
+to = "sns"
+rel = "main"
+label = "publish"
+
+[[link]]
+from = "ec2"
+to = "sqs"
+rel = "main"
+label = "send_messages"
+
+[[link]]
+from = "ec2"
+to = "sns"
+rel = "main"
+label = "publish"
