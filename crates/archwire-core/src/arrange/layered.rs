@@ -2506,32 +2506,91 @@ set:
   lang: ja
 ";
 
+    // The web stack with the users signing in, uploading and querying logs beside it.
+    const USERS_TO_THE_WEB_AND_THREE_PARTS: &str = "flows:
+  - user -> cloudfront -> alb -> ecs -> aurora
+  - user -> cognito
+  - user -> s3.uploads
+  - user -> athena -> s3.logs
+set:
+  lang: ja
+";
+
+    // The same beside an API, with a distribution in front of a bucket.
+    const USERS_TO_THE_API_AND_FOUR_PARTS: &str = "flows:
+  - user -> apigateway(http) -> lambda -> dynamodb
+  - user -> cognito
+  - user -> s3.uploads
+  - user -> athena -> s3.logs
+  - cloudtrail -> s3.logs
+  - user -> cloudfront -> s3
+set:
+  lang: ja
+";
+
+    /// The drawn points of a line, from its exit to its entry.
+    fn drawn_path(w: &Wire, l: &crate::layout::Layout) -> Vec<(i32, i32)> {
+        let mut v = vec![port_point(l.rect(&w.from), w.exit)];
+        v.extend(w.points.iter().copied());
+        v.push(port_point(l.rect(&w.to), w.entry));
+        v
+    }
+
+    /// The crossings of the lines leaving `from` with each other, each named with the segments
+    /// that cross; with `turning`, only of lines that turn on their way. Also the notes that name
+    /// a line, and how many lines leave `from`.
+    fn crossings_from(src: &str, axis: Axis, from: &str, turning: bool) -> (Vec<String>, Vec<String>, usize) {
+        let (m, p) = arranged(src, axis);
+        let (wires, notes) = route_planned(&m, &p.layout, &Rules::builtin(), &p.lines);
+        let leaving: Vec<&Wire> = wires.iter().filter(|w| w.from == from).collect();
+        let turns = |w: &Wire| !turning || !crate::path::corners(&drawn_path(w, &p.layout)).is_empty();
+        let mut found = Vec::new();
+        for (k, a) in leaving.iter().enumerate() {
+            for b in leaving[k + 1..].iter().filter(|b| turns(a) && turns(b)) {
+                for s in drawn_path(a, &p.layout).windows(2) {
+                    for t in drawn_path(b, &p.layout).windows(2) {
+                        if segments_cross(s, t) {
+                            found.push(format!("{axis:?}: {} crosses {}: {s:?} {t:?}", a.id, b.id));
+                        }
+                    }
+                }
+            }
+        }
+        let named: Vec<String> = notes.into_iter().filter(|n| n.contains("edge-")).collect();
+        (found, named, leaving.len())
+    }
+
+    /// Asserts that no two lines leaving `from` cross (with `turning`, no two that turn) and that
+    /// no note names a line, top to bottom and left to right, after looking at both.
+    fn assert_no_crossing_from(src: &str, from: &str, lines: usize, turning: bool) {
+        let mut faults = Vec::new();
+        for axis in [Axis::Down, Axis::Right] {
+            let (found, named, n) = crossings_from(src, axis, from, turning);
+            assert_eq!(n, lines, "{axis:?}: lines leaving {from}");
+            faults.extend(found);
+            faults.extend(named.into_iter().map(|n| format!("{axis:?}: {n}")));
+        }
+        assert!(faults.is_empty(), "{faults:#?}");
+    }
+
     // Fails if two lines leaving one side of the users cross: down the page, the line to S3
     // uploads turned right first, above the Region, and the line to Athena, leaving right of it,
     // came down through it to turn lower.
     #[test]
     fn lines_leaving_one_side_of_the_users_do_not_cross() {
-        for axis in [Axis::Down, Axis::Right] {
-            let (m, p) = arranged(USERS_TO_FOUR_PARTS, axis);
-            let (wires, notes) = route_planned(&m, &p.layout, &Rules::builtin(), &p.lines);
-            assert!(notes.iter().all(|n| !n.contains("edge-")), "{axis:?}: {notes:?}");
-            let path = |w: &Wire| {
-                let mut v = vec![port_point(p.layout.rect(&w.from), w.exit)];
-                v.extend(w.points.iter().copied());
-                v.push(port_point(p.layout.rect(&w.to), w.entry));
-                v
-            };
-            let from_users: Vec<&Wire> = wires.iter().filter(|w| w.from == "user").collect();
-            assert_eq!(from_users.len(), 4);
-            for (k, a) in from_users.iter().enumerate() {
-                for b in &from_users[k + 1..] {
-                    for s in path(a).windows(2) {
-                        for t in path(b).windows(2) {
-                            assert!(!segments_cross(s, t), "{axis:?}: {} crosses {}: {s:?} {t:?}", a.id, b.id);
-                        }
-                    }
-                }
-            }
+        assert_no_crossing_from(USERS_TO_FOUR_PARTS, "user", 4, false);
+    }
+
+    // Fails if, of the lines leaving the users beside the web stack or an API, an inner line
+    // turns farther from the users than an outer line turning the same way and crosses it: down
+    // the page, the line to Cognito turned above the line to S3 uploads leaving right of it, and
+    // in English the line to S3 uploads turned above the line to Athena. Left to right, the lines
+    // to the web stack's neighbours crossed when laid in the order they are planned.
+    #[test]
+    fn lines_from_the_users_beside_a_web_stack_or_an_api_do_not_cross() {
+        let english = USERS_TO_THE_WEB_AND_THREE_PARTS.replace("lang: ja", "lang: en");
+        for (src, lines) in [(USERS_TO_THE_WEB_AND_THREE_PARTS, 4), (english.as_str(), 4), (USERS_TO_THE_API_AND_FOUR_PARTS, 5)] {
+            assert_no_crossing_from(src, "user", lines, false);
         }
     }
 

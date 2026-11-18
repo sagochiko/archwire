@@ -270,6 +270,108 @@ fn outer_first(ctx: &Ctx, specs: &[Line], drafts: &[Draft], ports: &[(Port, Port
     }
 }
 
+/// Gives the lines leaving one side of a part outside the Region and turning the same way their
+/// turns again, the outer line the turn nearest the part, when two of them cross. Each such line
+/// runs out from its exit, across, and on into the part it goes to; the order the lines are laid
+/// in leaves each turn wherever it was free, so an inner line could turn farther out than an
+/// outer one and cross it: down the page, the line from the users to Cognito turned above the
+/// line to S3 uploads leaving right of it. The turns the lines took are shared out again; when
+/// that leaves a line that is not clear, such as two lines turning at one depth along each other,
+/// the lines turn instead `LANE_STEP` apart, outward from the nearest of those turns. With
+/// `spaced_only`, they turn so whatever turns they took. New turns are kept only when every new
+/// line is clear of everything drawn, turns at no corner of another line, and the lines cross
+/// fewer lines than before.
+fn nest_turns(ctx: &Ctx, specs: &[Line], drafts: &[Draft], ports: &[(Port, Port)], paths: &mut [Vec<Pt>], spaced_only: bool) {
+    // The depth of a point out from the side, growing outward, and its place along the side.
+    let depth_along = |side: Side, p: Pt| match side {
+        Side::Bottom => (p.1, p.0),
+        Side::Top => (-p.1, p.0),
+        Side::Right => (p.0, p.1),
+        Side::Left => (-p.0, p.1),
+    };
+    let at_depth = |side: Side, p: Pt, depth: i32| match side {
+        Side::Bottom => (p.0, depth),
+        Side::Top => (p.0, -depth),
+        Side::Right => (depth, p.1),
+        Side::Left => (-depth, p.1),
+    };
+    // Out, across and on: the exit's depth and place, the turn's depth, the way across, and the
+    // depth of the last stretch's end.
+    let shape = |i: usize, paths: &[Vec<Pt>]| {
+        let (side, p) = (ports[i].0.side, &paths[i]);
+        if p.len() != 4 {
+            return None;
+        }
+        let q: Vec<(i32, i32)> = p.iter().map(|&x| depth_along(side, x)).collect();
+        let out = q[0].1 == q[1].1 && q[0].0 < q[1].0 && q[1].0 == q[2].0 && q[1].1 != q[2].1 && q[2].1 == q[3].1 && q[2].0 < q[3].0;
+        out.then_some((q[0], q[1].0, (q[2].1 - q[1].1).signum(), q[3].0))
+    };
+    let mut sides: BTreeMap<(&str, u8, i32), Vec<usize>> = BTreeMap::new();
+    for i in 0..specs.len() {
+        if !outside_the_region(ctx, &specs[i].from) || drafts[i].keep != Keep::Free {
+            continue;
+        }
+        if let Some((_, _, way, _)) = shape(i, paths) {
+            sides.entry((specs[i].from.as_str(), ports[i].0.side as u8, way)).or_default().push(i);
+        }
+    }
+    let crossings = |a: &[Pt], b: &[Pt]| a.windows(2).map(|s| b.windows(2).filter(|t| crate::path::crosses(s[0], s[1], t[0], t[1])).count()).sum::<usize>();
+    for (&(_, _, way), lines) in sides.iter().filter(|(_, l)| l.len() > 1) {
+        if !lines.iter().enumerate().any(|(k, &a)| lines[k + 1..].iter().any(|&b| crossings(&paths[a], &paths[b]) > 0)) {
+            continue;
+        }
+        let side = ports[lines[0]].0.side;
+        // The outer line first.
+        let mut outer: Vec<usize> = lines.clone();
+        outer.sort_by_key(|&i| (-shape(i, paths).expect("shaped").0 .1 * way, i));
+        let mut taken: Vec<i32> = lines.iter().map(|&i| shape(i, paths).expect("shaped").1).collect();
+        taken.sort_unstable();
+        let spaced: Vec<i32> = (0..lines.len() as i32).map(|k| taken[0] + k * LANE_STEP).collect();
+        // Crossings of the lines of the side with every line, each pair once.
+        let count = |drawn: &[Vec<Pt>]| {
+            (0..drawn.len()).flat_map(|j| lines.iter().map(move |&i| (i, j))).filter(|&(i, j)| j != i && !(lines.contains(&j) && j < i)).map(|(i, j)| crossings(&drawn[i], &drawn[j])).sum::<usize>()
+        };
+        let tries = if spaced_only { vec![spaced] } else { vec![taken, spaced] };
+        for turns in tries {
+            let mut new: Vec<(usize, Vec<Pt>)> = Vec::new();
+            for (&i, &turn) in outer.iter().zip(&turns) {
+                let (exit, _, _, last) = shape(i, paths).expect("shaped");
+                if turn <= exit.0 || turn >= last {
+                    new.clear();
+                    break;
+                }
+                let p = &paths[i];
+                new.push((i, vec![p[0], at_depth(side, p[1], turn), at_depth(side, p[2], turn), p[3]]));
+            }
+            if new.is_empty() || new.iter().all(|(i, p)| *p == paths[*i]) {
+                continue;
+            }
+            let mut drawn: Vec<Vec<Pt>> = paths.to_vec();
+            for (i, p) in &new {
+                drawn[*i] = p.clone();
+            }
+            let clear = new.iter().all(|(i, p)| {
+                let s = &specs[*i];
+                let others: Vec<Vec<Pt>> = drawn.iter().enumerate().filter(|&(j, _)| j != *i).map(|(_, q)| q.clone()).collect();
+                let (out, inward) = (outward(ports[*i].0.side), reverse(outward(ports[*i].1.side)));
+                let mine = crate::path::corners(p);
+                let apart = |j: usize| ![&s.from, &s.to].iter().any(|e| **e == specs[j].from || **e == specs[j].to);
+                ctx.scene.check(p, &s.from, &s.to, out, inward, &others).is_some()
+                    && !(0..drawn.len()).any(|j| j != *i && apart(j) && crate::path::corners(&drawn[j]).iter().any(|c| mine.contains(c)))
+            });
+            if clear && count(&drawn) < count(paths) {
+                for (i, p) in new {
+                    paths[i] = p;
+                }
+                break;
+            }
+        }
+    }
+}
+
+/// How far apart the lines of one side turn when the turns they took cannot be shared out.
+const LANE_STEP: i32 = 8;
+
 /// How far a line's exit lies along its side, and which way the line turns from it toward the
 /// middle of the part it goes to: -1 or 1, or 0 when that middle lies within `LEVEL` of the exit.
 fn turn_of(ctx: &Ctx, s: &Line, exit: Port) -> (i32, i32) {
@@ -285,10 +387,15 @@ fn turn_of(ctx: &Ctx, s: &Line, exit: Port) -> (i32, i32) {
 /// Shares out the ports, lays every line, places the labels and runs the final check, which
 /// also looks at how each line keeps its draft in `plans` (none when no plans are given).
 /// When two lines leaving one side of a part outside the Region and turning the same way cross,
-/// the lines are laid again with the outer lines of each such side first, and that drawing is
-/// kept when it has fewer crossing lines and no more notes.
+/// the lines are drawn again five ways: with their turns shared out again (`nest_turns`), laid
+/// with the outer lines of each such side first (`outer_first`), both, and the first and the
+/// third with the turns spaced `LANE_STEP` apart instead of shared out (a turn taken from another
+/// line can push a label onto a frame side where spaced turns do not). Of the drawings with fewer
+/// crossing lines than the first, no more notes and no more frame sides under the line labels,
+/// the one with the fewest crossing lines is kept, then the fewest frame sides under labels, then
+/// the first of the five; with none, the first drawing is kept.
 pub(crate) fn draw(ctx: &Ctx, specs: &[Line], drafts: &[Draft], plans: &[LinePlan], notes: Vec<String>) -> (Vec<Wire>, Vec<String>) {
-    let first = draw_in_order(ctx, specs, drafts, plans, notes.clone(), false);
+    let first = draw_in_order(ctx, specs, drafts, plans, notes.clone(), false, 0);
     let crossings = |wires: &[Wire], paths: &[Vec<Pt>], only_one_side: bool| {
         let mut n = 0;
         for a in 0..paths.len() {
@@ -309,11 +416,18 @@ pub(crate) fn draw(ctx: &Ctx, specs: &[Line], drafts: &[Draft], plans: &[LinePla
     if crossings(&first.0, &first.2, true) == 0 {
         return (first.0, first.1);
     }
-    let again = draw_in_order(ctx, specs, drafts, plans, notes, true);
-    if again.1.len() <= first.1.len() && crossings(&again.0, &again.2, false) < crossings(&first.0, &first.2, false) {
-        (again.0, again.1)
-    } else {
-        (first.0, first.1)
+    let all = crossings(&first.0, &first.2, false);
+    let best = [(false, 1), (true, 0), (true, 1), (false, 2), (true, 2)]
+        .into_iter()
+        .map(|(outer, nest)| draw_in_order(ctx, specs, drafts, plans, notes.clone(), outer, nest))
+        .enumerate()
+        .filter(|(_, d)| d.1.len() <= first.1.len() && d.3 <= first.3)
+        .map(|(k, d)| ((crossings(&d.0, &d.2, false), d.3, k), d))
+        .filter(|((n, _, _), _)| *n < all)
+        .min_by_key(|(key, _)| *key);
+    match best {
+        Some((_, d)) => (d.0, d.1),
+        None => (first.0, first.1),
     }
 }
 
@@ -322,8 +436,10 @@ fn outside_the_region(ctx: &Ctx, id: &str) -> bool {
 }
 
 /// `draw`, laying the outer lines of each side of a part outside the Region first when `outer`
-/// is set, and giving the drawn paths too.
-fn draw_in_order(ctx: &Ctx, specs: &[Line], drafts: &[Draft], plans: &[LinePlan], mut notes: Vec<String>, outer: bool) -> (Vec<Wire>, Vec<String>, Vec<Vec<Pt>>) {
+/// is set and turning them again when `nest` is not 0 (1 shares out the turns the lines took,
+/// falling back to spaced turns; 2 spaces them only), and giving the drawn paths and
+/// how many frame sides run under the line labels too.
+fn draw_in_order(ctx: &Ctx, specs: &[Line], drafts: &[Draft], plans: &[LinePlan], mut notes: Vec<String>, outer: bool, nest: u8) -> (Vec<Wire>, Vec<String>, Vec<Vec<Pt>>, usize) {
     let (model, layout, rules, lang) = (ctx.model, ctx.layout, ctx.rules, ctx.model.lang);
     let mut ports = ctx.share_out(specs, drafts);
     ctx.straighten_level_lines(specs, drafts, &mut ports);
@@ -394,11 +510,16 @@ fn draw_in_order(ctx: &Ctx, specs: &[Line], drafts: &[Draft], plans: &[LinePlan]
         laid.push(i);
     }
 
+    if nest > 0 {
+        nest_turns(ctx, specs, drafts, &ports, &mut paths, nest == 2);
+    }
+
     // Labels on the shortest lines first, since they have the fewest spots to choose from; each
     // keeps clear of the labels placed before it.
     let mut by_length: Vec<usize> = (0..specs.len()).collect();
     by_length.sort_by_key(|&i| (path_length(&paths[i]), i));
     let mut areas: Vec<Rect> = Vec::new();
+    let mut on_frames = 0;
     let mut spots: Vec<Option<LabelSpot>> = (0..specs.len()).map(|_| None).collect();
     for i in by_length {
         let s = &specs[i];
@@ -421,6 +542,7 @@ fn draw_in_order(ctx: &Ctx, specs: &[Line], drafts: &[Draft], plans: &[LinePlan]
         let in_vpc = |id: &str| matches!(ctx.node(id).area, Area::Subnet(_) | Area::VpcEdge);
         let outside = s.rel == Rel::Assoc && in_vpc(&s.from) != in_vpc(&s.to);
         let spot = ctx.place_label(&label_parts(s, model, rules), (&paths, i), level, near_source, axis, outside, &areas);
+        on_frames += spot.area.map_or(0, |a| ctx.scene.borders_under(a, 0));
         areas.extend(spot.area);
         spots[i] = Some(spot);
     }
@@ -460,7 +582,7 @@ fn draw_in_order(ctx: &Ctx, specs: &[Line], drafts: &[Draft], plans: &[LinePlan]
             notes.push(note);
         }
     }
-    (wires, notes, paths)
+    (wires, notes, paths, on_frames)
 }
 
 impl<'a> Ctx<'a> {
