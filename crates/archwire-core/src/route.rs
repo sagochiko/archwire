@@ -387,13 +387,15 @@ fn turn_of(ctx: &Ctx, s: &Line, exit: Port) -> (i32, i32) {
 /// Shares out the ports, lays every line, places the labels and runs the final check, which
 /// also looks at how each line keeps its draft in `plans` (none when no plans are given).
 /// When two lines leaving one side of a part outside the Region and turning the same way cross,
-/// the lines are drawn again five ways: with their turns shared out again (`nest_turns`), laid
-/// with the outer lines of each such side first (`outer_first`), both, and the first and the
-/// third with the turns spaced `LANE_STEP` apart instead of shared out (a turn taken from another
-/// line can push a label onto a frame side where spaced turns do not). Of the drawings with fewer
-/// crossing lines than the first, no more notes and no more frame sides under the line labels,
+/// the lines are laid again with the outer lines of each such side first (`outer_first`); that
+/// drawing is kept when it has fewer crossing lines than the first and brings no new note. Then
+/// four more drawings turn those lines again (`nest_turns`): sharing out the turns they took, or
+/// spacing them `LANE_STEP` apart (a turn taken from another line can push a label onto a frame
+/// side where spaced turns do not), each laid in the first order and with the outer lines first.
+/// One of them replaces the drawing kept so far only when it has fewer crossing lines than it,
+/// brings no note it does not have and puts no more frame sides under the line labels; of those,
 /// the one with the fewest crossing lines is kept, then the fewest frame sides under labels, then
-/// the first of the five; with none, the first drawing is kept.
+/// the first in that order.
 pub(crate) fn draw(ctx: &Ctx, specs: &[Line], drafts: &[Draft], plans: &[LinePlan], notes: Vec<String>) -> (Vec<Wire>, Vec<String>) {
     let first = draw_in_order(ctx, specs, drafts, plans, notes.clone(), false, 0);
     let crossings = |wires: &[Wire], paths: &[Vec<Pt>], only_one_side: bool| {
@@ -416,19 +418,29 @@ pub(crate) fn draw(ctx: &Ctx, specs: &[Line], drafts: &[Draft], plans: &[LinePla
     if crossings(&first.0, &first.2, true) == 0 {
         return (first.0, first.1);
     }
-    let all = crossings(&first.0, &first.2, false);
-    let best = [(false, 1), (true, 0), (true, 1), (false, 2), (true, 2)]
+    let first_crossings = crossings(&first.0, &first.2, false);
+    let again = draw_in_order(ctx, specs, drafts, plans, notes.clone(), true, 0);
+    let again_crossings = crossings(&again.0, &again.2, false);
+    let (kept, kept_crossings) =
+        if no_new_note(&first.1, &again.1) && again_crossings < first_crossings { (again, again_crossings) } else { (first, first_crossings) };
+    let best = [(false, 1), (true, 1), (false, 2), (true, 2)]
         .into_iter()
         .map(|(outer, nest)| draw_in_order(ctx, specs, drafts, plans, notes.clone(), outer, nest))
         .enumerate()
-        .filter(|(_, d)| d.1.len() <= first.1.len() && d.3 <= first.3)
+        .filter(|(_, d)| no_new_note(&kept.1, &d.1) && d.3 <= kept.3)
         .map(|(k, d)| ((crossings(&d.0, &d.2, false), d.3, k), d))
-        .filter(|((n, _, _), _)| *n < all)
+        .filter(|((n, _, _), _)| *n < kept_crossings)
         .min_by_key(|(key, _)| *key);
     match best {
         Some((_, d)) => (d.0, d.1),
-        None => (first.0, first.1),
+        None => (kept.0, kept.1),
     }
+}
+
+/// Whether every note of a drawing tried again is a note of the drawing it would replace: one
+/// note gone and another come is a new fault, not a drawing as good.
+fn no_new_note(kept: &[String], tried: &[String]) -> bool {
+    tried.iter().all(|n| kept.contains(n))
 }
 
 fn outside_the_region(ctx: &Ctx, id: &str) -> bool {
@@ -1612,6 +1624,20 @@ pub(crate) mod tests {
                 }
             }
         }
+    }
+
+    // Fails if a drawing tried again is taken when it trades a note for another: the notes were
+    // compared by count only, so one line's note gone and another line's come passed as no worse.
+    #[test]
+    fn a_drawing_tried_again_is_taken_only_without_a_new_note() {
+        let note = |line: &str| Rules::builtin().text("note.unrouted_line", crate::rules::Lang::En).replace("{line}", line);
+        let (a, b) = (note("edge-a-to-b"), note("edge-c-to-d"));
+        assert!(no_new_note(&[], &[]));
+        assert!(no_new_note(&[a.clone()], &[]));
+        assert!(no_new_note(&[a.clone(), b.clone()], &[b.clone()]));
+        assert!(!no_new_note(&[a.clone()], &[b.clone()]), "one note traded for another");
+        assert!(!no_new_note(&[], &[a.clone()]));
+        assert!(!no_new_note(&[a.clone()], &[a.clone(), b]));
     }
 
     // Fails if lines leaving a part inside the Region are turned again: the rule is for the parts
