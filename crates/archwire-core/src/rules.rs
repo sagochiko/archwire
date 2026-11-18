@@ -573,9 +573,9 @@ mod tests {
         assert_eq!(
             r.service_keys(),
             [
-                "acm", "alb", "apigateway", "aurora", "cloudfront", "cloudtrail", "cloudwatch", "cognito", "config", "dynamodb", "ecs",
-                "eventbridge", "guardduty", "igw", "inspector", "internet", "lambda", "nat", "s3", "securityhub", "sns", "ssm",
-                "stepfunctions", "user", "waf",
+                "acm", "alb", "apigateway", "athena", "aurora", "cloudfront", "cloudtrail", "cloudwatch", "cognito", "config", "dynamodb",
+                "ecs", "eventbridge", "glue", "guardduty", "igw", "inspector", "internet", "lambda", "nat", "s3", "securityhub",
+                "securitylake", "sns", "sqs", "ssm", "stepfunctions", "user", "waf",
             ]
         );
         let alb = r.service("alb").unwrap();

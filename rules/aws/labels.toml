@@ -116,6 +116,30 @@ ja = "発行"
 en = "Call"
 ja = "呼び出し"
 
+[sign_in]
+en = "Sign-in"
+ja = "サインイン"
+
+[upload_download]
+en = "Upload/Download"
+ja = "アップロード・ダウンロード"
+
+[query]
+en = "Query"
+ja = "クエリ"
+
+[table_definitions]
+en = "Table definitions"
+ja = "テーブル定義"
+
+[data_lake]
+en = "Data lake"
+ja = "データレイク"
+
+[new_objects]
+en = "New objects"
+ja = "新しいオブジェクトの通知"
+
 [undecided_route]
 en = "Route undecided"
 ja = "経路未定"

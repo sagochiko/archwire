@@ -327,7 +327,7 @@ mod tests {
         assert!(h.drawio.is_some());
         assert_eq!(h.diagnostics.exit_code(), 2);
         assert!(h.drawio.unwrap().contains("strokeColor=#879196"));
-        let e = crate::compile("flows:\n  - user -> s3\n");
+        let e = crate::compile("flows:\n  - user -> dynamodb\n");
         assert!(e.drawio.is_none());
         assert_eq!(e.diagnostics.exit_code(), 1);
     }

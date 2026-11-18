@@ -1,2 +1,2 @@
 flows:
-  - user -> s3
+  - user -> dynamodb

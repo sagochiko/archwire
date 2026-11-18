@@ -10,7 +10,7 @@ fn compile_writes_the_file_and_exit_codes_follow_the_diagnostics() {
     };
     assert_eq!(run("ok", "flows:\n  - user -> alb -> ecs\n"), (Some(0), true));
     assert_eq!(run("hole", "flows:\n  - user -> alb -> ecs\n  - ecs -> s3\n"), (Some(2), true));
-    assert_eq!(run("bad", "flows:\n  - user -> s3\n"), (Some(1), false));
+    assert_eq!(run("bad", "flows:\n  - user -> dynamodb\n"), (Some(1), false));
 }
 
 #[test]
@@ -77,7 +77,7 @@ fn a_failed_compile_removes_the_previous_output_file() {
     std::fs::write(&def, "flows:\n  - user -> alb -> ecs\n").unwrap();
     assert_eq!(compile().status.code(), Some(0));
     assert!(out.exists());
-    std::fs::write(&def, "flows:\n  - user -> s3\n").unwrap();
+    std::fs::write(&def, "flows:\n  - user -> dynamodb\n").unwrap();
     assert_eq!(compile().status.code(), Some(1));
     assert!(!out.exists());
     std::fs::write(&out, "old").unwrap();

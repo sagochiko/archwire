@@ -1,7 +1,7 @@
 {
   "versions": {
     "archwire": "0.1.0",
-    "rules": "2026.11.6"
+    "rules": "2026.11.7"
   },
   "derived": [],
   "holes": [],
@@ -9,10 +9,10 @@
     {
       "code": "UNSUPPORTED",
       "at": "flows[0]",
-      "got": "user -> s3",
+      "got": "user -> dynamodb",
       "allowed": [],
       "rule": null,
-      "message": "`user -> s3` is not a supported connection"
+      "message": "`user -> dynamodb` is not a supported connection"
     }
   ],
   "warnings": [],

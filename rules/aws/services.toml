@@ -270,3 +270,39 @@ icon = "service"
 shape = "systems_manager"
 color = "#E7157B"
 label = "AWS Systems Manager"
+
+[[service]]
+key = "athena"
+scope = "regional"
+place = "single"
+icon = "service"
+shape = "athena"
+color = "#8C4FFF"
+label = "Amazon Athena"
+
+[[service]]
+key = "glue"
+scope = "regional"
+place = "single"
+icon = "service"
+shape = "glue"
+color = "#8C4FFF"
+label = "AWS Glue Data Catalog"
+
+[[service]]
+key = "securitylake"
+scope = "regional"
+place = "single"
+icon = "service"
+shape = "security_lake"
+color = "#DD344C"
+label = "Amazon Security Lake"
+
+[[service]]
+key = "sqs"
+scope = "regional"
+place = "single"
+icon = "service"
+shape = "sqs"
+color = "#E7157B"
+label = "Amazon SQS"

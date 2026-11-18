@@ -523,7 +523,7 @@ mod tests {
     #[test]
     fn pairs_outside_the_list_stop() {
         for line in [
-            "user -> s3",
+            "user -> dynamodb",
             "cloudfront -> lambda",
             "dynamodb -> lambda",
             "apigateway -- cognito",
@@ -533,6 +533,17 @@ mod tests {
             "eventbridge -> lambda",
             "sns -> lambda",
             "guardduty ~> eventbridge",
+            "s3 -> athena",
+            "athena -- glue",
+            "athena -> glue",
+            "s3 -> securitylake",
+            "sqs -> securitylake",
+            "securitylake -> athena",
+            "guardduty -> securitylake",
+            "waf -> securitylake",
+            "cognito -> user",
+            "user -> sqs",
+            "user -> securitylake",
         ] {
             let (m, d) = run(&format!("{B}  - {line}\n"));
             assert!(m.is_none(), "{line}");
@@ -645,6 +656,77 @@ mod tests {
                 assert!(drawio.contains(&format!("value=\"{text}\"")), "{from} -> {to} {lang}: no label {text}");
             }
         }
+    }
+
+    // Fails if one of the pairs of the sign-in and log analysis flows stops, gets another label,
+    // or is drawn without its label in English or Japanese. A pair whose sender starts no flow is
+    // reached from the user or from CloudTrail; the Glue Data Catalog hangs on an Athena that the
+    // user reaches.
+    #[test]
+    fn every_log_analysis_pair_is_accepted_with_its_label() {
+        let r = Rules::builtin();
+        let pairs = [
+            ("user", "cognito", "sign_in", "Sign-in", "サインイン"),
+            ("user", "s3", "upload_download", "Upload/Download", "アップロード・ダウンロード"),
+            ("user", "athena", "query", "Query", "クエリ"),
+            ("athena", "s3", "query", "Query", "クエリ"),
+            ("glue", "athena", "table_definitions", "Table definitions", "テーブル定義"),
+            ("cloudtrail", "securitylake", "logs", "Logs", "ログ"),
+            ("securityhub", "securitylake", "findings", "Findings", "検出結果"),
+            ("securitylake", "s3", "data_lake", "Data lake", "データレイク"),
+            ("securitylake", "sqs", "new_objects", "New objects", "新しいオブジェクトの通知"),
+            ("athena", "securitylake", "query", "Query", "クエリ"),
+        ];
+        assert_eq!(pairs.len(), 10);
+        for (from, to, key, en, ja) in pairs {
+            let flows = match from {
+                "athena" => format!("flows:\n  - user -> athena -> {to}\n"),
+                "glue" => "flows:\n  - user -> athena -> s3\n  - glue -- athena\n".to_string(),
+                "securitylake" => format!("flows:\n  - cloudtrail -> securitylake -> {to}\n"),
+                _ => format!("flows:\n  - {from} -> {to}\n"),
+            };
+            let (m, d) = run(&flows);
+            assert!(d.errors.is_empty(), "{from} -> {to}: {:?}", d.errors);
+            let m = m.unwrap_or_else(|| panic!("{from} -> {to}: no model"));
+            assert_eq!(label(&m, from, to), key, "{from} -> {to}");
+            assert_eq!((r.text(key, Lang::En).as_str(), r.text(key, Lang::Ja).as_str()), (en, ja), "{from} -> {to}");
+            for (lang, text) in [("en", en), ("ja", ja)] {
+                let out = crate::compile(&format!("{flows}set:\n  lang: {lang}\n"));
+                assert_eq!(out.diagnostics.exit_code(), 0, "{from} -> {to} {lang}: {:?}", out.diagnostics.errors);
+                let drawio = out.drawio.unwrap_or_else(|| panic!("{from} -> {to} {lang}: no diagram"));
+                assert!(drawio.contains(&format!("value=\"{text}\"")), "{from} -> {to} {lang}: no label {text}");
+            }
+        }
+    }
+
+    // Fails if a definition of the sign-in or log analysis shapes stops or leaves a hole.
+    #[test]
+    fn the_sign_in_and_log_analysis_shapes_are_drawn() {
+        let defs = [
+            "flows:\n  - user -> cloudfront -> apigateway(rest) -> lambda -> dynamodb\n  - user -> cognito\n  - cognito -- apigateway\nset:\n  lang: ja\n",
+            "flows:\n  - user -> cognito\n  - user -> s3\n",
+            "flows:\n  - cloudtrail -> s3\n  - user -> athena -> s3\n  - glue -- athena\nset:\n  lang: ja\n",
+            "flows:\n  - cloudtrail -> securitylake\n  - securityhub -> securitylake\n  - securitylake -> s3\n  - securitylake -> sqs\n  - user -> athena -> securitylake\n",
+        ];
+        for src in defs {
+            let (m, d) = run(src);
+            assert!(d.errors.is_empty(), "{src}: {:?}", d.errors);
+            assert!(m.is_some(), "{src}");
+            assert_eq!(d.exit_code(), 0, "{src}");
+        }
+    }
+
+    // Fails if a service added for log analysis starts a flow, or a pair left out on purpose is accepted.
+    #[test]
+    fn log_analysis_services_only_receive() {
+        for src in ["flows:\n  - athena -> s3\n", "flows:\n  - securitylake -> sqs\n"] {
+            let (m, d) = run(src);
+            assert!(m.is_none(), "{src}");
+            assert_eq!((d.errors[0].code.as_str(), d.errors[0].at.as_deref()), ("UNSUPPORTED", Some("flows[0]")), "{src}");
+        }
+        let (m, d) = run("flows:\n  - glue -- athena\n");
+        assert!(m.is_none());
+        assert_eq!(d.errors[0].code, "UNSUPPORTED");
     }
 
     #[test]
@@ -1405,9 +1487,9 @@ mod tests {
     fn unknown_names_are_reported_in_full() {
         let (_, d) = run("flows:\n  - user -> cloudfrnt -> alb -> ecs(lambda)\n");
         let services = [
-            "acm", "alb", "apigateway", "aurora", "cloudfront", "cloudtrail", "cloudwatch", "cognito", "config", "dynamodb", "ecs",
-            "eventbridge", "guardduty", "inspector", "internet", "lambda", "s3", "securityhub", "sns", "ssm", "stepfunctions", "user",
-            "waf",
+            "acm", "alb", "apigateway", "athena", "aurora", "cloudfront", "cloudtrail", "cloudwatch", "cognito", "config", "dynamodb",
+            "ecs", "eventbridge", "glue", "guardduty", "inspector", "internet", "lambda", "s3", "securityhub", "securitylake", "sns",
+            "sqs", "ssm", "stepfunctions", "user", "waf",
         ];
         assert_eq!(d.errors, [
             bad("UNKNOWN_SERVICE", "flows[0][1]", "cloudfrnt", &services, "unknown service `cloudfrnt`"),
@@ -1966,7 +2048,7 @@ mod tests {
             let (m, d) = run("flows:\n  - user -> cloudfront -> s3\n");
             assert!(m.is_some(), "{:?}", d.errors);
             assert_eq!(d.exit_code(), 0);
-            for (src, at, got) in [("flows:\n  - user -> s3\n", "flows[0]", "user -> s3"), ("flows:\n  - user -> alb -> aurora\n", "flows[0]", "alb -> aurora")] {
+            for (src, at, got) in [("flows:\n  - user -> dynamodb\n", "flows[0]", "user -> dynamodb"), ("flows:\n  - user -> alb -> aurora\n", "flows[0]", "alb -> aurora")] {
                 let (m, d) = run(src);
                 assert!(m.is_none(), "{src}");
                 assert_eq!((d.errors[0].code.as_str(), d.errors[0].at.as_deref(), d.errors[0].got.as_deref()), ("UNSUPPORTED", Some(at), Some(got)), "{src}");
@@ -2107,7 +2189,7 @@ mod tests {
         #[test]
         fn links_outside_the_allowlist_stop_with_unsupported() {
             let base = "flows:\n  - user -> alb -> ecs -> aurora\n";
-            for line in ["cloudfront -> ecs", "user -> aurora", "user ~> cloudfront", "ecs -> user", "ecs -> cloudfront", "alb -> s3", "user -> s3"] {
+            for line in ["cloudfront -> ecs", "user -> aurora", "user ~> cloudfront", "ecs -> user", "ecs -> cloudfront", "alb -> s3", "user -> dynamodb"] {
                 let (m, d) = run(&format!("{base}  - {line}\n"));
                 assert!(m.is_none(), "{line}");
                 assert_eq!((d.errors[0].code.as_str(), d.errors[0].at.as_deref(), d.errors[0].got.as_deref()), ("UNSUPPORTED", Some("flows[1]"), Some(line)), "{line}");

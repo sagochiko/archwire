@@ -363,6 +363,66 @@ to = "ssm"
 rel = "main"
 label = "call"
 
+[[link]]
+from = "user"
+to = "cognito"
+rel = "main"
+label = "sign_in"
+
+[[link]]
+from = "user"
+to = "s3"
+rel = "main"
+label = "upload_download"
+
+[[link]]
+from = "user"
+to = "athena"
+rel = "main"
+label = "query"
+
+[[link]]
+from = "athena"
+to = "s3"
+rel = "main"
+label = "query"
+
+[[link]]
+from = "glue"
+to = "athena"
+rel = "assoc"
+label = "table_definitions"
+
+[[link]]
+from = "cloudtrail"
+to = "securitylake"
+rel = "main"
+label = "logs"
+
+[[link]]
+from = "securityhub"
+to = "securitylake"
+rel = "main"
+label = "findings"
+
+[[link]]
+from = "securitylake"
+to = "s3"
+rel = "main"
+label = "data_lake"
+
+[[link]]
+from = "securitylake"
+to = "sqs"
+rel = "main"
+label = "new_objects"
+
+[[link]]
+from = "athena"
+to = "securitylake"
+rel = "main"
+label = "query"
+
 [[derived_link]]
 from = "private"
 to = "egress_nat"
