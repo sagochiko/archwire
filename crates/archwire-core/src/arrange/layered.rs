@@ -156,15 +156,67 @@ pub(super) fn layered(model: &Model, rules: &Rules, axis: Axis, piece: Option<&P
     // targets in the Region, two steps apart, so the step after each stays free for its side parts.
     let global: Vec<usize> = (0..nodes.len()).filter(|&i| area(i) == Area::Cloud).collect();
     let (g_main, g_side): (Vec<usize>, Vec<usize>) = global.iter().partition(|&&i| on_main(model, &nodes[i].id));
-    let mut before: Option<i32> = None;
-    for &i in &g_main {
-        // A part sending into the VPC's entry gateway lines up with it, before the middle of its targets.
-        let ts: Vec<usize> = targets(i).into_iter().filter(|&t| in_region(area(t))).collect();
-        let entry: Vec<usize> = ts.iter().copied().filter(|&t| area(t) == Area::VpcEdge).collect();
-        let want = mid((if entry.is_empty() { ts } else { entry }).into_iter().filter_map(|t| v[t]));
-        let at = after(before, want, 2 * r);
-        v[i] = Some(at);
-        before = Some(at);
+    // The side parts joined to one main part of the rank by associations only, by that part.
+    let attached_to = |i: usize| -> Option<usize> {
+        let id = &nodes[i].id;
+        let only_assoc = model.edges.iter().filter(|e| &e.from == id || &e.to == id).all(|e| e.rel == Rel::Assoc);
+        match partners(model, i).as_slice() {
+            [one] if only_assoc && g_main.contains(one) => Some(*one),
+            _ => None,
+        }
+    };
+    let attached = |j: usize| -> usize { g_side.iter().filter(|&&i| attached_to(i) == Some(j)).count() };
+    // Where the main lines from the users come down into the Region across the main axis.
+    let drops: Vec<i32> = model
+        .edges
+        .iter()
+        .filter(|e| e.rel == Rel::Main)
+        .filter(|e| index(&e.from).is_some_and(|f| area(f) == Area::Outside))
+        .filter_map(|e| index(&e.to).filter(|&t| in_region(area(t))).and_then(|t| v[t]))
+        .collect();
+    // Top to bottom with a VPC, two or more parts attached to a main part sit in its row, one
+    // step after another across, so the rank keeps one row; unless a line from the users comes
+    // down past them, which the lines to the farther ones, run over the nearer ones, would cross.
+    // Else they line up along the main axis one step across from it: left to right, and without
+    // a VPC, where three of the generated definitions drawn with the row came out with a side
+    // line's label in the Region that could not be placed clear.
+    let place = |rows: bool| -> (Vec<Option<i32>>, Vec<bool>) {
+        let (mut v, mut in_row) = (v.clone(), vec![false; nodes.len()]);
+        let mut before: Option<(i32, i32)> = None;
+        for &i in &g_main {
+            // A part sending into the VPC's entry gateway lines up with it, before the middle of its targets.
+            let ts: Vec<usize> = targets(i).into_iter().filter(|&t| in_region(area(t))).collect();
+            let entry: Vec<usize> = ts.iter().copied().filter(|&t| area(t) == Area::VpcEdge).collect();
+            let want = mid((if entry.is_empty() { ts } else { entry }).into_iter().filter_map(|t| v[t]));
+            let at = match before {
+                None => want.unwrap_or(0),
+                Some((b, steps)) => want.map_or(b + steps * r, |w| w.max(b + steps * r)),
+            };
+            v[i] = Some(at);
+            let n = attached(i) as i32;
+            in_row[i] = rows && n > 1 && !drops.iter().any(|&d| at + r / 2 < d && d < at + n * r + r / 2);
+            before = Some((at, if in_row[i] { n + 1 } else { 2 }));
+        }
+        (v, in_row)
+    };
+    // The users, after the global rank: level with the middle of their main targets, a step apart.
+    let users: Vec<usize> = (0..nodes.len()).filter(|&i| area(i) == Area::Outside).collect();
+    let users_at = |v: &mut Vec<Option<i32>>| {
+        let mut before: Option<i32> = None;
+        for &i in &users {
+            let at = after(before, mid(targets(i).into_iter().filter_map(|t| v[t])), r);
+            v[i] = Some(at);
+            before = Some(at);
+        }
+    };
+    let (mut v, mut in_row) = place(axis == Axis::Down && piece.is_some());
+    // A line from the users coming into such a part from past its attached parts would cross
+    // the lines to the farther ones: then none of the rank's parts keeps its attached parts in its row.
+    let mut seen = v.clone();
+    users_at(&mut seen);
+    let from_past = users.iter().any(|&u| targets(u).into_iter().any(|t| in_row[t] && seen[u] > v[t].map(|a| a + r / 2)));
+    if from_past {
+        (v, in_row) = place(false);
     }
     // Side parts with one partner sit one step across from it; ones with more, past everything
     // else in the rank. Each such line of side parts runs along the main axis, in model order.
@@ -174,7 +226,13 @@ pub(super) fn layered(model: &Model, rules: &Rules, axis: Axis, piece: Option<&P
         None => rows.push((at, vec![i])),
     };
     let mut shared: Vec<usize> = Vec::new();
+    let mut in_rows: Vec<i32> = vec![0; nodes.len()];
     for &i in &g_side {
+        if let Some(j) = attached_to(i).filter(|&j| in_row[j]) {
+            in_rows[j] += 1;
+            side_rows.push((v[j].expect("placed") + in_rows[j] * r, vec![i]));
+            continue;
+        }
         match partners(model, i).as_slice() {
             [one] if v[*one].is_some() => put(&mut side_rows, v[*one].expect("checked") + r, i),
             _ => shared.push(i),
@@ -193,14 +251,7 @@ pub(super) fn layered(model: &Model, rules: &Rules, axis: Axis, piece: Option<&P
         }
     }
 
-    // The users, after the global rank: level with the middle of their main targets, a step apart.
-    let users: Vec<usize> = (0..nodes.len()).filter(|&i| area(i) == Area::Outside).collect();
-    let mut before: Option<i32> = None;
-    for &i in &users {
-        let at = after(before, mid(targets(i).into_iter().filter_map(|t| v[t])), r);
-        v[i] = Some(at);
-        before = Some(at);
-    }
+    users_at(&mut v);
 
     // Along the main axis: the users, the AWS Cloud frame, the global rank, the Region frame.
     let (diagram_main, diagram_cross) = uv(axis, (USER_LEFT, CLOUD_Y));
@@ -226,7 +277,11 @@ pub(super) fn layered(model: &Model, rules: &Rules, axis: Axis, piece: Option<&P
     let first_from = g_main.iter().copied().chain(side_rows.iter().map(|row| row.1[0])).map(|i| main(i).0).min().unwrap_or(0);
     // Down the page, the global rank starts past the AWS Cloud frame's name, with room.
     let cloud_name = frame_name_box(&Frame { id: CLOUD_FRAME.into(), kind: FrameKind::Cloud, label: CLOUD_NAME.into(), rect: icon_at(0, 0), parent: None }).h;
-    let global_u = cloud_u + uv(axis, (CLOUD_LEFT, cloud_name + FRAME_ROOM)).0.max(FRAME_ROOM - first_from);
+    // The lines to the attached parts past the nearest run over the row: room for each between
+    // it and the AWS Cloud frame's side.
+    let over = g_main.iter().filter(|&&j| in_row[j]).map(|&j| attached(j) as i32 - 1).max().unwrap_or(0);
+    let over_room = OVER_ROOM * over;
+    let global_u = cloud_u + over_room + uv(axis, (CLOUD_LEFT, cloud_name + FRAME_ROOM)).0.max(FRAME_ROOM - first_from);
     let mut u: Vec<Option<i32>> = vec![None; nodes.len()];
     for &i in &g_main {
         u[i] = Some(global_u);
@@ -1129,6 +1184,10 @@ fn plans(model: &Model, layout: &Layout, col_u: &[i32], axis: Axis) -> Vec<LineP
             continue;
         }
         let (Some(a), Some(b)) = (find(&e.from), find(&e.to)) else { continue };
+        if let Some(plan) = over_the_row(model, layout, edge, axis) {
+            out.push(plan);
+            continue;
+        }
         let ((au, av), (bu, bv)) = (at(a), at(b));
         // Main lines bend halfway from the end of `a` to whatever comes next along the main axis.
         let from = au + uv(axis, on_lines(a)).0 .1;
@@ -1179,6 +1238,78 @@ fn plans(model: &Model, layout: &Layout, col_u: &[i32], axis: Axis) -> Vec<LineP
     }
     out
 }
+
+/// How many parts of the global rank lie in the row between the two ends of an association
+/// between a main part of the rank and a part attached to it alone, when both ends are in one row
+/// top to bottom; else None.
+fn between_in_row(model: &Model, layout: &Layout, e: &crate::model::Edge, axis: Axis) -> Option<(usize, usize)> {
+    if axis != Axis::Down || e.rel != Rel::Assoc {
+        return None;
+    }
+    let find = |id: &str| layout.icons.iter().find(|i| i.id == id && i.parent.as_deref() == Some(CLOUD_FRAME));
+    let (a, b) = (find(&e.from)?, find(&e.to)?);
+    let index = |id: &str| model.nodes.iter().position(|n| n.id == id);
+    let (main, part) = if on_main(model, &a.id) { (a, b) } else { (b, a) };
+    if !on_main(model, &main.id) || on_main(model, &part.id) || partners(model, index(&part.id)?).len() != 1 || a.rect.y != b.rect.y {
+        return None;
+    }
+    let (lo, hi) = (main.rect.x.min(part.rect.x), main.rect.x.max(part.rect.x));
+    let n = layout.icons.iter().filter(|i| i.parent.as_deref() == Some(CLOUD_FRAME) && i.rect.y == a.rect.y && lo < i.rect.x && i.rect.x < hi).count();
+    Some((model.nodes.iter().position(|x| x.id == main.id)?, n))
+}
+
+/// Top to bottom, the line of an association from a main part of the global rank to a part
+/// attached to it in its row past nearer ones: out of the main part's side facing it, up over the
+/// row and down into the part's top. The farther the part, the higher its port on that side, the
+/// nearer the main part it turns up and the higher it runs, so no two such lines cross; the line
+/// to the nearest part runs straight on from the lowest port. None for any other line.
+fn over_the_row(model: &Model, layout: &Layout, edge: usize, axis: Axis) -> Option<LinePlan> {
+    let e = &model.edges[edge];
+    let (main, j) = between_in_row(model, layout, e, axis)?;
+    let main_id = &model.nodes[main].id;
+    let far = model.edges.iter().filter_map(|x| between_in_row(model, layout, x, axis)).filter(|&(m, _)| m == main).map(|(_, k)| k).max()?;
+    if far == 0 {
+        return None;
+    }
+    let (m, part) = (layout.rect(main_id), layout.rect(if &e.from == main_id { &e.to } else { &e.from }));
+    let lines = far as i32 + 2;
+    let pos = (100 * (far as i32 + 1 - j as i32) / lines) as u8;
+    let side_x = right(m);
+    let (bend, main_side, part_side) = if j == 0 {
+        (Bend::Straight, Side::Right, Side::Left)
+    } else {
+        let port_y = m.y + m.h * pos as i32 / 100;
+        let turn_x = side_x + OVER_STEP * (far - j + 1) as i32;
+        let lane_y = m.y - OVER_ROOM * j as i32 - OVER_ROOM / 2;
+        (Bend::Points(vec![(turn_x, port_y), (turn_x, lane_y), (part.x + part.w / 2, lane_y)]), Side::Right, Side::Top)
+    };
+    let main_first = &e.from == main_id;
+    let bend = match (main_first, bend) {
+        (false, Bend::Points(mut p)) => {
+            p.reverse();
+            Bend::Points(p)
+        }
+        (_, b) => b,
+    };
+    let part_pos = if j == 0 { pos } else { 50 };
+    let ((exit, exit_pos), (entry, entry_pos)) = if main_first { ((main_side, pos), (part_side, part_pos)) } else { ((part_side, part_pos), (main_side, pos)) };
+    Some(LinePlan {
+        edge,
+        from: e.from.clone(),
+        to: e.to.clone(),
+        exit,
+        entry,
+        bend,
+        exit_pos: Some(exit_pos),
+        entry_pos: Some(entry_pos),
+        keep: Keep::Free,
+        tracks: Vec::new(),
+        axis,
+    })
+}
+
+/// How far apart, out from the main part's side, the lines over a row turn up.
+const OVER_STEP: i32 = 8;
 
 /// For a main line from a part outside the Region into a part in it whose plain draft would run
 /// through the VPC: the points of a way around the Region on its low side across the main axis
