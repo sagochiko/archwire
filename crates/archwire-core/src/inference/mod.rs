@@ -14,6 +14,15 @@ mod reasons;
 
 pub(crate) use links::check_names;
 
+/// True when the definition's accepted main flows hold a loop that stays inside the subnets of
+/// the VPC, which is drawn. For the tests that count such definitions.
+#[cfg(test)]
+pub(crate) fn main_flow_loop_inside_subnets(def: &Definition, rules: &Rules) -> bool {
+    let accepted: Vec<(&Link, &LinkRule)> =
+        def.links.iter().filter_map(|l| rules.link(&l.from.service, &l.to.service, l.rel).map(|rule| (l, rule))).collect();
+    links::main_flow_loops(rules, &accepted).iter().any(|lp| lp.in_subnets)
+}
+
 use crate::def::{Definition, Link, Ref};
 use crate::diag::{Diagnostics, Problem, Versions};
 use crate::model::{Area, Axis, Model, Tier};
@@ -876,28 +885,57 @@ mod tests {
         assert_eq!((d.errors[0].code.as_str(), d.errors[0].at.as_deref()), ("UNSUPPORTED", Some("flows[0]")));
     }
 
-    // Fails if a definition whose flow comes back to the same function stops with a panic, loops, or
-    // is drawn with a broken diagram.
+    // Fails if a main flow back to a part it left is not stopped by the checks, at the line that
+    // closes the loop, with the parts of the loop in order, with or without a VPC; or if such a
+    // definition still reaches the layout.
     #[test]
-    fn a_flow_back_to_the_same_function_is_handled() {
-        // A line back to a part already on the flow runs against the direction of the drawing, which
-        // the layout refuses. The definition stops with LAYOUT_FAILED and no diagram, in either
-        // direction, with or without a VPC.
-        let defs = [
-            "flows:\n  - user -> apigateway(http) -> lambda.a -> sqs -> lambda.a\n",
-            "flows:\n  - user -> apigateway(http) -> lambda -> sqs\n  - sqs -> lambda\n",
-            "flows:\n  - user -> s3 -> lambda -> sns -> sqs -> lambda\n",
-            "flows:\n  - user -> apigateway(http) -> lambda -> aurora\n  - lambda -> sqs -> lambda\nchoose:\n  route.lambda.sqs: endpoint\n",
+    fn a_main_flow_back_to_a_part_stops() {
+        let cases = [
+            ("flows:\n  - user -> apigateway(http) -> lambda.a -> sqs -> lambda.a\n", "flows[0]", "sqs -> lambda.a", "`lambda.a`, `sqs`"),
+            ("flows:\n  - user -> apigateway(http) -> lambda -> sqs\n  - sqs -> lambda\n", "flows[1]", "sqs -> lambda", "`lambda`, `sqs`"),
+            ("flows:\n  - user -> s3 -> lambda -> sns -> sqs -> lambda\n", "flows[0]", "sqs -> lambda", "`lambda`, `sns`, `sqs`"),
+            (
+                "flows:\n  - user -> apigateway(http) -> lambda -> aurora\n  - lambda -> sqs -> lambda\nchoose:\n  route.lambda.sqs: endpoint\n",
+                "flows[1]",
+                "sqs -> lambda",
+                "`lambda`, `sqs`",
+            ),
+            // The line written later closes the loop, whichever part it starts from.
+            ("flows:\n  - sqs -> lambda\n  - user -> apigateway(http) -> lambda -> sqs\n", "flows[1]", "lambda -> sqs", "`sqs`, `lambda`"),
         ];
-        for src in defs {
+        for (src, at, got, through) in cases {
             let (m, d) = run(src);
-            assert!(d.errors.is_empty() && m.is_some(), "{src}: {:?}", d.errors);
+            assert!(m.is_none(), "{src}");
+            assert_eq!(d.errors.len(), 1, "{src}: {:?}", d.errors);
+            assert_eq!(first(&d), ("UNSUPPORTED", Some(at), Some(got)), "{src}: {:?}", d.errors);
+            assert_eq!(
+                d.errors[0].message,
+                format!("`{got}` closes a loop of main flows (->) through {through}; this version does not draw main flows that come back to a part"),
+                "{src}"
+            );
             for direction in ["down", "right"] {
                 let out = crate::compile(&format!("{src}set:\n  direction: {direction}\n"));
                 let codes: Vec<_> = out.diagnostics.errors.iter().map(|e| e.code.as_str()).collect();
-                assert!(!codes.is_empty() && codes.iter().all(|c| *c == "LAYOUT_FAILED"), "{src} {direction}: {codes:?}");
+                assert_eq!(codes, ["UNSUPPORTED"], "{src} {direction}");
                 assert!(out.drawio.is_none(), "{src} {direction}");
                 assert_eq!(out.diagnostics.exit_code(), 1, "{src} {direction}");
+            }
+        }
+    }
+
+    // Fails if a loop of main flows that stays inside the subnets of the VPC, which is drawn, is
+    // stopped as a loop.
+    #[test]
+    fn a_loop_inside_the_subnets_is_still_drawn() {
+        for src in [
+            "flows:\n  - ec2 -> aurora\n  - aurora -> ec2\n",
+            "flows:\n  - user -> alb -> ecs -> aurora\n  - aurora -> ecs\n",
+            "flows:\n  - user -> alb -> ecs.a -> aurora.a\n  - aurora.a -> ecs.a\n  - alb -> ecs.b\n",
+        ] {
+            for direction in ["down", "right"] {
+                let out = crate::compile(&format!("{src}set:\n  direction: {direction}\n"));
+                assert_eq!(out.diagnostics.exit_code(), 0, "{src} {direction}: {:?}", out.diagnostics.errors);
+                assert!(out.drawio.is_some(), "{src} {direction}");
             }
         }
     }

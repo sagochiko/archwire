@@ -881,3 +881,57 @@ fn lines_sharing_no_end_never_turn_at_one_point() {
         assert!(apart.is_empty(), "{axis:?}: {apart:?}\n{src}");
     }
 }
+
+// Fails if the check on loops of main flows stops a definition that is drawn: a fixed case, a
+// generated definition with a VPC, mixed with one or without one. Each set is counted, so a set
+// that shrinks by accident fails too. Loops inside the subnets of the VPC, such as `ec2 -> aurora`
+// with `aurora -> ec2`, are among them.
+#[test]
+fn the_loop_check_stops_no_drawn_definition() {
+    let r = Rules::builtin();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/cases");
+    let mut cases: Vec<String> = Vec::new();
+    let mut dirs: Vec<_> = std::fs::read_dir(&root).unwrap().map(|e| e.unwrap().path()).collect();
+    dirs.sort();
+    for dir in dirs {
+        if dir.join("expected.drawio").exists() {
+            cases.push(std::fs::read_to_string(dir.join("def.yaml")).unwrap());
+        }
+    }
+    let sets = [
+        ("fixed cases", cases),
+        ("with a VPC", crate::test_inputs::generated_with_a_vpc()),
+        ("mixed", all_inputs().into_iter().map(|(_, src)| src).collect()),
+        ("without a VPC", crate::test_inputs::generated()),
+        (
+            "loops inside the subnets",
+            vec![
+                crate::test_inputs::FEWER_READERS.to_string(),
+                FEWER_READERS_MIX.to_string(),
+                "flows:\n  - ec2 -> aurora\n  - aurora -> ec2\nset:\n  azs: 3\n".to_string(),
+                "flows:\n  - user -> alb -> ecs -> aurora\n  - aurora -> ecs\n".to_string(),
+            ],
+        ),
+    ];
+    let mut counts: Vec<(&str, usize, usize)> = Vec::new();
+    for (name, defs) in &sets {
+        let mut looped = 0;
+        let mut stopped = Vec::new();
+        for src in defs {
+            let def = crate::def::parse(src).unwrap();
+            if crate::inference::main_flow_loop_inside_subnets(&def, &r) {
+                looped += 1;
+            }
+            let (_, d) = crate::inference::infer(&def, &r);
+            if d.errors.iter().any(|e| e.message.contains("closes a loop of main flows")) {
+                stopped.push(src.clone());
+            }
+        }
+        assert!(stopped.is_empty(), "{name}: {} stopped as loops:\n{}", stopped.len(), stopped.join("\n"));
+        counts.push((name, defs.len(), looped));
+    }
+    assert_eq!(
+        counts,
+        [("fixed cases", 55, 0), ("with a VPC", 1008, 0), ("mixed", 865, 1), ("without a VPC", 1212, 0), ("loops inside the subnets", 4, 4)]
+    );
+}

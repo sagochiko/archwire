@@ -136,6 +136,7 @@ pub(super) fn check_links<'a>(
     }
     check_egress(rules, &accepted, errors);
     check_main_flows(def, rules, parts, &accepted, errors);
+    check_loops(rules, &accepted, errors);
     check_limits(&accepted, errors);
     check_places(rules, &accepted, errors);
     accepted
@@ -232,6 +233,90 @@ fn check_main_flows(def: &Definition, rules: &Rules, parts: &[&Ref], accepted: &
             let message = format!("`{got}` needs `{}` on a main flow (->) from {origin_list}", hang.name);
             errors.push(problem("UNSUPPORTED", &l.at, &got, Vec::new(), message));
         }
+    }
+}
+
+/// A loop of main flows: the line that closes it, the parts it goes through from that line's
+/// `to` part on, and whether every one of them is in a subnet of the VPC.
+pub(super) struct Loop<'a> {
+    pub(super) line: &'a Link,
+    pub(super) through: Vec<&'a str>,
+    pub(super) in_subnets: bool,
+}
+
+/// The loops of main flows between parts, each found at the line that closes it: the lines are
+/// read in the order written, and a line closes a loop when the parts before it already lead from
+/// its `to` part back to its `from` part. A loop through a part outside the subnets of the VPC is
+/// preferred over one that stays inside them. A line that closes a loop through such a part is
+/// not followed by the lines after it, so one loop is found once.
+pub(super) fn main_flow_loops<'a>(rules: &Rules, accepted: &[(&'a Link, &LinkRule)]) -> Vec<Loop<'a>> {
+    let in_subnet = |name: &str| {
+        let r = accepted.iter().find_map(|(l, _)| [&l.from, &l.to].into_iter().find(|r| r.name == name));
+        r.is_some_and(|r| matches!(area(rules, accepted, r), Some(Area::Subnet(_))))
+    };
+    // The shortest path along `kept` from `from` to `to`, each step taken in the order written.
+    fn path<'a>(kept: &[&'a Link], from: &'a str, to: &str) -> Option<Vec<&'a str>> {
+        let mut seen: Vec<(&'a str, Option<usize>)> = vec![(from, None)];
+        let mut k = 0;
+        while k < seen.len() {
+            let here = seen[k].0;
+            if here == to {
+                let mut out = vec![here];
+                let mut at = k;
+                while let Some(back) = seen[at].1 {
+                    out.push(seen[back].0);
+                    at = back;
+                }
+                out.reverse();
+                return Some(out);
+            }
+            for l in kept.iter().filter(|l| l.from.name == here) {
+                if !seen.iter().any(|(n, _)| *n == l.to.name) {
+                    seen.push((&l.to.name, Some(k)));
+                }
+            }
+            k += 1;
+        }
+        None
+    }
+    let mut kept: Vec<&'a Link> = Vec::new();
+    let mut out = Vec::new();
+    for (l, _) in accepted.iter().filter(|(l, _)| l.rel == Rel::Main) {
+        let (from, to) = (l.from.name.as_str(), l.to.name.as_str());
+        let Some(any) = path(&kept, to, from) else {
+            kept.push(l);
+            continue;
+        };
+        // A loop through a part outside the subnets, by way of the first such part reached.
+        let outside = if !in_subnet(from) || !in_subnet(to) {
+            Some(any.clone())
+        } else {
+            any.iter().copied().chain(kept.iter().map(|k| k.to.name.as_str())).filter(|n| !in_subnet(n)).find_map(|x| {
+                let there = path(&kept, to, x)?;
+                let back = path(&kept, x, from)?;
+                Some(there.into_iter().chain(back.into_iter().skip(1)).collect())
+            })
+        };
+        match outside {
+            Some(through) => out.push(Loop { line: l, through, in_subnets: false }),
+            None => {
+                out.push(Loop { line: l, through: any, in_subnets: true });
+                kept.push(l);
+            }
+        }
+    }
+    out
+}
+
+/// A loop of main flows through a part outside the subnets of the VPC stops at the line that
+/// closes it: the parts of the diagram outside the VPC are laid out along the flows, so a line back
+/// to a part it left has nowhere to go. A loop that stays inside the subnets is drawn.
+fn check_loops(rules: &Rules, accepted: &[(&Link, &LinkRule)], errors: &mut Vec<Problem>) {
+    for lp in main_flow_loops(rules, accepted).into_iter().filter(|lp| !lp.in_subnets) {
+        let got = written(lp.line);
+        let through = lp.through.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ");
+        let message = format!("`{got}` closes a loop of main flows (->) through {through}; this version does not draw main flows that come back to a part");
+        errors.push(problem("UNSUPPORTED", &lp.line.at, &got, Vec::new(), message));
     }
 }
 
