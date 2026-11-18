@@ -2062,7 +2062,8 @@ set:
             for lang in ["en", "ja"] {
                 for n in 2..=3 {
                     let src = format!("flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n{}set:\n  azs: {azs}\n  lang: {lang}\n", attached[..n].concat());
-                    let (_, p) = arranged(&src, Axis::Down);
+                    let (m, p) = arranged(&src, Axis::Down);
+                    assert_attachments_route_cleanly(&m, &p, &src);
                     let cf = at(&p, "cloudfront").x;
                     let left: Vec<&str> = ids[..n].iter().copied().filter(|id| at(&p, id).x < cf).collect();
                     assert!(!left.is_empty() && left.len() < n, "{left:?}\n{src}");
@@ -2073,9 +2074,146 @@ set:
             }
         }
         let below = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - cloudfront -> s3\n  - ecs -> s3\n  - waf -- cloudfront\n  - acm -- cloudfront\n";
-        let (_, p) = arranged(below, Axis::Down);
+        let (m, p) = arranged(below, Axis::Down);
+        assert_attachments_route_cleanly(&m, &p, below);
         let cf = at(&p, "cloudfront").x;
         assert!(at(&p, "waf").x > cf && at(&p, "acm").x > cf, "{below}");
+    }
+
+    /// Routes the lines of a layout and fails on a note naming a line, or on a dotted line of an
+    /// association out of the global rank that crosses an icon, a name or a label or runs along
+    /// another line, or, with `crossings`, crosses another line.
+    fn assert_attachments_route_cleanly(m: &Model, p: &Placement, src: &str) {
+        attachments_route(m, p, src, true)
+    }
+
+    fn attachments_route(m: &Model, p: &Placement, src: &str, crossings: bool) {
+        let r = Rules::builtin();
+        let (w, notes) = crate::route::route_planned(m, &p.layout, &r, &p.lines);
+        let (faults, named) = crate::route::tests::wire_faults(&p.layout, &w, &notes);
+        assert!(named.is_empty(), "{named:?}\n{src}");
+        let global = |id: &str| p.layout.icons.iter().any(|i| i.id == id && i.parent.as_deref() == Some(CLOUD_FRAME));
+        let dotted: Vec<&str> = w.iter().filter(|x| x.style == crate::route::WireStyle::Assoc && global(&x.from) && global(&x.to)).map(|x| x.id.as_str()).collect();
+        assert!(!dotted.is_empty(), "{src}");
+        let bad: Vec<&(String, String)> = faults.iter().filter(|(id, what)| dotted.contains(&id.as_str()) || dotted.iter().any(|d| what.ends_with(d))).collect();
+        assert!(bad.is_empty(), "{bad:?}\n{src}");
+        let paths: Vec<(&str, Vec<(i32, i32)>)> = w.iter().map(|x| (x.id.as_str(), crate::route::tests::full_path(x, &p.layout))).collect();
+        for (id, a) in paths.iter().filter(|(id, _)| crossings && dotted.contains(id)) {
+            for (other, b) in paths.iter().filter(|(o, _)| o != id) {
+                let crossed = a.windows(2).any(|s| b.windows(2).any(|t| crate::path::crosses(s[0], s[1], t[0], t[1])));
+                assert!(!crossed, "{id} crosses {other}\n{src}");
+            }
+        }
+    }
+
+    /// The parts attached to `cf` among `ids`: those left of it, and whether all sit in its row.
+    fn sides_of(p: &Placement, cf: &str, ids: &[&str]) -> (Vec<String>, bool) {
+        let c = at(p, cf);
+        (ids.iter().filter(|id| at(p, id).x < c.x).map(|id| id.to_string()).collect(), ids.iter().all(|id| at(p, id).y == c.y))
+    }
+
+    const ROUTE53_3AZ: &str = "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - route53 -- cloudfront\n  - acm -- cloudfront\n  - waf -- cloudfront\nset:\n  azs: 3\n";
+
+    // Fails if, of the numbers of parts the split may put left of CloudFront, the one leaving the
+    // row reaching least far past the Region's right edge is not taken: with three zones in
+    // English, one part left would leave the row past it, two keep it within.
+    #[test]
+    fn the_split_reaching_least_past_the_region_is_taken() {
+        let src = format!("{ROUTE53_3AZ}  lang: en\n");
+        let (m, p) = arranged(&src, Axis::Down);
+        let (left, row) = sides_of(&p, "cloudfront", &["route53", "acm", "waf"]);
+        assert!(row, "{src}");
+        assert_eq!(left, ["acm", "waf"], "{src}");
+        // With only the web ACL left, the certificate would sit two steps right of CloudFront.
+        let (cf, acm, region) = (at(&p, "cloudfront"), at(&p, "acm"), at(&p, "region"));
+        let name_end = label_of(&p, "acm").x + label_of(&p, "acm").w - acm.x;
+        assert!(cf.x + 2 * p.row_step + name_end.max(acm.w) > right(region), "{src}");
+        assert!(p.layout.icons.iter().filter(|i| i.parent.as_deref() == Some(CLOUD_FRAME)).all(|i| right(i.rect).max(right(name_area(i))) <= right(region)), "{src}");
+        assert_attachments_route_cleanly(&m, &p, &src);
+    }
+
+    // Fails if, when two numbers of parts left of CloudFront both keep the row within the Region,
+    // the larger is taken: with three zones in Japanese, one or two parts left both do.
+    #[test]
+    fn a_tie_puts_fewer_parts_left() {
+        let src = format!("{ROUTE53_3AZ}  lang: ja\n");
+        let (m, p) = arranged(&src, Axis::Down);
+        let (left, row) = sides_of(&p, "cloudfront", &["route53", "acm", "waf"]);
+        assert!(row, "{src}");
+        assert_eq!(left, ["waf"], "{src}");
+        let (cf, acm, region) = (at(&p, "cloudfront"), at(&p, "acm"), at(&p, "region"));
+        // Two left: the certificate one step left of CloudFront would still be within the Region's left edge.
+        let name_start = (label_of(&p, "acm").x - acm.x).min(0);
+        assert!(cf.x - 2 * p.row_step + name_start >= region.x, "{src}");
+        assert!(p.layout.icons.iter().filter(|i| i.parent.as_deref() == Some(CLOUD_FRAME)).all(|i| right(i.rect).max(right(name_area(i))) <= right(region)), "{src}");
+        assert_attachments_route_cleanly(&m, &p, &src);
+    }
+
+    const TWO_FRONTS: &str = "flows:\n  - user -> cloudfront.a -> alb.web -> ecs.web -> aurora\n  - user -> cloudfront.b -> alb.admin -> ecs.admin\n";
+    const THREE_ON_B: &str = "  - waf.b -- cloudfront.b\n  - acm.b -- cloudfront.b\n  - route53.b -- cloudfront.b\n";
+
+    // Fails if a split with two or more parts left of a CloudFront the users come into from the
+    // left is kept; or if, the split undone, the parts do not go back into one column when the
+    // users then come into that CloudFront from the right.
+    #[test]
+    fn a_user_from_the_left_undoes_a_split_of_two() {
+        let b = ["waf.b", "acm.b", "route53.b"];
+        // The users come into the second distribution from its left: the split is undone and the
+        // parts stay in its row to its right.
+        let src = format!("{TWO_FRONTS}{THREE_ON_B}set:\n  azs: 2\n  lang: en\n");
+        let (m, p) = arranged(&src, Axis::Down);
+        assert_eq!(sides_of(&p, "cloudfront.b", &b), (Vec::new(), true), "{src}");
+        assert_attachments_route_cleanly(&m, &p, &src);
+        // With a third distribution past it, the split undone brings the users right of it.
+        let src = format!("{TWO_FRONTS}  - user -> cloudfront.c -> s3.c\n{THREE_ON_B}set:\n  azs: 2\n  lang: en\n");
+        let (m, p) = arranged(&src, Axis::Down);
+        let (left, row) = sides_of(&p, "cloudfront.b", &b);
+        assert!(left.is_empty() && !row, "{left:?} {row}\n{src}");
+        let x = |id: &str| at(&p, id).x;
+        assert!(x("waf.b") == x("acm.b") && x("acm.b") == x("route53.b"), "{src}");
+        assert_attachments_route_cleanly(&m, &p, &src);
+    }
+
+    // Fails if, with two distributions in a diagram with a VPC and the users coming into the
+    // first from its right, the parts of either stay in a row or split: the whole rank goes back
+    // to columns.
+    #[test]
+    fn a_user_from_the_right_of_one_distribution_puts_every_part_in_a_column() {
+        let src = format!("{TWO_FRONTS}  - waf.a -- cloudfront.a\n  - acm.a -- cloudfront.a\n{THREE_ON_B}set:\n  azs: 2\n  lang: en\n");
+        let (m, p) = arranged(&src, Axis::Down);
+        for (cf, ids) in [("cloudfront.a", vec!["waf.a", "acm.a"]), ("cloudfront.b", vec!["waf.b", "acm.b", "route53.b"])] {
+            let (left, row) = sides_of(&p, cf, &ids);
+            assert!(left.is_empty() && !row, "{cf}: {left:?} {row}\n{src}");
+            assert!(ids.iter().all(|id| at(&p, id).x == at(&p, cf).x + p.row_step), "{cf}\n{src}");
+        }
+        assert_attachments_route_cleanly(&m, &p, &src);
+    }
+
+    // Fails if, top to bottom with a VPC, four named parts attached to one CloudFront come out
+    // with a line named in a note or a dotted line crossing an icon, a name, a label or another
+    // line, or a web ACL attached to two with a note or a dotted line crossing an icon, a name or
+    // a label; or if a single attached part leaves its place one step
+    // right of CloudFront in its row.
+    #[test]
+    fn more_attached_parts_and_a_shared_one_route_cleanly() {
+        let four = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - waf -- cloudfront\n  - acm -- cloudfront\n  - route53.x -- cloudfront\n  - route53.y -- cloudfront\nset:\n  azs: 3\n";
+        let (m, p) = arranged(four, Axis::Down);
+        let (left, row) = sides_of(&p, "cloudfront", &["waf", "acm", "route53.x", "route53.y"]);
+        assert!(row && !left.is_empty(), "{left:?}\n{four}");
+        assert_attachments_route_cleanly(&m, &p, four);
+        let shared = format!("{TWO_FRONTS}  - waf -- cloudfront.a\n  - waf -- cloudfront.b\n  - acm.a -- cloudfront.a\n  - route53.a -- cloudfront.a\nset:\n  azs: 3\n");
+        let (m, p) = arranged(&shared, Axis::Down);
+        assert!(at(&p, "waf").x > at(&p, "cloudfront.b").x && at(&p, "waf").y == at(&p, "cloudfront.b").y, "{shared}");
+        // The dotted line from the first distribution to the shared web ACL, past the second,
+        // crosses the line from the users into the second; that crossing is not checked here.
+        attachments_route(&m, &p, &shared, false);
+        for lang in ["en", "ja"] {
+            let one = format!("flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - waf -- cloudfront\nset:\n  lang: {lang}\n");
+            let (m, p) = arranged(&one, Axis::Down);
+            let (cf, waf) = (at(&p, "cloudfront"), at(&p, "waf"));
+            assert_eq!((waf.x, waf.y), (cf.x + p.row_step, cf.y), "{one}");
+            assert_attachments_route_cleanly(&m, &p, &one);
+        }
     }
 
     // Fails if, top to bottom, the parts attached to CloudFront leave the column one step across
