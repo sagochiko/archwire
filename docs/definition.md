@@ -511,7 +511,7 @@ Here is a full report for a misspelled name, from `- user -> cloudfrnt -> alb ->
 {
   "versions": {
     "archwire": "0.1.0",
-    "rules": "2026.11.6"
+    "rules": "2026.11.7"
   },
   "derived": [],
   "holes": [],
@@ -524,6 +524,7 @@ Here is a full report for a misspelled name, from `- user -> cloudfrnt -> alb ->
         "acm",
         "alb",
         "apigateway",
+        "athena",
         "aurora",
         "cloudfront",
         "cloudtrail",
@@ -533,13 +534,16 @@ Here is a full report for a misspelled name, from `- user -> cloudfrnt -> alb ->
         "dynamodb",
         "ecs",
         "eventbridge",
+        "glue",
         "guardduty",
         "inspector",
         "internet",
         "lambda",
         "s3",
         "securityhub",
+        "securitylake",
         "sns",
+        "sqs",
         "ssm",
         "stepfunctions",
         "user",
