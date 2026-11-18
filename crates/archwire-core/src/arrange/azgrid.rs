@@ -2094,7 +2094,8 @@ pub(in crate::arrange) mod tests {
 
     // Fails if, in a VPC no line comes down into from above but with lines running down between
     // private rows (EC2 over Aurora), the parts of a private subnet sit further from one side of it
-    // than from the other, or the label of a line between two of them runs over a frame side.
+    // than from the other, or the label of a line between two of them runs over a frame side or
+    // lies outside every private subnet.
     #[test]
     fn rows_no_line_comes_down_into_keep_even_room_and_their_labels_inside() {
         let defs = [
@@ -2117,15 +2118,23 @@ pub(in crate::arrange) mod tests {
                     }
                     let (w, _) = crate::route::route_planned(&m, &p.layout, &r, &p.lines);
                     let in_subnet = |id: &str| m.nodes.iter().any(|n| n.id == id && matches!(n.area, Area::Subnet(_)));
+                    let mut labels = 0;
                     for x in w.iter().filter(|x| !x.label.is_empty() && in_subnet(&x.from) && in_subnet(&x.to)) {
+                        labels += 1;
                         let b = crate::route::tests::label_area_of(x, &p.layout);
+                        let mut held = false;
                         for f in &p.layout.frames {
                             let o = f.rect;
                             let meets = b.x < o.x + o.w && o.x < b.x + b.w && b.y < o.y + o.h && o.y < b.y + b.h;
                             let within = b.x >= o.x && b.x + b.w <= o.x + o.w && b.y >= o.y && b.y + b.h <= o.y + o.h;
                             assert!(!meets || within, "{src}{axis:?} the label of {} runs over the side of {}", x.id, f.id);
+                            held |= within && f.id.starts_with("pri-");
                         }
+                        // Clear of every frame side is not enough: a label pushed out of the subnets
+                        // into the zone or the VPC would meet no side of a subnet either.
+                        assert!(held, "{src}{axis:?} the label of {} lies outside every private subnet", x.id);
                     }
+                    assert!(labels > 0, "{src}{axis:?} no labelled line between private parts was checked");
                 }
             }
         }
