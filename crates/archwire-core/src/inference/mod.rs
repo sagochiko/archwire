@@ -775,25 +775,30 @@ mod tests {
         }
     }
 
-    // Fails if a KMS key is accepted on a part or in a direction left out on purpose.
+    // Fails if a KMS key is accepted on a part or in a direction left out on purpose. The list of
+    // connections is asked directly as well, because a reversed or flowing line would also stop
+    // later, for not being on a main flow, with the same code, place and text.
     #[test]
     fn kms_attaches_only_to_s3_and_dynamodb() {
+        let r = Rules::builtin();
         let web = "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n";
         let api = "flows:\n  - user -> apigateway(http) -> lambda -> dynamodb\n";
         let edge = "flows:\n  - user -> cloudfront -> s3\n";
         let defs = [
-            (web, "kms -- aurora"),
-            (web, "kms -- ecs"),
-            (api, "kms -- lambda"),
-            (edge, "s3 -- kms"),
-            (edge, "kms -> s3"),
-            (edge, "kms ~> s3"),
+            (web, "kms -- aurora", "kms", "aurora", Rel::Assoc),
+            (web, "kms -- ecs", "kms", "ecs", Rel::Assoc),
+            (api, "kms -- lambda", "kms", "lambda", Rel::Assoc),
+            (edge, "s3 -- kms", "s3", "kms", Rel::Assoc),
+            (edge, "kms -> s3", "kms", "s3", Rel::Main),
+            (edge, "kms ~> s3", "kms", "s3", Rel::Aux),
         ];
-        for (base, line) in defs {
+        for (base, line, from, to, rel) in defs {
+            assert!(r.link(from, to, rel).is_none(), "links.toml accepts `{line}`");
             let src = format!("{base}  - {line}\n");
             let (m, d) = run(&src);
             assert!(m.is_none(), "{src}");
             assert_eq!(first(&d), ("UNSUPPORTED", Some("flows[1]"), Some(line)), "{src}: {:?}", d.errors);
+            assert_eq!(d.errors[0].message, format!("`{line}` is not a supported connection"), "{src}");
         }
     }
 
