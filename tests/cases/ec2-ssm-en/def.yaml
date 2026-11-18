@@ -1,0 +1,7 @@
+flows:
+  - ec2 -> ssm
+  - ec2 ~> cloudwatch
+set:
+  lang: en
+choose:
+  route.ec2.ssm: endpoint

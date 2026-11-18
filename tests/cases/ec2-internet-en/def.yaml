@@ -1,0 +1,4 @@
+flows:
+  - ec2 -> internet
+set:
+  lang: en

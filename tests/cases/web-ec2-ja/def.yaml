@@ -1,0 +1,5 @@
+flows:
+  - user -> alb -> ec2 -> aurora
+  - ec2 -> internet
+set:
+  lang: ja

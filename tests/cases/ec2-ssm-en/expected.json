@@ -1,0 +1,87 @@
+{
+  "versions": {
+    "archwire": "0.1.0",
+    "rules": "2026.11.8"
+  },
+  "derived": [
+    {
+      "target": "aws-cloud",
+      "added": true,
+      "kind": "default",
+      "rule": "resources-inside-aws-cloud-frame",
+      "reason": "AWS resources are drawn inside the AWS Cloud frame.",
+      "source": null
+    },
+    {
+      "target": "region",
+      "added": true,
+      "kind": "default",
+      "rule": "resources-inside-region-frame",
+      "reason": "AWS resources that belong to a Region are drawn inside that Region's frame.",
+      "source": null
+    },
+    {
+      "target": "region",
+      "added": true,
+      "kind": "default",
+      "rule": "default-region",
+      "reason": "No Region was given, so ap-northeast-1 (Tokyo) is used.",
+      "source": null
+    },
+    {
+      "target": "vpc",
+      "added": true,
+      "kind": "constraint",
+      "rule": "ec2-instance-in-subnet",
+      "reason": "An Amazon EC2 instance is launched in a subnet, in the Availability Zone associated with that subnet, so a VPC is drawn.",
+      "source": "https://aws.amazon.com/vpc/faqs/"
+    },
+    {
+      "target": "az",
+      "added": true,
+      "kind": "default",
+      "rule": "default-two-azs-for-instances",
+      "reason": "No number of Availability Zones was given, so two are used.",
+      "source": null
+    },
+    {
+      "target": "subnet",
+      "added": true,
+      "kind": "default",
+      "rule": "private-subnet-per-az",
+      "reason": "archwire gives each Availability Zone one private subnet; no part here is placed in a public subnet.",
+      "source": null
+    },
+    {
+      "target": "ec2",
+      "added": false,
+      "kind": "default",
+      "rule": "instances-in-private",
+      "reason": "No subnet was given, so the EC2 instances are placed in private subnets, which are not reachable from the internet. archwire draws one in the private subnet of each Availability Zone.",
+      "source": null
+    },
+    {
+      "target": "ssm",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "Regional services that are not placed in a VPC subnet are drawn inside the Region frame and outside the VPC frame.",
+      "source": null
+    },
+    {
+      "target": "cloudwatch",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "Regional services that are not placed in a VPC subnet are drawn inside the Region frame and outside the VPC frame.",
+      "source": null
+    }
+  ],
+  "holes": [],
+  "errors": [],
+  "warnings": [],
+  "notes": [
+    "Auxiliary flows (~>) are drawn as lines only; their network route is not handled.",
+    "VPC endpoint icons are not drawn."
+  ]
+}

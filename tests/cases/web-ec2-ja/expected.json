@@ -1,0 +1,140 @@
+{
+  "versions": {
+    "archwire": "0.1.0",
+    "rules": "2026.11.8"
+  },
+  "derived": [
+    {
+      "target": "aws-cloud",
+      "added": true,
+      "kind": "default",
+      "rule": "resources-inside-aws-cloud-frame",
+      "reason": "AWS のリソースは AWS Cloud の枠の中に描く。",
+      "source": null
+    },
+    {
+      "target": "region",
+      "added": true,
+      "kind": "default",
+      "rule": "resources-inside-region-frame",
+      "reason": "リージョンに属する AWS のリソースは、そのリージョンの枠の中に描く。",
+      "source": null
+    },
+    {
+      "target": "region",
+      "added": true,
+      "kind": "default",
+      "rule": "default-region",
+      "reason": "リージョンの指定が無いので、ap-northeast-1（東京）にする。",
+      "source": null
+    },
+    {
+      "target": "vpc",
+      "added": true,
+      "kind": "constraint",
+      "rule": "load-balancer-in-vpc",
+      "reason": "Application Load Balancer は VPC のサブネットに作るので、VPC を描く。",
+      "source": "https://docs.aws.amazon.com/elasticloadbalancing/latest/application/create-application-load-balancer.html"
+    },
+    {
+      "target": "az",
+      "added": true,
+      "kind": "constraint",
+      "rule": "alb-spans-two-azs",
+      "reason": "Application Load Balancer には、2つ以上のアベイラビリティゾーンのサブネットが要る。",
+      "source": "https://docs.aws.amazon.com/elasticloadbalancing/latest/application/application-load-balancers.html"
+    },
+    {
+      "target": "az",
+      "added": true,
+      "kind": "default",
+      "rule": "default-two-azs",
+      "reason": "AZ の数の指定が無いので、Application Load Balancer が受け付ける最小の2つにする。",
+      "source": null
+    },
+    {
+      "target": "subnet",
+      "added": true,
+      "kind": "default",
+      "rule": "public-and-private-subnet-per-az",
+      "reason": "archwire は、各アベイラビリティゾーンにパブリックサブネットとプライベートサブネットを1つずつ置く。",
+      "source": null
+    },
+    {
+      "target": "ec2",
+      "added": false,
+      "kind": "default",
+      "rule": "instances-in-private",
+      "reason": "サブネットの指定が無いので、EC2 のインスタンスは、インターネットから届かないプライベートサブネットに置く。archwire は、各アベイラビリティゾーンのプライベートサブネットに1つずつ描く。",
+      "source": null
+    },
+    {
+      "target": "aurora",
+      "added": false,
+      "kind": "default",
+      "rule": "database-in-private",
+      "reason": "サブネットの指定が無いので、Aurora はインターネットから届かないプライベートサブネットに置く。",
+      "source": null
+    },
+    {
+      "target": "aurora",
+      "added": false,
+      "kind": "default",
+      "rule": "aurora-writer-reader",
+      "reason": "Writer を1つ目の AZ に、Reader を残りの AZ に置く。",
+      "source": null
+    },
+    {
+      "target": "igw",
+      "added": true,
+      "kind": "constraint",
+      "rule": "internet-facing-alb-in-vpc-with-igw",
+      "reason": "インターネット向けの Application Load Balancer では、Internet Gateway のある VPC しか選べないので、VPC に Internet Gateway を置く。",
+      "source": "https://docs.aws.amazon.com/elasticloadbalancing/latest/application/create-application-load-balancer.html"
+    },
+    {
+      "target": "nat-1a",
+      "added": true,
+      "kind": "constraint",
+      "rule": "private-egress-through-nat",
+      "reason": "プライベートサブネットのリソースは、パブリックサブネットに置いた NAT デバイスを通じてインターネットへ接続できる。NAT デバイスは、送信元の IPv4 アドレスを自分のアドレスに置きかえる。",
+      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat.html"
+    },
+    {
+      "target": "nat-1a",
+      "added": true,
+      "kind": "default",
+      "rule": "nat-device-is-nat-gateway",
+      "reason": "AWS が提供するマネージドな NAT デバイスである NAT ゲートウェイを使うことも、EC2 インスタンス上に自分で NAT デバイス（NAT インスタンス）を作ることもできる。AWS は、可用性と帯域幅が優れ管理の手間が少ない NAT ゲートウェイを推奨している。archwire は NAT ゲートウェイを描く。",
+      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat.html"
+    },
+    {
+      "target": "nat-1c",
+      "added": true,
+      "kind": "constraint",
+      "rule": "private-egress-through-nat",
+      "reason": "プライベートサブネットのリソースは、パブリックサブネットに置いた NAT デバイスを通じてインターネットへ接続できる。NAT デバイスは、送信元の IPv4 アドレスを自分のアドレスに置きかえる。",
+      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat.html"
+    },
+    {
+      "target": "nat-1c",
+      "added": true,
+      "kind": "default",
+      "rule": "nat-device-is-nat-gateway",
+      "reason": "AWS が提供するマネージドな NAT デバイスである NAT ゲートウェイを使うことも、EC2 インスタンス上に自分で NAT デバイス（NAT インスタンス）を作ることもできる。AWS は、可用性と帯域幅が優れ管理の手間が少ない NAT ゲートウェイを推奨している。archwire は NAT ゲートウェイを描く。",
+      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat.html"
+    },
+    {
+      "target": "nat",
+      "added": true,
+      "kind": "default",
+      "rule": "nat-per-az",
+      "reason": "NAT Gateway をアベイラビリティゾーンごとに置くと、ほかのゾーンが止まっても外向きの通信が続く。",
+      "source": "https://docs.aws.amazon.com/vpc/latest/userguide/nat-gateway-scenarios.html"
+    }
+  ],
+  "holes": [],
+  "errors": [],
+  "warnings": [],
+  "notes": []
+}
