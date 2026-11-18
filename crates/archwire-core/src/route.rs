@@ -17,7 +17,7 @@ use crate::ids::edge_id;
 use crate::labels::{path_length, LabelSpot};
 use crate::layout::{Icon, Layout, Rect};
 use crate::lines::{gather, label_parts, Line};
-use crate::model::{Axis, Model, Node};
+use crate::model::{Area, Axis, Model, Node};
 use crate::path::{outward, reverse, Draft, Fence, Pt, Scene};
 use crate::rules::{DerivedRole, Rules};
 
@@ -327,7 +327,10 @@ pub(crate) fn draw(ctx: &Ctx, specs: &[Line], drafts: &[Draft], plans: &[LinePla
             spots[i] = Some(LabelSpot { text, above: level, flip: false, at: None, area: None, clear: true });
             continue;
         }
-        let spot = ctx.place_label(&label_parts(s, model, rules), (&paths, i), level, near_source, axis, &areas);
+        // The dashed line of a part attached to a part in the VPC, such as a web ACL to a load balancer.
+        let in_vpc = |id: &str| matches!(ctx.node(id).area, Area::Subnet(_) | Area::VpcEdge);
+        let outside = s.rel == Rel::Assoc && in_vpc(&s.from) != in_vpc(&s.to);
+        let spot = ctx.place_label(&label_parts(s, model, rules), (&paths, i), level, near_source, axis, outside, &areas);
         areas.extend(spot.area);
         spots[i] = Some(spot);
     }
@@ -772,7 +775,7 @@ pub(crate) mod tests {
         let place = |others: Vec<Vec<Pt>>| {
             let mut paths = vec![me.clone()];
             paths.extend(others);
-            let spot = ctx.place_label(&["HTTPS".to_string()], (&paths, 0), true, false, Axis::Right, &[]);
+            let spot = ctx.place_label(&["HTTPS".to_string()], (&paths, 0), true, false, Axis::Right, false, &[]);
             (spot, paths)
         };
         let clear_of_lines = |area: Rect, paths: &[Vec<Pt>]| paths[1..].iter().all(|p| p.windows(2).all(|s| !hits(s[0], s[1], area)));
@@ -805,7 +808,7 @@ pub(crate) mod tests {
         let me = w.iter().position(|x| x.id == "edge-cloudfront-to-s3").unwrap();
         // Labels already placed everywhere: no spot is clear even over frame sides.
         let everywhere = Rect { x: -10_000, y: -10_000, w: 20_000, h: 20_000 };
-        let spot = ctx.place_label(&["Static files".to_string()], (&paths, me), false, false, Axis::Right, &[everywhere]);
+        let spot = ctx.place_label(&["Static files".to_string()], (&paths, me), false, false, Axis::Right, false, &[everywhere]);
         assert!(!spot.clear);
         assert_eq!((spot.text.as_str(), spot.at), ("Static files", None));
     }
@@ -1734,6 +1737,24 @@ pub(crate) mod tests {
         l.frames.push(Frame { id: "f".to_string(), kind: FrameKind::Vpc, label: "F".to_string(), rect: Rect { x: 200, y: 0, w: 200, h: 300 }, parent: Some("region".to_string()) });
         let p = keep_draft(&m, 0, Side::Right, Side::Left, Bend::Straight, keep);
         (m, l, vec![p])
+    }
+
+    // Fails if the label of the dashed line from a certificate or a web ACL to the load balancer
+    // it is attached to lies inside the VPC frame, in either direction. Down the page, "Web ACL"
+    // sat in the VPC between the load balancer's "HTTP" and the ECS tasks' "Outbound".
+    #[test]
+    fn labels_of_lines_attached_to_a_load_balancer_sit_outside_the_vpc() {
+        let src = include_str!("../../../tests/cases/web-alb-attach-en/def.yaml");
+        for axis in AXES {
+            let (_, l, w, notes) = planned(src, axis);
+            assert!(notes.iter().all(|n| !n.contains("edge-")), "{axis:?}: {notes:?}");
+            let vpc = l.rect("vpc");
+            for (from, to) in [("waf", "alb"), ("acm.alb", "alb")] {
+                let x = wire(&w, from, to);
+                let area = crate::audit::audit_wire_label(x, &full_path(x, &l)).expect("a label");
+                assert!(!overlaps(area, vpc), "{axis:?}: the label of {} at {area:?} lies in the VPC {vpc:?}", x.id);
+            }
+        }
     }
 
     // Fails if the final check lets two lines that share no end turn at one point unnamed: drawn,

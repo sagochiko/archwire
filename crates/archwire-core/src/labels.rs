@@ -1,9 +1,9 @@
 //! Placing a line's label along the line.
 
-use crate::layout::Rect;
+use crate::layout::{FrameKind, Rect};
 use crate::measure::{label_margin, wire_label_area};
 use crate::model::Axis;
-use crate::path::{alongside, Pt};
+use crate::path::{alongside, hits, overlaps, Pt};
 use crate::route::Ctx;
 
 /// Spots tried for a moved label are this far apart along the line; the spots in between are tried after them.
@@ -76,7 +76,10 @@ impl<'a> Ctx<'a> {
     /// Running down, when the usual spot is on a level stretch and the line has upright ones, the
     /// spots on upright stretches (beside them on the right, then the left) are tried before it
     /// and the level ones (above them, then below); running right, the order is as above.
-    pub(crate) fn place_label(&self, parts: &[String], (paths, me): (&[Vec<Pt>], usize), level: bool, near_source: bool, axis: Axis, placed: &[Rect]) -> LabelSpot {
+    /// `outside` (an attached part's dashed line into the VPC) tries the longest stretch outside
+    /// every VPC frame next, before the usual spot: inside the VPC its label sits among the labels
+    /// of the VPC's own lines and reads as one of theirs.
+    pub(crate) fn place_label(&self, parts: &[String], (paths, me): (&[Vec<Pt>], usize), level: bool, near_source: bool, axis: Axis, outside: bool, placed: &[Rect]) -> LabelSpot {
         let path = &paths[me];
         let one = parts.join(" ");
         if one.is_empty() {
@@ -86,6 +89,11 @@ impl<'a> Ctx<'a> {
         let usual = if near_source { len / 4 } else { len / 2 };
         if let Some(spot) = self.label_on_axis_stretch(&one, (paths, me), axis, placed) {
             return spot;
+        }
+        if outside {
+            if let Some(spot) = self.label_outside_the_vpc(&one, (paths, me), placed) {
+                return spot;
+            }
         }
         let mut texts = vec![one.clone()];
         if parts.len() > 1 {
@@ -190,6 +198,41 @@ impl<'a> Ctx<'a> {
                         area.y >= a.1.min(b.1) && area.y + area.h <= a.1.max(b.1)
                     };
                     if within && self.scene.label_clear(area, margin, paths, me, placed) {
+                        return Some(LabelSpot { text: text.to_string(), above: horizontal, flip, at: Some(at), area: Some(area), clear: true });
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// The label on the longest stretch of the line lying outside every VPC frame, nearest its
+    /// middle, on one line, wholly outside the VPC frames; None if there is no such stretch or no
+    /// spot on it is clear.
+    fn label_outside_the_vpc(&self, text: &str, (paths, me): (&[Vec<Pt>], usize), placed: &[Rect]) -> Option<LabelSpot> {
+        let path = &paths[me];
+        let vpcs: Vec<Rect> = self.layout.frames.iter().filter(|f| f.kind == FrameKind::Vpc).map(|f| f.rect).collect();
+        let mut before = 0;
+        let mut best: Option<(i32, i32, Pt, Pt)> = None;
+        for s in path.windows(2) {
+            let len = (s[1].0 - s[0].0).abs() + (s[1].1 - s[0].1).abs();
+            if len > 0 && vpcs.iter().all(|&r| !hits(s[0], s[1], r)) && best.is_none_or(|b| len > b.1) {
+                best = Some((before, len, s[0], s[1]));
+            }
+            before += len;
+        }
+        let (start, len, a, b) = best?;
+        let horizontal = a.1 == b.1;
+        let on_stretch = |p: Pt| if horizontal { p.1 == a.1 && p.0 > a.0.min(b.0) && p.0 < a.0.max(b.0) } else { p.0 == a.0 && p.1 > a.1.min(b.1) && p.1 < a.1.max(b.1) };
+        for margin in [LABEL_ROOM, LABEL_MARGIN] {
+            let margin = label_margin(margin);
+            for (at, p, on_level) in self.label_spots(path, start + len / 2, 0) {
+                if on_level != horizontal || !on_stretch(p) {
+                    continue;
+                }
+                for flip in [false, true] {
+                    let area = wire_label_area(text, p, horizontal, flip);
+                    if vpcs.iter().all(|&r| !overlaps(area, r)) && self.scene.label_clear(area, margin, paths, me, placed) {
                         return Some(LabelSpot { text: text.to_string(), above: horizontal, flip, at: Some(at), area: Some(area), clear: true });
                     }
                 }
