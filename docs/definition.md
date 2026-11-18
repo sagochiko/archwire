@@ -78,6 +78,7 @@ A certificate used with CloudFront lives in US East (N. Virginia), whatever Regi
 
 A certificate attached to a load balancer, `acm -- alb`, is drawn inside the Region frame, because certificates in Certificate Manager are Regional resources; its reason is `alb-certificate-in-load-balancer-region`. A web ACL attached to a load balancer, `waf -- alb`, is drawn inside the Region frame too, because a web ACL is in the same Region as the resources it protects; its reason is `regional-web-acl-in-resource-region`. One part is drawn in one place, so one `acm` or `waf` cannot be attached to both CloudFront and a load balancer, see [Which connections are accepted](#which-connections-are-accepted).
 
+A KMS key attached to a bucket or a table, `kms -- s3` or `kms -- dynamodb`, is drawn inside the Region frame, with or without a VPC, and joined to the bucket or table by a dashed line labelled Encryption key. It stands for the key the bucket or table is encrypted with. One `kms` may be attached to both S3 and DynamoDB, and a key can be named like any other part (`kms.assets -- s3`). A key cannot be attached to Aurora, ECS, Lambda or any other service, see [What this version does not draw](limits.md#what-this-version-does-not-draw).
 
 ### Naming parts
 

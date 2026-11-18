@@ -65,6 +65,8 @@ from_copies_rule = "attached-function-per-az"
 
 A part is placed by `from_subnet` when any of its accepted connections has it, whatever the order of the lines. Otherwise `from_scope` places it, and then its service's `scope`. `acm -- alb` and `waf -- alb` carry `from_scope = "regional"`, so a certificate or web ACL attached to a load balancer is drawn in the Region, while `acm` and `waf` are `global` services. When the connections of one part would place it in two different scopes or Regions, such as `acm -- cloudfront` and `acm -- alb`, `compile` stops with `UNSUPPORTED` at the second of the two lines.
 
+An association that needs no field beyond `label` places the attached part by its service's `scope` alone. `kms -- s3` and `kms -- dynamodb` are such entries: `kms` is a `regional` service, so a key is drawn in the Region and gets the reason of `regional-service-outside-vpc`, as the Glue Data Catalog of `glue -- athena` does. No rule of its own is written for it.
+
 The same file lists, as `[[derived_link]]`, the lines archwire adds between parts by their roles. A role is `private` (a part in a private subnet), `egress_nat` (the NAT gateway), `entry_gateway` (the Internet Gateway), `writer` or `reader` (Aurora's writer and readers). Each entry has `from`, `to`, `rel` and `label`, one per pair of roles: today `private` to `egress_nat` and `egress_nat` to `entry_gateway` as main flows labelled Outbound, and `writer` to `reader` as an auxiliary flow labelled Replication.
 
 ## Constraints and defaults
