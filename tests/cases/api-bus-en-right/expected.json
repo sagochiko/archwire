@@ -1,0 +1,92 @@
+{
+  "versions": {
+    "archwire": "0.1.0",
+    "rules": "2026.11.13"
+  },
+  "derived": [
+    {
+      "target": "aws-cloud",
+      "added": true,
+      "kind": "default",
+      "rule": "resources-inside-aws-cloud-frame",
+      "reason": "AWS resources are drawn inside the AWS Cloud frame.",
+      "source": null
+    },
+    {
+      "target": "region",
+      "added": true,
+      "kind": "default",
+      "rule": "resources-inside-region-frame",
+      "reason": "AWS resources that belong to a Region are drawn inside that Region's frame.",
+      "source": null
+    },
+    {
+      "target": "region",
+      "added": true,
+      "kind": "default",
+      "rule": "default-region",
+      "reason": "No Region was given, so ap-northeast-1 (Tokyo) is used.",
+      "source": null
+    },
+    {
+      "target": "apigateway",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "Regional services that are not placed in a VPC subnet are drawn inside the Region frame and outside the VPC frame.",
+      "source": null
+    },
+    {
+      "target": "lambda.order",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "Regional services that are not placed in a VPC subnet are drawn inside the Region frame and outside the VPC frame.",
+      "source": null
+    },
+    {
+      "target": "eventbridge",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "Regional services that are not placed in a VPC subnet are drawn inside the Region frame and outside the VPC frame.",
+      "source": null
+    },
+    {
+      "target": "lambda.ship",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "Regional services that are not placed in a VPC subnet are drawn inside the Region frame and outside the VPC frame.",
+      "source": null
+    },
+    {
+      "target": "sqs",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "Regional services that are not placed in a VPC subnet are drawn inside the Region frame and outside the VPC frame.",
+      "source": null
+    },
+    {
+      "target": "lambda.bill",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "Regional services that are not placed in a VPC subnet are drawn inside the Region frame and outside the VPC frame.",
+      "source": null
+    },
+    {
+      "target": "dynamodb",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "Regional services that are not placed in a VPC subnet are drawn inside the Region frame and outside the VPC frame.",
+      "source": null
+    }
+  ],
+  "holes": [],
+  "errors": [],
+  "warnings": [],
+  "notes": []
+}

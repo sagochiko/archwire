@@ -117,6 +117,7 @@ Every folder under `tests/cases` holds a definition (`def.yaml`) and the output 
 | `ec2-aurora-ja` | EC2 above Aurora in a VPC with no public subnet, in the middle of the subnets |
 | `web-two-albs-ja`, `web-alb-attach-en` | two load balancers, and a certificate and web ACL attached to a load balancer |
 | `signin-api-ja`, `direct-upload-en` | users signing in to Cognito, and uploading straight to S3 |
+| `api-stream-ja`, `api-bus-en-right` | a function invoked by the stream of a DynamoDB table, and a function sending events to an event bus whose rules send them to a function and a queue |
 | `api-queue-ja`, `api-fanout-en-right`, `s3-event-en`, `mix-queue-ja`, `web-queue-ja` | events: a queue between two functions, a topic fanned out to two queues, event notifications from a bucket, a queue invoking a function attached to the VPC, and ECS sending to a queue through a VPC endpoint |
 | `api-kms-ja`, `web-kms-en` | a KMS key attached to S3 and DynamoDB without a VPC, and to S3 in a Web architecture with a VPC |
 | `web-route53-ja`, `edge-route53-en-right` | Route 53 attached to CloudFront, next to a certificate and a web ACL in a Web architecture, and on a static site drawn from left to right |
