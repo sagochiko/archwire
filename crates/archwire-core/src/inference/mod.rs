@@ -809,6 +809,88 @@ mod tests {
         }
     }
 
+    // Fails if the Route 53 pair stops, gets another label, or is drawn without its label in
+    // English or Japanese, on a static site or a web stack. Route 53 only hangs on CloudFront.
+    #[test]
+    fn the_route53_pair_is_accepted_with_its_label() {
+        let r = Rules::builtin();
+        let defs = [
+            "flows:\n  - user -> cloudfront -> s3\n  - route53 -- cloudfront\n",
+            "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - route53 -- cloudfront\n",
+        ];
+        assert_eq!(r.link("route53", "cloudfront", Rel::Assoc).map(|l| l.label.as_str()), Some("alias_record"));
+        let (en, ja) = ("Alias record", "エイリアスレコード");
+        assert_eq!((r.text("alias_record", Lang::En).as_str(), r.text("alias_record", Lang::Ja).as_str()), (en, ja));
+        for flows in defs {
+            let (m, d) = run(flows);
+            assert!(d.errors.is_empty(), "{flows}: {:?}", d.errors);
+            let m = m.unwrap_or_else(|| panic!("{flows}: no model"));
+            let e = m
+                .edges
+                .iter()
+                .find(|e| e.from == "route53" && e.to == "cloudfront")
+                .unwrap_or_else(|| panic!("{flows}: no edge route53 -- cloudfront"));
+            assert_eq!((e.rel, e.label.as_str()), (Rel::Assoc, "alias_record"), "{flows}");
+            for (lang, text) in [("en", en), ("ja", ja)] {
+                let out = crate::compile(&format!("{flows}set:\n  lang: {lang}\n"));
+                assert_eq!(out.diagnostics.exit_code(), 0, "{flows} {lang}: {:?}", out.diagnostics.errors);
+                let drawio = out.drawio.unwrap_or_else(|| panic!("{flows} {lang}: no diagram"));
+                assert!(drawio.contains(&format!("value=\"{text}\"")), "{flows} {lang}: no label {text}");
+            }
+        }
+    }
+
+    // Fails if Route 53 next to a certificate and a web ACL, one Route 53 on two distributions, or a
+    // named Route 53 stops or draws with a note the same definition without Route 53 does not have.
+    // Route 53 is written by the user, so its cell must not be marked as added.
+    #[test]
+    fn route53_sits_with_other_cloudfront_parts_without_notes() {
+        let defs = [
+            "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - route53 -- cloudfront\n  - acm -- cloudfront\n  - waf -- cloudfront\nset:\n  lang: ja\n",
+            "flows:\n  - user -> cloudfront.site -> s3.site\n  - user -> cloudfront.docs -> s3.docs\n  - route53 -- cloudfront.site\n  - route53 -- cloudfront.docs\n",
+            "flows:\n  - user -> cloudfront -> s3\n  - route53.apex -- cloudfront\nset:\n  direction: right\n",
+        ];
+        for src in defs {
+            let out = crate::compile(src);
+            assert_eq!(out.diagnostics.exit_code(), 0, "{src}: {:?}", out.diagnostics.errors);
+            let without: String = src.lines().filter(|l| !l.contains("route53")).map(|l| format!("{l}\n")).collect();
+            assert_eq!(out.diagnostics.notes, crate::compile(&without).diagnostics.notes, "{src}");
+            let drawio = out.drawio.unwrap_or_else(|| panic!("{src}: no diagram"));
+            let tags: Vec<&str> = drawio.split('<').filter(|t| t.starts_with("object ") && t.contains("route53")).collect();
+            assert!(!tags.is_empty(), "{src}: no Route 53 cell");
+            for tag in tags {
+                assert!(!tag.contains(" added=\"1\""), "{src}: {tag}");
+            }
+        }
+    }
+
+    // Fails if Route 53 is accepted on a part or in a direction left out on purpose. The list of
+    // connections is asked directly as well, because a reversed or flowing line would also stop
+    // later, for not being on a main flow, with the same code, place and text.
+    #[test]
+    fn route53_attaches_only_to_cloudfront() {
+        let r = Rules::builtin();
+        let web = "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n";
+        let api = "flows:\n  - user -> apigateway(http) -> lambda -> dynamodb\n";
+        let edge = "flows:\n  - user -> cloudfront -> s3\n";
+        let defs = [
+            (web, "route53 -- alb", "route53", "alb", Rel::Assoc),
+            (api, "route53 -- apigateway", "route53", "apigateway", Rel::Assoc),
+            (edge, "cloudfront -- route53", "cloudfront", "route53", Rel::Assoc),
+            (edge, "user -> route53", "user", "route53", Rel::Main),
+            (edge, "route53 -> cloudfront", "route53", "cloudfront", Rel::Main),
+            (edge, "route53 ~> cloudfront", "route53", "cloudfront", Rel::Aux),
+        ];
+        for (base, line, from, to, rel) in defs {
+            assert!(r.link(from, to, rel).is_none(), "links.toml accepts `{line}`");
+            let src = format!("{base}  - {line}\n");
+            let (m, d) = run(&src);
+            assert!(m.is_none(), "{src}");
+            assert_eq!(first(&d), ("UNSUPPORTED", Some("flows[1]"), Some(line)), "{src}: {:?}", d.errors);
+            assert_eq!(d.errors[0].message, format!("`{line}` is not a supported connection"), "{src}");
+        }
+    }
+
     // Fails if one of the event pairs between EventBridge, SNS, SQS, Lambda and S3 stops, gets
     // another label, or is drawn without its label in English or Japanese. Each definition reaches
     // the pair from a starting point, and the pair's label is the only one with that text.
@@ -1865,8 +1947,8 @@ mod tests {
         let (_, d) = run("flows:\n  - user -> cloudfrnt -> alb -> ecs(lambda)\n");
         let services = [
             "acm", "alb", "apigateway", "athena", "aurora", "cloudfront", "cloudtrail", "cloudwatch", "cognito", "config", "dynamodb",
-            "ec2", "ecs", "eventbridge", "glue", "guardduty", "inspector", "internet", "kms", "lambda", "s3", "securityhub", "securitylake", "sns",
-            "sqs", "ssm", "stepfunctions", "user", "waf",
+            "ec2", "ecs", "eventbridge", "glue", "guardduty", "inspector", "internet", "kms", "lambda", "route53", "s3", "securityhub", "securitylake",
+            "sns", "sqs", "ssm", "stepfunctions", "user", "waf",
         ];
         assert_eq!(d.errors, [
             bad("UNKNOWN_SERVICE", "flows[0][1]", "cloudfrnt", &services, "unknown service `cloudfrnt`"),

@@ -110,6 +110,12 @@ from_region = "us-east-1"
 from_rule = "cloudfront-certificate-in-us-east-1"
 
 [[link]]
+from = "route53"
+to = "cloudfront"
+rel = "assoc"
+label = "alias_record"
+
+[[link]]
 from = "acm"
 to = "alb"
 rel = "assoc"

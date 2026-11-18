@@ -45,6 +45,7 @@ The other services can be written in either. In a definition with a VPC, a Lambd
 | `cloudfront` | Amazon CloudFront | | in the AWS Cloud frame, outside the Region |
 | `waf` | AWS WAF. Only as `waf -- cloudfront` or `waf -- alb` | | in the AWS Cloud frame, outside the Region, when attached to `cloudfront`; in the Region, right of the VPC, when attached to `alb` |
 | `acm` | AWS Certificate Manager. Only as `acm -- cloudfront` or `acm -- alb` | | in the AWS Cloud frame, outside the Region, when attached to `cloudfront`; in the Region, right of the VPC, when attached to `alb` |
+| `route53` | Amazon Route 53. Only as `route53 -- cloudfront` | | in the AWS Cloud frame, outside the Region |
 | `alb` | Application Load Balancer | | in the VPC, spanning the public subnets |
 | `ecs` | Amazon ECS | `fargate` | in the VPC, in each private subnet |
 | `ec2` | Amazon EC2 | | in the VPC, in each private subnet |
@@ -145,6 +146,7 @@ The accepted connections are listed pair by pair in `rules/aws/links.toml`, and 
 | `acm` | `--` | `cloudfront` | Certificate |
 | `acm` | `--` | `alb` | Certificate |
 | `waf` | `--` | `alb` | Web ACL |
+| `route53` | `--` | `cloudfront` | Alias record |
 | `apigateway` | `->` | `lambda` | Invoke |
 | `apigateway` | `~>` | `cloudwatch` | Logs and metrics |
 | `cognito` | `--` | `apigateway` | JWT authorizer for `http`, Cognito authorizer for `rest`, Verify tokens while the kind is undecided |
@@ -588,7 +590,7 @@ flows:
 {
   "versions": {
     "archwire": "0.1.0",
-    "rules": "2026.11.10"
+    "rules": "2026.11.11"
   },
   "derived": [],
   "holes": [],
@@ -618,6 +620,7 @@ flows:
         "internet",
         "kms",
         "lambda",
+        "route53",
         "s3",
         "securityhub",
         "securitylake",

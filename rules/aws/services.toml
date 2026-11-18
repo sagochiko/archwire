@@ -60,6 +60,15 @@ color = "#DD344C"
 label = "AWS Certificate Manager"
 
 [[service]]
+key = "route53"
+scope = "global"
+place = "single"
+icon = "service"
+shape = "route_53"
+color = "#8C4FFF"
+label = "Amazon Route 53"
+
+[[service]]
 key = "igw"
 scope = "vpc"
 place = "gateway"

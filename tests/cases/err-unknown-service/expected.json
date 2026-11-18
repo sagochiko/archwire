@@ -1,7 +1,7 @@
 {
   "versions": {
     "archwire": "0.1.0",
-    "rules": "2026.11.10"
+    "rules": "2026.11.11"
   },
   "derived": [],
   "holes": [],
@@ -31,6 +31,7 @@
         "internet",
         "kms",
         "lambda",
+        "route53",
         "s3",
         "securityhub",
         "securitylake",

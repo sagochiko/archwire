@@ -148,6 +148,10 @@ ja = "テーブル定義"
 en = "Encryption key"
 ja = "暗号化キー"
 
+[alias_record]
+en = "Alias record"
+ja = "エイリアスレコード"
+
 [data_lake]
 en = "Data lake"
 ja = "データレイク"
