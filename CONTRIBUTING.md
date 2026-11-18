@@ -50,13 +50,13 @@ sh tools/check_generated.sh out/gen
 
 ## Checking the documents
 
-`cargo test --workspace` also checks the documents (`README.md`, `README.ja.md`, `CONTRIBUTING.md` and `docs/*.md`) against the rules data and against what archwire does, in `crates/archwire/tests/docs.rs`. A change to the rules or to the behaviour that leaves a document behind fails these tests, and so does a document edited without the code.
+`cargo test --workspace` also checks parts of the documents (`README.md`, `README.ja.md`, `CONTRIBUTING.md` and `docs/*.md`), in `crates/archwire/tests/docs.rs`. Only the parts listed below are checked: the two tables, the examples with markers, the table of `UNSUPPORTED` examples, the two READMEs side by side, and the links. A claim written only in a sentence, such as a count in [Limits](docs/limits.md), is not checked, and a change that makes it wrong does not fail.
 
 - The service table and the connection table in `docs/definition.md` must list exactly the writable services and their kinds in `rules/aws/services.toml`, and exactly the connections in `rules/aws/links.toml` with their English labels from `rules/aws/labels.toml`. A TOML block in a document must be copied from `rules/aws/`.
-- Every `yaml` and `json` code block needs a marker on the line just above it, saying how it is checked. The marker is an HTML comment, so GitHub does not show it.
+- Every `yaml` and `json` code block needs a marker on the line just above it, saying how it is checked. The marker is an HTML comment, so GitHub does not show it. Write every code block with three backticks at the left edge and a lower-case language (`yaml`, not `yml` or `YAML`); a fence with `~~~`, with four backticks or indented is reported, because a definition in it would not be checked.
 - Each row of the table of `UNSUPPORTED` examples in `docs/definition.md` is compiled, and must stop with that `at` and that message.
 - `README.md` and `README.ja.md` must have the same code blocks and markers in the same order, and the same number of headings at the same levels.
-- A relative link must lead to a file that exists, and a link with `#anchor` to a heading that exists, with the anchor GitHub makes from the heading.
+- A relative link, in text or in a heading, inline or in reference form, must lead to a file that exists, and a link with `#anchor` to a heading that exists, with the anchor GitHub makes from the heading. A link starting with `/` is read from the top folder of the repository.
 
 The markers are these. Each document is run in a folder of its own, from top to bottom, so a file saved by one block can be used by the blocks after it.
 
@@ -73,7 +73,7 @@ The markers are these. Each document is run in a folder of its own, from top to 
 <!-- archwire-test: compile file=web.yaml exit=2 -->                on its own: compile a saved file again
 ```
 
-`file=` saves the block under that name. `holes=` and `errors=` list the hole ids, or the error codes with their `at`, in the order of the report; `holes=` with nothing after it means no holes. A `sh` block without a marker is not run. When you add an example, give it a marker; when you change one in `README.md`, change `README.ja.md` the same way.
+`compile` and `run` must have `exit=`. `file=` saves the block under that name. `holes=` and `errors=` list the hole ids, or the error codes with their `at`, in the order of the report; `holes=` with nothing after it means no holes. A `sh` block without a marker is not run. When you add an example, give it a marker; when you change one in `README.md`, change `README.ja.md` the same way.
 
 ## Reporting a problem
 
