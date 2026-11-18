@@ -58,6 +58,8 @@ const CLOUD_LEFT: i32 = 80;
 /// From the end of the global rank's icons and names to the Region frame, along the main axis
 /// across the page; down the page, the gap holds the labels of the lines across it.
 const GLOBAL_TO_REGION: i32 = 80;
+/// Top to bottom, the room above the global rank for each line run over a row of attached parts.
+const OVER_ROOM: i32 = 20;
 /// The Region inside the AWS Cloud frame on the right, at the bottom, and on the left when it comes first along the main axis.
 const CLOUD_INSET: i32 = 30;
 /// From the diagram's top to the AWS Cloud frame.
@@ -1798,6 +1800,79 @@ set:
         }
         for id in ["s3", "apigateway", "lambda", "dynamodb"] {
             assert_eq!(in_region(&a, id), in_region(&b, id), "{id}");
+        }
+    }
+
+    // Fails if, top to bottom with a VPC, a part attached to CloudFront leaves CloudFront's row,
+    // the Region moves down by more than the room above that row and its names, a dotted line to
+    // an attached part crosses an icon, a name, a label or another line or runs along one, or a
+    // line is named in a note: one, two and three parts attached, with and without a line from
+    // CloudFront to S3, in English and Japanese.
+    #[test]
+    fn top_to_bottom_attachments_share_the_row_of_their_distribution() {
+        let shapes = [
+            "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n",
+            "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - cloudfront -> s3\n  - ecs -> s3\n  - alb ~> cloudwatch\n",
+            "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> internet\n  - acm.alb -- alb\n  - waf.alb -- alb\n",
+        ];
+        let attached = ["  - waf -- cloudfront\n", "  - acm -- cloudfront\n", "  - route53 -- cloudfront\n"];
+        let r = Rules::builtin();
+        for shape in shapes {
+            for lang in ["en", "ja"] {
+                let (_, bare) = arranged(&format!("{shape}set:\n  lang: {lang}\n"), Axis::Down);
+                for n in 1..=attached.len() {
+                    let src = format!("{shape}{}set:\n  lang: {lang}\n", attached[..n].concat());
+                    let (m, p) = arranged(&src, Axis::Down);
+                    let cf = at(&p, "cloudfront");
+                    for id in ["waf", "acm", "route53"].iter().take(n) {
+                        assert_eq!(at(&p, id).y, cf.y, "{id} leaves CloudFront's row\n{src}");
+                    }
+                    // The Region moves down only by the room for the lines run over the row and
+                    // as far as a taller name in the row reaches past CloudFront's, never by a row.
+                    let name_end = |id: &str| { let l = label_of(&p, id); l.y + l.h };
+                    let deeper = ["waf", "acm", "route53"].iter().take(n).map(|id| name_end(id)).max().unwrap() - name_end("cloudfront");
+                    assert_eq!(at(&p, "region").y, at(&bare, "region").y + OVER_ROOM * (n as i32 - 1) + deeper.max(0), "the Region moves down\n{src}");
+                    assert!(OVER_ROOM * (n as i32 - 1) + deeper.max(0) < p.row_step / 2, "{src}");
+                    let (w, notes) = crate::route::route_planned(&m, &p.layout, &r, &p.lines);
+                    let (faults, named) = crate::route::tests::wire_faults(&p.layout, &w, &notes);
+                    assert!(named.is_empty(), "{named:?}\n{src}");
+                    let dotted: Vec<&str> = w.iter().filter(|x| x.style == crate::route::WireStyle::Assoc && (x.from == "cloudfront" || x.to == "cloudfront")).map(|x| x.id.as_str()).collect();
+                    assert_eq!(dotted.len(), n, "{src}");
+                    let bad: Vec<&(String, String)> = faults.iter().filter(|(id, what)| dotted.contains(&id.as_str()) || dotted.iter().any(|d| what.ends_with(d))).collect();
+                    assert!(bad.is_empty(), "{bad:?}\n{src}");
+                    let paths: Vec<(&str, Vec<(i32, i32)>)> = w.iter().map(|x| (x.id.as_str(), crate::route::tests::full_path(x, &p.layout))).collect();
+                    for (id, a) in paths.iter().filter(|(id, _)| dotted.contains(id)) {
+                        for (other, b) in paths.iter().filter(|(o, _)| o != id) {
+                            let crossed = a.windows(2).any(|s| b.windows(2).any(|t| crate::path::crosses(s[0], s[1], t[0], t[1])));
+                            assert!(!crossed, "{id} crosses {other}\n{src}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fails if, top to bottom, the parts attached to CloudFront leave the column one step across
+    // from it when a line from the users comes down past them or into it from past them, or when
+    // the diagram has no VPC; or if they leave it left to right.
+    #[test]
+    fn attachments_stay_in_a_column_where_a_row_would_cross_lines() {
+        let two = "  - waf -- cloudfront\n  - acm -- cloudfront\n";
+        let column = [
+            ("flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - user -> apigateway(http) -> lambda -> aurora\n", Axis::Down),
+            ("flows:\n  - user -> cloudfront -> s3\n  - user -> apigateway(rest) -> lambda -> dynamodb\n", Axis::Down),
+            ("flows:\n  - user -> cloudfront -> s3\n", Axis::Down),
+            ("flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n", Axis::Right),
+        ];
+        for (shape, axis) in column {
+            let src = format!("{shape}{two}");
+            let (_, p) = arranged(&src, axis);
+            let (cf, waf, acm) = (at(&p, "cloudfront"), at(&p, "waf"), at(&p, "acm"));
+            let across = |r: Rect| uv(axis, (r.x, r.y)).1;
+            let along = |r: Rect| uv(axis, (r.x, r.y)).0;
+            assert_eq!((across(waf), across(acm)), (across(cf) + p.row_step, across(cf) + p.row_step), "{src}");
+            assert_eq!(along(waf), along(cf), "{src}");
+            assert!(along(acm) > along(waf), "{src}");
         }
     }
 
