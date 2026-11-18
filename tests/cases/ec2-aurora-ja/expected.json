@@ -1,0 +1,94 @@
+{
+  "versions": {
+    "archwire": "0.1.0",
+    "rules": "2026.11.10"
+  },
+  "derived": [
+    {
+      "target": "aws-cloud",
+      "added": true,
+      "kind": "default",
+      "rule": "resources-inside-aws-cloud-frame",
+      "reason": "AWS のリソースは AWS Cloud の枠の中に描く。",
+      "source": null
+    },
+    {
+      "target": "region",
+      "added": true,
+      "kind": "default",
+      "rule": "resources-inside-region-frame",
+      "reason": "リージョンに属する AWS のリソースは、そのリージョンの枠の中に描く。",
+      "source": null
+    },
+    {
+      "target": "region",
+      "added": true,
+      "kind": "default",
+      "rule": "default-region",
+      "reason": "リージョンの指定が無いので、ap-northeast-1（東京）にする。",
+      "source": null
+    },
+    {
+      "target": "vpc",
+      "added": true,
+      "kind": "constraint",
+      "rule": "ec2-instance-in-subnet",
+      "reason": "Amazon EC2 のインスタンスはサブネットに起動され、そのサブネットに関連付けられたアベイラビリティゾーンで動くので、VPC を描く。",
+      "source": "https://aws.amazon.com/vpc/faqs/"
+    },
+    {
+      "target": "az",
+      "added": true,
+      "kind": "default",
+      "rule": "default-two-azs-for-instances",
+      "reason": "AZ の数の指定が無いので、2つにする。",
+      "source": null
+    },
+    {
+      "target": "subnet",
+      "added": true,
+      "kind": "default",
+      "rule": "private-subnet-per-az",
+      "reason": "archwire は、各アベイラビリティゾーンにプライベートサブネットを1つ置く。パブリックサブネットに置く部品は無い。",
+      "source": null
+    },
+    {
+      "target": "ec2",
+      "added": false,
+      "kind": "default",
+      "rule": "instances-in-private",
+      "reason": "サブネットの指定が無いので、EC2 のインスタンスは、インターネットから届かないプライベートサブネットに置く。archwire は、各アベイラビリティゾーンのプライベートサブネットに1つずつ描く。",
+      "source": null
+    },
+    {
+      "target": "aurora",
+      "added": false,
+      "kind": "default",
+      "rule": "database-in-private",
+      "reason": "サブネットの指定が無いので、Aurora はインターネットから届かないプライベートサブネットに置く。",
+      "source": null
+    },
+    {
+      "target": "aurora",
+      "added": false,
+      "kind": "default",
+      "rule": "aurora-writer-reader",
+      "reason": "Writer を1つ目の AZ に、Reader を残りの AZ に置く。",
+      "source": null
+    },
+    {
+      "target": "s3",
+      "added": false,
+      "kind": "default",
+      "rule": "regional-service-outside-vpc",
+      "reason": "VPC のサブネットに置かないリージョンのサービスは、リージョンの枠の中、VPC の枠の外に描く。",
+      "source": null
+    }
+  ],
+  "holes": [],
+  "errors": [],
+  "warnings": [],
+  "notes": [
+    "VPC エンドポイントのアイコンは描かない。"
+  ]
+}

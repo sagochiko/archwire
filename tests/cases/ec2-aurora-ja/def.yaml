@@ -1,0 +1,7 @@
+flows:
+  - ec2 -> aurora
+  - ec2 -> s3
+set:
+  lang: ja
+choose:
+  route.ec2.s3: endpoint
