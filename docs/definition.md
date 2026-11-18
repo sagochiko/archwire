@@ -216,6 +216,8 @@ The accepted connections are listed pair by pair in `rules/aws/links.toml`, and 
 | `s3` | `->` | `lambda` | Event notifications |
 | `s3` | `->` | `sqs` | Event notifications |
 | `s3` | `->` | `sns` | Event notifications |
+| `dynamodb` | `->` | `lambda` | Stream records |
+| `lambda` | `->` | `eventbridge` | Events |
 | `athena` | `->` | `s3` | Query |
 | `athena` | `->` | `securitylake` | Query |
 | `glue` | `--` | `athena` | Table definitions |
@@ -232,7 +234,7 @@ A pair means the services, whatever the parts are named: `lambda.resize -> s3.up
 
 `user -> cognito` is the sign-in to a user pool, drawn from the users although the tokens go to their app. `user -> s3` is an upload or download straight to a bucket, with a presigned URL or with temporary credentials from a Cognito identity pool; the identity pool is not drawn. The users of `user -> athena` are the people who run the queries. Security Lake keeps its data lake in S3 buckets in the account, so `securitylake -> s3` is drawn as a main flow. GuardDuty, Inspector and Config findings reach Security Lake through Security Hub, so there is no line from them to `securitylake`; write `securityhub -> securitylake`. The settings of Security Lake's subscribers are not drawn. `securitylake -> sqs` is the SQS queue Security Lake creates for a data access subscriber, and a function that reads that queue can be drawn after it, as in `- cloudtrail -> securitylake -> sqs -> lambda`.
 
-Events between EventBridge, SNS, SQS, Lambda and S3 are main flows. `eventbridge -> lambda` and `eventbridge -> sqs` are targets of an EventBridge rule; EventBridge is a starting point, so a schedule such as `- eventbridge -> lambda -> dynamodb` is accepted without users. `sns -> lambda` and `sns -> sqs` are subscriptions to a topic, so one topic can fan out to several queues, such as `- sns -> sqs.mail -> lambda.mail` and `- sns -> sqs.audit -> lambda.audit`. `sqs -> lambda` is drawn from the queue to the function, the way the messages go, although the Lambda service polls the queue. `lambda -> sqs` and `lambda -> sns` are a function sending messages to a queue or publishing to a topic; `ecs -> sqs`, `ecs -> sns`, `ec2 -> sqs` and `ec2 -> sns` are the same from a service or an instance in a private subnet, and leave a route to choose like its other lines out of the VPC. `s3 -> lambda`, `s3 -> sqs` and `s3 -> sns` are event notifications of a bucket. A queue or a topic is not a starting point: its main flows are accepted once a main flow from a starting point reaches it, so `- sqs -> lambda -> dynamodb` alone stops with `UNSUPPORTED`. A main flow back to a part it left, such as `- user -> apigateway(http) -> lambda.a -> sqs -> lambda.a`, stops with `UNSUPPORTED` too, see below.
+Events between EventBridge, SNS, SQS, Lambda and S3 are main flows. `eventbridge -> lambda` and `eventbridge -> sqs` are targets of an EventBridge rule; EventBridge is a starting point, so a schedule such as `- eventbridge -> lambda -> dynamodb` is accepted without users. `sns -> lambda` and `sns -> sqs` are subscriptions to a topic, so one topic can fan out to several queues, such as `- sns -> sqs.mail -> lambda.mail` and `- sns -> sqs.audit -> lambda.audit`. `sqs -> lambda` is drawn from the queue to the function, the way the messages go, although the Lambda service polls the queue. `lambda -> sqs` and `lambda -> sns` are a function sending messages to a queue or publishing to a topic; `ecs -> sqs`, `ecs -> sns`, `ec2 -> sqs` and `ec2 -> sns` are the same from a service or an instance in a private subnet, and leave a route to choose like its other lines out of the VPC. `s3 -> lambda`, `s3 -> sqs` and `s3 -> sns` are event notifications of a bucket. `dynamodb -> lambda` is a function invoked with the records of a table's stream, drawn from the table to the function like a queue's messages. `lambda -> eventbridge` is a function sending events to an event bus, whose rules then send them on, such as `- lambda.order -> eventbridge` with `- eventbridge -> lambda.ship` and `- eventbridge -> sqs -> lambda.bill`; from a function attached to the VPC it leaves a route to choose. A queue or a topic is not a starting point: its main flows are accepted once a main flow from a starting point reaches it, so `- sqs -> lambda -> dynamodb` alone stops with `UNSUPPORTED`. A main flow back to a part it left, such as `- user -> apigateway(http) -> lambda.a -> sqs -> lambda.a`, stops with `UNSUPPORTED` too, see below.
 
 Besides the list, archwire checks the following, and stops with `UNSUPPORTED` when one does not hold:
 
@@ -267,7 +269,7 @@ For example, each of these stops with `UNSUPPORTED`:
 
 `alb -- waf` stops the same way as `alb -- acm`: write the attached part first. So do `user -> aurora`, `alb -> s3`, `user ~> alb`, `internet -> alb`, `ecs -> user` and `waf -> alb` in a definition with a VPC. The auxiliary flows `cloudfront ~> s3` and `cloudfront ~> cloudwatch` are accepted in every definition, and so is `- user -> alb` alone.
 
-A main flow from a part in a private subnet to a part in the Region outside the VPC leaves a hole for its route, see [choose](#choose). With the list above that is `ecs` to `s3`, `dynamodb` or `cloudwatch`, `ec2` to `s3`, `dynamodb`, `cloudwatch` or `ssm`, `aurora` to `s3` or `cloudwatch`, and a function attached to the VPC to `s3`, `dynamodb`, `sqs` or `sns`. A queue that invokes a function attached to the VPC, `sqs -> lambda`, leaves no hole: the Lambda service reads the queue and passes the messages to the function.
+A main flow from a part in a private subnet to a part in the Region outside the VPC leaves a hole for its route, see [choose](#choose). With the list above that is `ecs` to `s3`, `dynamodb` or `cloudwatch`, `ec2` to `s3`, `dynamodb`, `cloudwatch` or `ssm`, `aurora` to `s3` or `cloudwatch`, and a function attached to the VPC to `s3`, `dynamodb`, `sqs`, `sns` or `eventbridge`. A queue that invokes a function attached to the VPC, `sqs -> lambda`, leaves no hole: the Lambda service reads the queue and passes the messages to the function. A table's stream, `dynamodb -> lambda`, leaves none either.
 
 ## Definitions with a VPC
 
@@ -599,7 +601,7 @@ flows:
 {
   "versions": {
     "archwire": "0.1.0",
-    "rules": "2026.11.12"
+    "rules": "2026.11.13"
   },
   "derived": [],
   "holes": [],

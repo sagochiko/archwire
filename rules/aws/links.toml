@@ -492,6 +492,18 @@ rel = "main"
 label = "event_notifications"
 
 [[link]]
+from = "dynamodb"
+to = "lambda"
+rel = "main"
+label = "stream_records"
+
+[[link]]
+from = "lambda"
+to = "eventbridge"
+rel = "main"
+label = "events"
+
+[[link]]
 from = "user"
 to = "cognito"
 rel = "main"

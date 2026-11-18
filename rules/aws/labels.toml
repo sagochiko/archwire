@@ -124,6 +124,14 @@ ja = "メッセージ送信"
 en = "Event notifications"
 ja = "イベント通知"
 
+[stream_records]
+en = "Stream records"
+ja = "ストリームのレコード"
+
+[events]
+en = "Events"
+ja = "イベント"
+
 [call]
 en = "Call"
 ja = "呼び出し"

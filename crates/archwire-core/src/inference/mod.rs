@@ -534,7 +534,6 @@ mod tests {
         for line in [
             "user -> dynamodb",
             "cloudfront -> lambda",
-            "dynamodb -> lambda",
             "apigateway -- cognito",
             "waf -- apigateway",
             "sns -> eventbridge",
@@ -931,6 +930,98 @@ mod tests {
         assert_eq!(texts("event_notifications"), ("Event notifications".to_string(), "イベント通知".to_string()));
     }
 
+    // Fails if a DynamoDB stream that invokes a function, or a function that sends events to an
+    // EventBridge event bus, stops, gets another label, or is drawn without its label in English
+    // or Japanese, in either direction.
+    #[test]
+    fn stream_and_event_bus_pairs_are_accepted_with_their_labels() {
+        let r = Rules::builtin();
+        let pairs = [
+            ("dynamodb", "lambda", "stream_records", "flows:\n  - user -> apigateway(http) -> lambda.api -> dynamodb -> lambda -> sns\n"),
+            ("lambda", "eventbridge", "events", "flows:\n  - user -> apigateway(http) -> lambda -> eventbridge\n  - eventbridge -> lambda.ship\n  - eventbridge -> sqs -> lambda.bill\n"),
+        ];
+        for (from, to, key, flows) in pairs {
+            assert_eq!(r.link(from, to, Rel::Main).map(|l| l.label.as_str()), Some(key), "{from} -> {to}");
+            let (m, d) = run(flows);
+            assert!(d.errors.is_empty(), "{flows}: {:?}", d.errors);
+            let m = m.unwrap_or_else(|| panic!("{flows}: no model"));
+            let e = m.edges.iter().find(|e| e.from == from && e.to == to).unwrap_or_else(|| panic!("{flows}: no edge {from} -> {to}"));
+            assert_eq!((e.rel, e.label.as_str()), (Rel::Main, key), "{flows}");
+            for (lang, code) in [(Lang::En, "en"), (Lang::Ja, "ja")] {
+                let text = r.text(key, lang);
+                for direction in ["down", "right"] {
+                    let out = crate::compile(&format!("{flows}set:\n  lang: {code}\n  direction: {direction}\n"));
+                    assert_eq!(out.diagnostics.exit_code(), 0, "{flows} {code} {direction}: {:?}", out.diagnostics.errors);
+                    assert!(out.diagnostics.notes.iter().all(|n| !n.contains("edge-")), "{flows} {code} {direction}: {:?}", out.diagnostics.notes);
+                    let drawio = out.drawio.unwrap_or_else(|| panic!("{flows} {code}: no diagram"));
+                    assert!(drawio.contains(&format!("value=\"{text}\"")), "{flows} {code}: no label {text}");
+                }
+            }
+        }
+        let texts = |key: &str| (r.text(key, Lang::En), r.text(key, Lang::Ja));
+        assert_eq!(texts("stream_records"), ("Stream records".to_string(), "ストリームのレコード".to_string()));
+        assert_eq!(texts("events"), ("Events".to_string(), "イベント".to_string()));
+    }
+
+    // Fails if a reversed or unlisted pair around the stream and the event bus is accepted. The
+    // list of connections is asked directly as well, as for the other event pairs.
+    #[test]
+    fn stream_and_event_bus_pairs_left_out_stop() {
+        let r = Rules::builtin();
+        let base = "flows:\n  - user -> apigateway(http) -> lambda -> dynamodb\n  - lambda -> eventbridge\n  - lambda -> sqs\n  - lambda -> sns\n";
+        let defs = [
+            ("eventbridge -> dynamodb", "eventbridge", "dynamodb", Main),
+            ("dynamodb -> sqs", "dynamodb", "sqs", Main),
+            ("dynamodb -> sns", "dynamodb", "sns", Main),
+            ("dynamodb -> eventbridge", "dynamodb", "eventbridge", Main),
+            ("sqs -> eventbridge", "sqs", "eventbridge", Main),
+            ("dynamodb ~> lambda", "dynamodb", "lambda", Aux),
+            ("dynamodb -- lambda", "dynamodb", "lambda", Rel::Assoc),
+        ];
+        for (line, from, to, rel) in defs {
+            assert!(r.link(from, to, rel).is_none(), "links.toml accepts `{line}`");
+            let src = format!("{base}  - {line}\n");
+            let (m, d) = run(&src);
+            assert!(m.is_none(), "{src}");
+            assert_eq!(first(&d), ("UNSUPPORTED", Some("flows[4]"), Some(line)), "{src}: {:?}", d.errors);
+            assert_eq!(d.errors[0].message, format!("`{line}` is not a supported connection"), "{src}");
+        }
+        // The base already joins the function to the bus, so the side line is asked of the list only.
+        assert!(r.link("lambda", "eventbridge", Aux).is_none(), "links.toml accepts `lambda ~> eventbridge`");
+        // Back to the same function through the stream or the event bus: a loop.
+        for (src, got) in [
+            ("flows:\n  - user -> apigateway(http) -> lambda -> dynamodb -> lambda\n", "dynamodb -> lambda"),
+            ("flows:\n  - guardduty -> eventbridge -> lambda -> eventbridge\n", "lambda -> eventbridge"),
+        ] {
+            let (m, d) = run(src);
+            assert!(m.is_none(), "{src}");
+            assert_eq!(first(&d), ("UNSUPPORTED", Some("flows[0]"), Some(got)), "{src}: {:?}", d.errors);
+            assert!(d.errors[0].message.contains("closes a loop of main flows"), "{src}: {}", d.errors[0].message);
+        }
+    }
+
+    // Fails if a function in the VPC sends events without the choice of a route, or a stream that
+    // invokes a function in the VPC is given a route to choose or adds a gateway.
+    #[test]
+    fn the_stream_and_the_event_bus_with_a_function_in_the_vpc() {
+        let (m, d) = run("flows:\n  - user -> apigateway(http) -> lambda -> aurora\n  - lambda -> eventbridge -> sns\n");
+        assert!(m.is_some(), "{:?}", d.errors);
+        let holes: Vec<_> = d.holes.iter().map(|h| (h.hole.as_str(), h.choices.clone())).collect();
+        assert_eq!(holes, [("route.lambda.eventbridge", strings(&["endpoint", "nat"]))]);
+        let (m, d) = passes("flows:\n  - user -> apigateway(http) -> lambda.api -> dynamodb -> lambda -> aurora\n");
+        assert_eq!(spot(&m, "lambda-1a"), (PRIVATE, Some(0), None));
+        assert!(d.holes.is_empty(), "{:?}", hole_ids(&d));
+        assert_eq!(d.exit_code(), 0);
+        assert!(m.edges.iter().any(|e| e.from == "dynamodb" && e.to == "lambda-1a" && e.label == "stream_records"));
+        let added: Vec<_> = m.nodes.iter().filter(|n| n.added).map(|n| n.id.as_str()).collect();
+        assert!(added.iter().all(|id| !id.starts_with("igw") && !id.starts_with("nat")), "{added:?}");
+        // Written from the subnets and read back into them, the stream leaves and comes back.
+        let src = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - ecs -> dynamodb -> lambda -> aurora\nchoose:\n  route.ecs.dynamodb: endpoint\n";
+        let (m, d) = run(src);
+        assert!(m.is_none(), "{src}");
+        assert_eq!(first(&d), ("UNSUPPORTED", Some("flows[1]"), Some("dynamodb -> lambda")), "{src}: {:?}", d.errors);
+    }
+
     // Fails if a reversed or unlisted event pair is accepted. The list of connections is asked
     // directly as well, because a line whose start is not reached would also stop later with the
     // same code, place and text.
@@ -939,7 +1030,6 @@ mod tests {
         let r = Rules::builtin();
         let base = "flows:\n  - user -> apigateway(http) -> lambda -> sqs\n  - lambda -> sns\n  - user -> s3 -> lambda.files\n  - eventbridge -> lambda.timer\n";
         let defs = [
-            ("lambda -> eventbridge", "lambda", "eventbridge", Main),
             ("sqs -> sns", "sqs", "sns", Main),
             ("sqs -> s3", "sqs", "s3", Main),
             ("sns -> s3", "sns", "s3", Main),
