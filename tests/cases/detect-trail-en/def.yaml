@@ -1,0 +1,6 @@
+flows:
+  - cloudtrail -> cloudwatch -> sns
+  - cloudtrail -> s3
+  - config -> ssm
+set:
+  lang: en
