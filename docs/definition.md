@@ -52,7 +52,7 @@ The other services can be written in either. In a definition with a VPC, a Lambd
 | `apigateway` | Amazon API Gateway | `http`, `rest` | in the Region |
 | `lambda` | AWS Lambda | | in the Region, or in each private subnet of the VPC when it sends a main flow to `aurora` |
 | `dynamodb` | Amazon DynamoDB | | in the Region |
-| `cognito` | Amazon Cognito. Only as `cognito -- apigateway` | | in the Region |
+| `cognito` | Amazon Cognito user pool. Only as `user -> cognito` or `cognito -- apigateway` | | in the Region |
 | `guardduty` | Amazon GuardDuty | | in the Region |
 | `inspector` | Amazon Inspector | | in the Region |
 | `securityhub` | AWS Security Hub | | in the Region |
@@ -62,6 +62,10 @@ The other services can be written in either. In a definition with a VPC, a Lambd
 | `sns` | Amazon SNS | | in the Region |
 | `stepfunctions` | AWS Step Functions | | in the Region |
 | `ssm` | AWS Systems Manager | | in the Region |
+| `athena` | Amazon Athena | | in the Region |
+| `glue` | AWS Glue Data Catalog. Only as `glue -- athena` | | in the Region |
+| `securitylake` | Amazon Security Lake | | in the Region |
+| `sqs` | Amazon SQS. Only as the target of `securitylake -> sqs` | | in the Region |
 
 The Internet Gateway and the NAT gateways are added by archwire and cannot be written. Writing `nat` is `UNKNOWN_SERVICE`.
 
@@ -121,6 +125,9 @@ The accepted connections are listed pair by pair in `rules/aws/links.toml`, and 
 | `user` | `->` | `cloudfront` | HTTPS |
 | `user` | `->` | `apigateway` | HTTPS |
 | `user` | `->` | `alb` | HTTPS |
+| `user` | `->` | `cognito` | Sign-in |
+| `user` | `->` | `s3` | Upload/Download |
+| `user` | `->` | `athena` | Query |
 | `cloudfront` | `->` | `s3` | Static files |
 | `cloudfront` | `->` | `apigateway` | HTTPS |
 | `cloudfront` | `->` | `alb` | HTTPS |
@@ -173,14 +180,23 @@ The accepted connections are listed pair by pair in `rules/aws/links.toml`, and 
 | `stepfunctions` | `->` | `sns` | Publish |
 | `stepfunctions` | `->` | `lambda` | Invoke |
 | `stepfunctions` | `->` | `ssm` | Call |
+| `athena` | `->` | `s3` | Query |
+| `athena` | `->` | `securitylake` | Query |
+| `glue` | `--` | `athena` | Table definitions |
+| `cloudtrail` | `->` | `securitylake` | Logs |
+| `securityhub` | `->` | `securitylake` | Findings |
+| `securitylake` | `->` | `s3` | Data lake |
+| `securitylake` | `->` | `sqs` | New objects |
 
 A pair means the services, whatever the parts are named: `lambda.resize -> s3.uploads` is the pair `lambda -> s3`.
 
 `config -> securityhub` is drawn as one line. AWS Config sends its rule evaluations to Security Hub through EventBridge, but that is a link between the two services, not an EventBridge rule the definition writes.
 
+`user -> cognito` is the sign-in to a user pool, drawn from the users although the tokens go to their app. `user -> s3` is an upload or download straight to a bucket, with a presigned URL or with temporary credentials from a Cognito identity pool; the identity pool is not drawn. The users of `user -> athena` are the people who run the queries. Security Lake keeps its data lake in S3 buckets in the account, so `securitylake -> s3` is drawn as a main flow. GuardDuty, Inspector and Config findings reach Security Lake through Security Hub, so there is no line from them to `securitylake`; write `securityhub -> securitylake`. The data access subscribers are drawn up to the SQS queue Security Lake creates for them; the subscriber that polls it is not drawn.
+
 Besides the list, archwire checks the following, and stops with `UNSUPPORTED` when one does not hold:
 
-- There is at least one main flow (`at` `flows`), and every main flow can be reached along main flows from a starting point (`at` the line that cannot be reached). The starting points are `user` and the services that start a flow by themselves: `guardduty`, `inspector`, `securityhub`, `config`, `cloudtrail`, `eventbridge` and `cloudwatch`. `sns`, `stepfunctions`, `ssm` and the other services only receive, so a definition cannot start with them.
+- There is at least one main flow (`at` `flows`), and every main flow can be reached along main flows from a starting point (`at` the line that cannot be reached). The starting points are `user` and the services that start a flow by themselves: `guardduty`, `inspector`, `securityhub`, `config`, `cloudtrail`, `eventbridge` and `cloudwatch`. `sns`, `stepfunctions`, `ssm`, `athena`, `securitylake` and the other services only receive, so a definition cannot start with them.
 - The source of an auxiliary flow and the target of an association are on a main flow reached from a starting point.
 - A main flow to `internet` comes from a part in a private subnet of the VPC: ECS, Aurora, or a function attached to the VPC.
 
@@ -192,7 +208,7 @@ For example, each of these stops with `UNSUPPORTED`:
 
 | Definition | `at` | Message |
 |---|---|---|
-| `- user -> s3` | `flows[0]` | ``"`user -> s3` is not a supported connection"`` |
+| `- user -> dynamodb` | `flows[0]` | ``"`user -> dynamodb` is not a supported connection"`` |
 | `- user -> cloudfront -> lambda` | `flows[0]` | ``"`cloudfront -> lambda` is not a supported connection"`` |
 | `- user -> cloudfront -> ecs` | `flows[0]` | ``"`cloudfront -> ecs` is not a supported connection"`` |
 | `- user -> alb -> ecs -> aurora` and `- alb -> aurora` | `flows[1]` | ``"`alb -> aurora` is not a supported connection"`` |
@@ -453,7 +469,7 @@ When a definition has errors, `compile` writes no diagram, removes a diagram lef
 | `UNKNOWN_SETTING` | a key that is not a setting | `colour: red` gives `at` `set.colour`, `allowed` lists the six keys; without a VPC, `azs: 3` gives `at` `set.azs`, `allowed` `direction`, `lang` and `region` | No. `set` can change only the value; delete the line in the file |
 | `BAD_CHOICE` | an answer that is not one of the hole's choices | `route.ecs.s3: tunnel` gives `at` `choose.route.ecs.s3`, `allowed` `endpoint` and `nat`; `kind.apigateway: websocket` gives `allowed` `http` and `rest` | Yes, with a value from `allowed` |
 | `UNKNOWN_HOLE` | an answer for a hole that does not exist | `route.ecs.rds: nat` gives `at` `choose.route.ecs.rds`; so does `kind.apigateway: http` when the definition already says `apigateway(http)` | No. `set` can change only the value; delete the line in the file, and answer a hole from `allowed` with `archwire set <definition> choose.<hole> <value>` |
-| `UNSUPPORTED` | a connection or shape this version does not draw | `- user -> s3` gives `at` `flows[0]`; `- acm -- cloudfront` and `- acm -- alb` after `- user -> cloudfront -> alb -> ecs` give `at` `flows[2]`, `got` `acm`; more under [Which connections are accepted](#which-connections-are-accepted) | Sometimes. `at` is a flow line (`flows[i]`) or `flows`; change a part with `flows[i][j]`, or edit or remove the line in the file |
+| `UNSUPPORTED` | a connection or shape this version does not draw | `- user -> dynamodb` gives `at` `flows[0]`; `- acm -- cloudfront` and `- acm -- alb` after `- user -> cloudfront -> alb -> ecs` give `at` `flows[2]`, `got` `acm`; more under [Which connections are accepted](#which-connections-are-accepted) | Sometimes. `at` is a flow line (`flows[i]`) or `flows`; change a part with `flows[i][j]`, or edit or remove the line in the file |
 | `TOO_MANY_ATTACHED` | more parts attached to one part than AWS allows | `- user -> cloudfront -> s3`, `- waf.front -- cloudfront` and `- waf.extra -- cloudfront` give `at` `flows[2]`, `got` `waf.extra`, `rule` `one-web-acl-per-resource` | No. Remove the extra line in the file |
 | `LAYOUT_FAILED` | archwire could not lay out the definition; the message names the parts or lines involved | 34 named services behind one load balancer with `azs: 3`, see [Services behind one load balancer](#services-behind-one-load-balancer) | No. Write fewer parts, or report the definition. Fewer parts is a way around a limit of the layout, not a limit of AWS |
 | `BAD_PATH` | the place given to `set` does not exist | `archwire set web.yaml 'flows[9][0]' x`, on a file with fewer flow lines | Run `set` again with an existing place |
