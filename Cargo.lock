@@ -59,6 +59,7 @@ dependencies = [
  "archwire-core",
  "clap",
  "serde_json",
+ "toml",
 ]
 
 [[package]]

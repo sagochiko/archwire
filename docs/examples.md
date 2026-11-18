@@ -6,6 +6,7 @@ Each example is a definition, the command that compiles it, the diagram, and the
 
 This is the example in the [README](../README.md#example). Save this as `web.yaml`:
 
+<!-- archwire-test: compile exit=0 file=web.yaml -->
 ```yaml
 flows:
   - user -> cloudfront -> alb -> ecs(fargate) -> aurora
@@ -14,6 +15,7 @@ flows:
   - ecs ~> cloudwatch
 ```
 
+<!-- archwire-test: run exit=0 -->
 ```sh
 archwire compile web.yaml -o web.drawio
 ```
@@ -28,6 +30,7 @@ In this example these elements carry a reason: the AWS Cloud frame, the Region f
 
 To use three Availability Zones, change one setting and compile again:
 
+<!-- archwire-test: run exit=0 -->
 ```sh
 archwire set web.yaml set.azs 3
 archwire compile web.yaml -o web.drawio
@@ -39,6 +42,7 @@ archwire compile web.yaml -o web.drawio
 
 A definition that writes no VPC service is drawn without a VPC. Save this as `api.yaml`:
 
+<!-- archwire-test: compile exit=0 file=api.yaml -->
 ```yaml
 flows:
   - user -> cloudfront -> s3
@@ -51,6 +55,7 @@ set:
   lang: en
 ```
 
+<!-- archwire-test: run exit=0 -->
 ```sh
 archwire compile api.yaml -o api.drawio
 ```
@@ -65,6 +70,7 @@ The line from Cognito is labelled "Cognito authorizer" because the API is a REST
 
 A Lambda function that sends a main flow to Aurora is attached to the VPC Aurora is in. Save this as `mix.yaml`:
 
+<!-- archwire-test: compile exit=2 file=mix.yaml case=mix-vpc-ja holes=route.lambda.s3 -->
 ```yaml
 flows:
   - user -> apigateway(http) -> lambda -> aurora
@@ -74,6 +80,7 @@ set:
   lang: ja
 ```
 
+<!-- archwire-test: run exit=2 holes=route.lambda.s3 -->
 ```sh
 archwire compile mix.yaml -o mix.drawio
 ```
@@ -86,6 +93,7 @@ The function is drawn once in the private subnet of each zone, and each copy rea
 
 Answer the hole and compile again:
 
+<!-- archwire-test: run exit=0 holes= -->
 ```sh
 archwire set mix.yaml choose.route.lambda.s3 endpoint
 archwire compile mix.yaml -o mix.drawio

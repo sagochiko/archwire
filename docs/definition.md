@@ -2,6 +2,7 @@
 
 A definition is a text file with up to three sections: `flows`, `set` and `choose`. Only `flows` is required. Only a small part of YAML is accepted, so that `archwire set` can change one place by editing a single line. There are no lists inside lists, no quoting, no multi-line values and no anchors. A `#` starts a comment that runs to the end of the line. Blank lines and Windows line endings are fine. Section headings start at the left edge, and the lines under them are indented with spaces. archwire also reads a definition indented with tabs, but YAML does not allow tabs for indentation, so other YAML tools reject such a file.
 
+<!-- archwire-test: compile exit=0 -->
 ```yaml
 flows:
   - user -> cloudfront -> alb -> ecs(fargate) -> aurora
@@ -80,6 +81,7 @@ A certificate attached to a load balancer, `acm -- alb`, is drawn inside the Reg
 
 The same name is the same part. To draw two parts of one service, give each a name after a dot:
 
+<!-- archwire-test: compile exit=0 -->
 ```yaml
 flows:
   - user -> cloudfront -> s3.web
@@ -93,6 +95,7 @@ set:
 
 Names work the same way in a definition with a VPC:
 
+<!-- archwire-test: compile exit=0 case=web-named-ja -->
 ```yaml
 flows:
   - user -> cloudfront -> alb -> ecs.web -> aurora.web
@@ -105,6 +108,7 @@ This draws two services and two databases behind one load balancer, and is the a
 
 A VPC can hold more than one load balancer, each with a name:
 
+<!-- archwire-test: compile exit=0 case=web-two-albs-ja -->
 ```yaml
 flows:
   - user -> cloudfront -> alb.web -> ecs.web -> aurora.web
@@ -245,6 +249,7 @@ archwire adds what the path needs and lays the parts out as described under [How
 
 A Lambda function that sends a main flow to Aurora is attached to the VPC and drawn in the private subnet of each Availability Zone, one copy per zone, like ECS. Functions are never drawn in a public subnet. A function without a main flow to Aurora stays outside the VPC, even in a definition with one. The `mix.yaml` of [the examples](examples.md#a-function-in-a-vpc) shows the first:
 
+<!-- archwire-test: compile exit=2 case=mix-vpc-ja holes=route.lambda.s3 -->
 ```yaml
 flows:
   - user -> apigateway(http) -> lambda -> aurora
@@ -260,6 +265,7 @@ With `lambda -> internet` added, the function gets `attached-function-internet-t
 
 A web architecture and an API can stand side by side:
 
+<!-- archwire-test: compile exit=0 -->
 ```yaml
 flows:
   - user -> alb -> ecs
@@ -282,6 +288,7 @@ The load balancer spans the zones. With two zones it sits in the public tier on 
 
 Certificate Manager and WAF attached to a load balancer stand one under the other to the right of the VPC, inside the Region frame, in both directions. Their dashed lines leave the load balancer from its right side, or from its bottom side when another part stands to its right in the same row. Their labels sit on the stretch of the line outside the VPC, where there is room, so they are not read as labels of the lines inside it. In a VPC without private subnets, the line of a load balancer with another load balancer to its right crosses that load balancer, see [Limits](limits.md#several-load-balancers). This definition and its expected output are the acceptance case `tests/cases/web-alb-attach-en`:
 
+<!-- archwire-test: compile exit=0 case=web-alb-attach-en -->
 ```yaml
 flows:
   - user -> cloudfront -> alb -> ecs(fargate) -> aurora
@@ -325,6 +332,7 @@ If archwire cannot lay out a definition, with or without a VPC, without parts or
 
 When `apigateway` is written without a kind, archwire does not pick one. It reports a hole and still writes the diagram, and the exit code is 2. Save this as `hole.yaml`:
 
+<!-- archwire-test: compile exit=2 file=hole.yaml holes=kind.apigateway -->
 ```yaml
 flows:
   - user -> apigateway -> lambda
@@ -333,6 +341,7 @@ flows:
 
 The report contains:
 
+<!-- archwire-test: report-part -->
 ```json
 "holes": [
   {
@@ -351,14 +360,18 @@ In the diagram the API Gateway reads Amazon API Gateway with "type undecided" (�
 
 Answer the hole in one of two ways. Write the kind in the definition, as in `apigateway(http)`, or answer in `choose`:
 
+<!-- archwire-test: run exit=0 -->
 ```sh
 archwire set hole.yaml choose.kind.apigateway http
 ```
+
+<!-- archwire-test: compile file=hole.yaml exit=0 holes= -->
 
 Compile again and the exit code is 0. Do not do both: when the definition already says `apigateway(http)`, there is no hole, and `choose` with `kind.apigateway` is the error `UNKNOWN_HOLE`, even with the same value. An answer that is not `http` or `rest` is `BAD_CHOICE`, with `allowed` `http` and `rest`.
 
 ## set
 
+<!-- archwire-test: skip -->
 ```yaml
 set:
   azs: 3
@@ -379,6 +392,7 @@ When `azs`, `region`, `readers` or `nat` is left out, archwire uses the default 
 
 ## choose
 
+<!-- archwire-test: skip -->
 ```yaml
 choose:
   route.ecs.s3: endpoint
@@ -388,6 +402,7 @@ choose:
 
 A main flow from a part in the VPC's private subnets (ECS, EC2, Aurora, or a function attached to the VPC) to a Regional service outside the VPC can leave the VPC through a VPC endpoint or through a NAT gateway, and archwire does not pick. Save this as `route.yaml`:
 
+<!-- archwire-test: compile exit=2 file=route.yaml holes=route.ecs.s3 -->
 ```yaml
 flows:
   - user -> alb -> ecs
@@ -396,6 +411,7 @@ flows:
 
 `archwire compile route.yaml -o route.drawio` exits with 2. The report contains:
 
+<!-- archwire-test: report-part -->
 ```json
 "holes": [
   {
@@ -416,6 +432,7 @@ For the route, the key is the hole id from the report, `route.<from>.<to>`, and 
 
 ### Answering with nat
 
+<!-- archwire-test: compile exit=0 holes= -->
 ```yaml
 flows:
   - user -> alb -> ecs -> s3
@@ -425,6 +442,7 @@ choose:
 
 `compile` exits with 0. archwire adds a NAT gateway in each public subnet, with a line from each ECS task to its NAT gateway and on to the Internet Gateway, all labelled "Outbound". The line to S3 is labelled "Read/Write (all AZs)" on one line. The report gives each NAT gateway two reasons:
 
+<!-- archwire-test: report-part -->
 ```json
 {
   "target": "nat-1a",
@@ -448,6 +466,7 @@ The same two entries follow for `nat-1c`, and then `nat-per-az`, the default tha
 
 ### Answering with endpoint
 
+<!-- archwire-test: compile exit=0 case=endpoint-ja -->
 ```yaml
 flows:
   - user -> alb -> ecs -> s3
@@ -459,6 +478,7 @@ choose:
 
 `compile` exits with 0. archwire adds no NAT gateway and no endpoint icon. The line to S3 is labelled with one part per line: 「読み書き」, 「（VPC エンドポイント経由）」 and 「（全 AZ から）」. The report's `notes` says that endpoint icons are not drawn:
 
+<!-- archwire-test: report-part -->
 ```json
 "notes": [
   "VPC エンドポイントのアイコンは描かない。"
@@ -516,6 +536,7 @@ The errors come in the order of the checks. Within a check on the flows, they co
 
 When a name is unknown, the connections are not checked. For example, this definition gives five errors:
 
+<!-- archwire-test: compile exit=1 errors=BAD_SETTING@set.azs,BAD_SETTING@set.lang,UNKNOWN_SETTING@set.colour,UNSUPPORTED@flows[1],UNKNOWN_HOLE@choose.route.ecs.rds -->
 ```yaml
 flows:
   - user -> alb -> ecs
@@ -531,8 +552,17 @@ choose:
 
 `BAD_SETTING` at `set.azs`, `BAD_SETTING` at `set.lang`, `UNKNOWN_SETTING` at `set.colour`, `UNSUPPORTED` at `flows[1]`, and `UNKNOWN_HOLE` at `choose.route.ecs.rds`, in that order.
 
-Here is a full report for a misspelled name, from `- user -> cloudfrnt -> alb -> ecs` (exit code 1):
+Here is a full report for a misspelled name. For this definition:
 
+<!-- archwire-test: compile exit=1 errors=UNKNOWN_SERVICE@flows[0][1] -->
+```yaml
+flows:
+  - user -> cloudfrnt -> alb -> ecs
+```
+
+`compile` exits with 1 and prints:
+
+<!-- archwire-test: report -->
 ```json
 {
   "versions": {

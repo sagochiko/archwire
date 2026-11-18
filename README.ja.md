@@ -10,6 +10,7 @@ archwire が自分で足した部品や設定には、レポートと図の両�
 
 次の内容を `web.yaml` として保存する。
 
+<!-- archwire-test: compile exit=0 file=web.yaml -->
 ```yaml
 flows:
   - user -> cloudfront -> alb -> ecs(fargate) -> aurora
@@ -18,6 +19,7 @@ flows:
   - ecs ~> cloudwatch
 ```
 
+<!-- archwire-test: run exit=0 -->
 ```sh
 archwire compile web.yaml -o web.drawio
 ```
@@ -49,6 +51,7 @@ archwire set <definition> <place> <value>
 
 `compile` は図を書き出し、レポートを JSON で標準出力に出す。レポートを残すなら、出力を振り向ける。
 
+<!-- archwire-test: run exit=0 -->
 ```sh
 archwire compile web.yaml -o web.drawio > web.json
 ```
@@ -61,8 +64,12 @@ archwire compile web.yaml -o web.drawio > web.json
 
 穴とは、つながりだけでは決められないところのこと。`web.yaml` に `- ecs -> s3` を足して変換し直すと、ECS から S3 への通信は VPC エンドポイントからも NAT gateway からも VPC の外へ出られるので、レポートに穴 `route.ecs.s3` が選択肢 `endpoint` と `nat` 付きで載る。図は書き出され、その線は灰色の破線になり、終了コードは2になる。もう1種類の穴は、`(http)` も `(rest)` も付けずに書いた API Gateway の種類。
 
+<!-- archwire-test: append file=web.yaml line="  - ecs -> s3" -->
+<!-- archwire-test: compile file=web.yaml exit=2 holes=route.ecs.s3 -->
+
 `set` は定義の1か所を書きかえ、ほかの行はそのまま残す。これで穴に答えて変換し直すと、終了コードは0になる。
 
+<!-- archwire-test: run exit=0 -->
 ```sh
 archwire set web.yaml choose.route.ecs.s3 endpoint
 archwire compile web.yaml -o web.drawio

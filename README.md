@@ -10,6 +10,7 @@ Every part or setting archwire adds on its own carries a reason, in the report a
 
 Save this as `web.yaml`:
 
+<!-- archwire-test: compile exit=0 file=web.yaml -->
 ```yaml
 flows:
   - user -> cloudfront -> alb -> ecs(fargate) -> aurora
@@ -18,6 +19,7 @@ flows:
   - ecs ~> cloudwatch
 ```
 
+<!-- archwire-test: run exit=0 -->
 ```sh
 archwire compile web.yaml -o web.drawio
 ```
@@ -49,6 +51,7 @@ archwire set <definition> <place> <value>
 
 `compile` writes the diagram and prints the report as JSON on standard output. To keep the report, redirect it:
 
+<!-- archwire-test: run exit=0 -->
 ```sh
 archwire compile web.yaml -o web.drawio > web.json
 ```
@@ -61,8 +64,12 @@ archwire compile web.yaml -o web.drawio > web.json
 
 A hole is a decision the connections alone cannot make. Add `- ecs -> s3` to `web.yaml` and compile again: traffic from ECS to S3 can leave the VPC through a VPC endpoint or a NAT gateway, so the report has the hole `route.ecs.s3` with the choices `endpoint` and `nat`. The diagram is still written, with that line grey and dashed, and the exit code is 2. The other kind of hole is the kind of an API Gateway written without `(http)` or `(rest)`.
 
+<!-- archwire-test: append file=web.yaml line="  - ecs -> s3" -->
+<!-- archwire-test: compile file=web.yaml exit=2 holes=route.ecs.s3 -->
+
 `set` rewrites one place in the definition and leaves every other line as it was. Answer the hole with it and compile again; the exit code is 0:
 
+<!-- archwire-test: run exit=0 -->
 ```sh
 archwire set web.yaml choose.route.ecs.s3 endpoint
 archwire compile web.yaml -o web.drawio

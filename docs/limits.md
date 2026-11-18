@@ -8,6 +8,7 @@ A note naming a line means the diagram is still written, but that line could not
 
 Every service behind the load balancer is copied into each zone, and the load balancer sends a line to each copy. Start from this definition and add `- alb -> ecs.sNN` lines one at a time:
 
+<!-- archwire-test: compile exit=0 -->
 ```yaml
 flows:
   - user -> cloudfront -> alb -> ecs.s01 -> aurora
