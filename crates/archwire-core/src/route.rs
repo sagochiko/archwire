@@ -270,6 +270,37 @@ fn outer_first(ctx: &Ctx, specs: &[Line], drafts: &[Draft], ports: &[(Port, Port
     }
 }
 
+/// The depth of a point out from a side, growing outward, and its place along the side.
+fn depth_along(side: Side, p: Pt) -> (i32, i32) {
+    match side {
+        Side::Bottom => (p.1, p.0),
+        Side::Top => (-p.1, p.0),
+        Side::Right => (p.0, p.1),
+        Side::Left => (-p.0, p.1),
+    }
+}
+
+/// The point at `depth` out from a side, at the place along the side of `p`.
+fn at_depth(side: Side, p: Pt, depth: i32) -> Pt {
+    match side {
+        Side::Bottom => (p.0, depth),
+        Side::Top => (p.0, -depth),
+        Side::Right => (depth, p.1),
+        Side::Left => (-depth, p.1),
+    }
+}
+
+/// For a line leaving `side` that runs out, across and on: the exit's depth and place, the turn's
+/// depth, the way across, and the depth of the last stretch's end. None for any other shape.
+fn out_across_on(side: Side, p: &[Pt]) -> Option<((i32, i32), i32, i32, i32)> {
+    if p.len() != 4 {
+        return None;
+    }
+    let q: Vec<(i32, i32)> = p.iter().map(|&x| depth_along(side, x)).collect();
+    let out = q[0].1 == q[1].1 && q[0].0 < q[1].0 && q[1].0 == q[2].0 && q[1].1 != q[2].1 && q[2].1 == q[3].1 && q[2].0 < q[3].0;
+    out.then_some((q[0], q[1].0, (q[2].1 - q[1].1).signum(), q[3].0))
+}
+
 /// Gives the lines leaving one side of a part outside the Region and turning the same way their
 /// turns again, the outer line the turn nearest the part, when two of them cross. Each such line
 /// runs out from its exit, across, and on into the part it goes to; the order the lines are laid
@@ -282,30 +313,7 @@ fn outer_first(ctx: &Ctx, specs: &[Line], drafts: &[Draft], ports: &[(Port, Port
 /// line is clear of everything drawn, turns at no corner of another line, and the lines cross
 /// fewer lines than before.
 fn nest_turns(ctx: &Ctx, specs: &[Line], drafts: &[Draft], ports: &[(Port, Port)], paths: &mut [Vec<Pt>], spaced_only: bool) {
-    // The depth of a point out from the side, growing outward, and its place along the side.
-    let depth_along = |side: Side, p: Pt| match side {
-        Side::Bottom => (p.1, p.0),
-        Side::Top => (-p.1, p.0),
-        Side::Right => (p.0, p.1),
-        Side::Left => (-p.0, p.1),
-    };
-    let at_depth = |side: Side, p: Pt, depth: i32| match side {
-        Side::Bottom => (p.0, depth),
-        Side::Top => (p.0, -depth),
-        Side::Right => (depth, p.1),
-        Side::Left => (-depth, p.1),
-    };
-    // Out, across and on: the exit's depth and place, the turn's depth, the way across, and the
-    // depth of the last stretch's end.
-    let shape = |i: usize, paths: &[Vec<Pt>]| {
-        let (side, p) = (ports[i].0.side, &paths[i]);
-        if p.len() != 4 {
-            return None;
-        }
-        let q: Vec<(i32, i32)> = p.iter().map(|&x| depth_along(side, x)).collect();
-        let out = q[0].1 == q[1].1 && q[0].0 < q[1].0 && q[1].0 == q[2].0 && q[1].1 != q[2].1 && q[2].1 == q[3].1 && q[2].0 < q[3].0;
-        out.then_some((q[0], q[1].0, (q[2].1 - q[1].1).signum(), q[3].0))
-    };
+    let shape = |i: usize, paths: &[Vec<Pt>]| out_across_on(ports[i].0.side, &paths[i]);
     let mut sides: BTreeMap<(&str, u8, i32), Vec<usize>> = BTreeMap::new();
     for i in 0..specs.len() {
         if !outside_the_region(ctx, &specs[i].from) || drafts[i].keep != Keep::Free {
@@ -526,41 +534,10 @@ fn draw_in_order(ctx: &Ctx, specs: &[Line], drafts: &[Draft], plans: &[LinePlan]
         nest_turns(ctx, specs, drafts, &ports, &mut paths, nest == 2);
     }
 
-    // Labels on the shortest lines first, since they have the fewest spots to choose from; each
-    // keeps clear of the labels placed before it.
-    let mut by_length: Vec<usize> = (0..specs.len()).collect();
-    by_length.sort_by_key(|&i| (path_length(&paths[i]), i));
-    let mut areas: Vec<Rect> = Vec::new();
-    let mut on_frames = 0;
-    let mut spots: Vec<Option<LabelSpot>> = (0..specs.len()).map(|_| None).collect();
-    for i in by_length {
-        let s = &specs[i];
-        let (fr, tr) = (layout.rect(&s.from), layout.rect(&s.to));
-        let near_source = ctx.enters_the_vpc(&s.from);
-        let axis = drafts[i].axis;
-        // Running right, ends level in height put the label above the line, else beside it;
-        // running down, ends level left to right put it beside the line, else above it.
-        let level = match axis {
-            Axis::Right => (fr.y - tr.y).abs() <= LEVEL,
-            Axis::Down => (fr.x - tr.x).abs() > LEVEL,
-        };
-        // A line of no length was never laid, and its note already names it: there is no spot along it.
-        if path_length(&paths[i]) == 0 {
-            let text = label_parts(s, model, rules).join(" ");
-            spots[i] = Some(LabelSpot { text, above: level, flip: false, at: None, area: None, clear: true });
-            continue;
-        }
-        // The dashed line of a part attached to a part in the VPC, such as a web ACL to a load balancer.
-        let in_vpc = |id: &str| matches!(ctx.node(id).area, Area::Subnet(_) | Area::VpcEdge);
-        let outside = s.rel == Rel::Assoc && in_vpc(&s.from) != in_vpc(&s.to);
-        let spot = ctx.place_label(&label_parts(s, model, rules), (&paths, i), level, near_source, axis, outside, &areas);
-        on_frames += spot.area.map_or(0, |a| ctx.scene.borders_under(a, 0));
-        areas.extend(spot.area);
-        spots[i] = Some(spot);
-    }
+    let (mut spots, mut on_frames) = place_labels(ctx, specs, drafts, &paths);
+    turn_nearer_for_labels(ctx, specs, drafts, &ports, &mut paths, &mut spots, &mut on_frames);
     let mut wires = Vec::new();
     for (((s, (exit, entry)), path), spot) in specs.iter().zip(ports).zip(&paths).zip(spots) {
-        let spot = spot.expect("every line has a label spot");
         let near_source = ctx.enters_the_vpc(&s.from);
         if !spot.clear {
             notes.push(rules.text("note.unplaced_label", lang).replace("{line}", &edge_id(&s.from, &s.to)));
@@ -595,6 +572,119 @@ fn draw_in_order(ctx: &Ctx, specs: &[Line], drafts: &[Draft], plans: &[LinePlan]
         }
     }
     (wires, notes, paths, on_frames)
+}
+
+/// A line leaving a side runs at least this far out before it turns, when its turn moves nearer.
+const TURN_ROOM: i32 = 20;
+
+/// When a line's label has no clear spot, the other lines leaving the same side of its part that
+/// run out, across and on turn nearer the part, all by the same `LANE_STEP`s, until the labels
+/// have a clear spot: lines either side of a straight line ran along it to turns halfway, and
+/// left its label no room between them or beyond their turns. The nearest turns that leave fewer
+/// labels without a clear spot are kept, when every moved line is clear of everything drawn,
+/// turns at no corner of another line, the lines cross no more lines than before and no more
+/// frame sides run under the labels; else the lines and labels stay as they were.
+fn turn_nearer_for_labels(ctx: &Ctx, specs: &[Line], drafts: &[Draft], ports: &[(Port, Port)], paths: &mut [Vec<Pt>], spots: &mut Vec<LabelSpot>, on_frames: &mut usize) {
+    let unclear = |spots: &[LabelSpot]| spots.iter().filter(|s| !s.clear).count();
+    let crossings = |drawn: &[Vec<Pt>]| {
+        let mut n = 0;
+        for a in 0..drawn.len() {
+            for b in a + 1..drawn.len() {
+                n += drawn[a].windows(2).flat_map(|s| drawn[b].windows(2).map(move |t| (s, t))).filter(|(s, t)| crate::path::crosses(s[0], s[1], t[0], t[1])).count();
+            }
+        }
+        n
+    };
+    for i in 0..specs.len() {
+        if spots[i].clear {
+            continue;
+        }
+        let side = ports[i].0.side;
+        let siblings: Vec<usize> = (0..specs.len())
+            .filter(|&j| j != i && specs[j].from == specs[i].from && ports[j].0.side == side && drafts[j].keep == Keep::Free && out_across_on(side, &paths[j]).is_some())
+            .collect();
+        if siblings.is_empty() {
+            continue;
+        }
+        let (before, crossed) = (unclear(spots), crossings(paths));
+        for step in 1.. {
+            let mut new: Vec<(usize, Vec<Pt>)> = Vec::new();
+            for &j in &siblings {
+                let (exit, turn, _, _) = out_across_on(side, &paths[j]).expect("shaped");
+                let to = turn - step * LANE_STEP;
+                if to < exit.0 + TURN_ROOM {
+                    new.clear();
+                    break;
+                }
+                let p = &paths[j];
+                new.push((j, vec![p[0], at_depth(side, p[1], to), at_depth(side, p[2], to), p[3]]));
+            }
+            if new.is_empty() {
+                break;
+            }
+            let mut drawn: Vec<Vec<Pt>> = paths.to_vec();
+            for (j, p) in &new {
+                drawn[*j] = p.clone();
+            }
+            let clear = new.iter().all(|(j, p)| {
+                let s = &specs[*j];
+                let others: Vec<Vec<Pt>> = drawn.iter().enumerate().filter(|&(k, _)| k != *j).map(|(_, q)| q.clone()).collect();
+                let (out, inward) = (outward(ports[*j].0.side), reverse(outward(ports[*j].1.side)));
+                let mine = crate::path::corners(p);
+                let apart = |k: usize| ![&s.from, &s.to].iter().any(|e| **e == specs[k].from || **e == specs[k].to);
+                ctx.scene.check(p, &s.from, &s.to, out, inward, &others).is_some()
+                    && !(0..drawn.len()).any(|k| k != *j && apart(k) && crate::path::corners(&drawn[k]).iter().any(|c| mine.contains(c)))
+            });
+            if !clear || crossings(&drawn) > crossed {
+                continue;
+            }
+            let (moved, frames) = place_labels(ctx, specs, drafts, &drawn);
+            if unclear(&moved) < before && frames <= *on_frames {
+                paths.clone_from_slice(&drawn);
+                *spots = moved;
+                *on_frames = frames;
+                break;
+            }
+        }
+    }
+}
+
+/// Places the label of every line on `paths`: on the shortest lines first, since they have the
+/// fewest spots to choose from, each clear of the labels placed before it. Gives each line's spot
+/// and how many frame sides run under the labels.
+fn place_labels(ctx: &Ctx, specs: &[Line], drafts: &[Draft], paths: &[Vec<Pt>]) -> (Vec<LabelSpot>, usize) {
+    let (model, layout, rules) = (ctx.model, ctx.layout, ctx.rules);
+    let mut by_length: Vec<usize> = (0..specs.len()).collect();
+    by_length.sort_by_key(|&i| (path_length(&paths[i]), i));
+    let mut areas: Vec<Rect> = Vec::new();
+    let mut on_frames = 0;
+    let mut spots: Vec<Option<LabelSpot>> = (0..specs.len()).map(|_| None).collect();
+    for i in by_length {
+        let s = &specs[i];
+        let (fr, tr) = (layout.rect(&s.from), layout.rect(&s.to));
+        let near_source = ctx.enters_the_vpc(&s.from);
+        let axis = drafts[i].axis;
+        // Running right, ends level in height put the label above the line, else beside it;
+        // running down, ends level left to right put it beside the line, else above it.
+        let level = match axis {
+            Axis::Right => (fr.y - tr.y).abs() <= LEVEL,
+            Axis::Down => (fr.x - tr.x).abs() > LEVEL,
+        };
+        // A line of no length was never laid, and its note already names it: there is no spot along it.
+        if path_length(&paths[i]) == 0 {
+            let text = label_parts(s, model, rules).join(" ");
+            spots[i] = Some(LabelSpot { text, above: level, flip: false, at: None, area: None, clear: true });
+            continue;
+        }
+        // The dashed line of a part attached to a part in the VPC, such as a web ACL to a load balancer.
+        let in_vpc = |id: &str| matches!(ctx.node(id).area, Area::Subnet(_) | Area::VpcEdge);
+        let outside = s.rel == Rel::Assoc && in_vpc(&s.from) != in_vpc(&s.to);
+        let spot = ctx.place_label(&label_parts(s, model, rules), (paths, i), level, near_source, axis, outside, &areas);
+        on_frames += spot.area.map_or(0, |a| ctx.scene.borders_under(a, 0));
+        areas.extend(spot.area);
+        spots[i] = Some(spot);
+    }
+    (spots.into_iter().map(|s| s.expect("every line has a label spot")).collect(), on_frames)
 }
 
 impl<'a> Ctx<'a> {
@@ -2473,6 +2563,41 @@ pub(crate) mod tests {
         assert!(before.iter().all(|x| x.2), "{before:?}");
         let (m2, r2) = renamed(&m, &[("igw", "gate")]);
         assert_eq!(leaving(&m2, &r2), before);
+    }
+
+    /// A bucket's event notifications to a function, a queue and a topic, next to other shapes.
+    fn bucket_fanout_definitions() -> Vec<String> {
+        let fanout = "  - user -> s3.up -> lambda.t -> dynamodb.t\n  - user -> s3.up -> sqs.u -> lambda.u\n  - s3.up -> sns.u\n";
+        let front = "  - user -> cloudfront -> s3\n";
+        let mut out = Vec::new();
+        for (before, after, azs) in [
+            (front, "", ""),
+            (front, "  - user -> apigateway(http) -> lambda.api -> dynamodb.api\n", ""),
+            ("  - user -> cloudfront -> s3\n  - user -> apigateway(http) -> lambda.m -> aurora\n", "", "  azs: 2\n"),
+            ("  - user -> cloudfront -> s3\n  - user -> apigateway(http) -> lambda.m -> aurora\n", "", "  azs: 3\n"),
+            (front, "  - eventbridge -> lambda.s -> dynamodb.s\n", ""),
+            (front, "  - guardduty -> eventbridge -> sns.d\n", ""),
+            (front, "  - s3.up -> lambda.v\n", ""),
+            (front, "  - s3.up -> lambda.v\n  - s3.up -> sqs.w\n", ""),
+        ] {
+            for lang in ["en", "ja"] {
+                out.push(format!("flows:\n{before}{fanout}{after}set:\n  lang: {lang}\n{azs}"));
+            }
+        }
+        out
+    }
+
+    // Fails if a bucket sending event notifications to three or more parts leaves the label of
+    // the line in the middle with no clear spot, or any line at fault, in either direction: the
+    // lines either side of it ran along it to their turns, with too little room between them.
+    #[test]
+    fn the_middle_of_three_lines_out_of_one_side_keeps_its_label() {
+        let mut bad = Vec::new();
+        for src in bucket_fanout_definitions() { for axis in AXES {
+            let v = violations(&src, axis);
+            if !v.is_empty() { bad.push(format!("{axis:?}\n{src}{v:#?}")); }
+        } }
+        assert!(bad.is_empty(), "{}", bad.join("\n----\n"));
     }
 
 
