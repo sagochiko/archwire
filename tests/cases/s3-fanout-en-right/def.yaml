@@ -1,0 +1,8 @@
+flows:
+  - user -> cloudfront -> s3
+  - user -> s3.up -> lambda.t -> dynamodb.t
+  - user -> s3.up -> sqs.u -> lambda.u
+  - s3.up -> sns.u
+set:
+  lang: en
+  direction: right
