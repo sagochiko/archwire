@@ -47,6 +47,7 @@ cargo install --path crates/archwire
 ```sh
 archwire compile <definition> -o <diagram.drawio>
 archwire set <definition> <place> <value>
+archwire list
 ```
 
 `compile` は図を書き出し、レポートを JSON で標準出力に出す。レポートを残すなら、出力を振り向ける。
@@ -75,7 +76,14 @@ archwire set web.yaml choose.route.ecs.s3 endpoint
 archwire compile web.yaml -o web.drawio
 ```
 
-定義の書き方と穴ごとの答え方は [Writing a definition](docs/definition.md) にある。レポートの項目と、図に入る理由は [Reading the report](docs/report.md) にある（どちらも英語）。
+`list` は、定義に書けるサービス、受け付けるつながり、設定を、組み込みの規則のデータから JSON で出す。AI エージェントのように定義を書くプログラムは、先に文書を読まなくても、何を書けるかが分かる。
+
+<!-- archwire-test: run exit=0 -->
+```sh
+archwire list > list.json
+```
+
+定義の書き方と穴ごとの答え方は [Writing a definition](docs/definition.md) にある。レポートの項目、図に入る理由、`list` の出す項目は [Reading the report](docs/report.md) にある（どちらも英語）。
 
 ## 描ける構成
 

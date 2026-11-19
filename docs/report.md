@@ -63,6 +63,50 @@ How often notes naming a line appear in crowded diagrams is in [Limits](limits.m
 
 The reasons are not only in the report. Every element with a reason carries it inside the `.drawio` file, as the attributes `derived` (the reason text), `rule`, `kind` and `source` on the cell, so they travel with the diagram. When an element has more than one reason, each attribute holds them in the same order, separated by ` | `. Every cell archwire added, that is every frame and the Internet Gateway and NAT gateways, also has the attribute `added="1"`; cells for parts the definition wrote do not, even when they carry a reason for where they were placed.
 
+## Listing what a definition can use
+
+`archwire list` takes no arguments, prints one JSON object on standard output and exits with 0. It is made from the built-in rules data, so a program that writes definitions, such as an AI agent, can learn what it may write without reading these documents.
+
+<!-- archwire-test: run exit=0 -->
+```sh
+archwire list > list.json
+```
+
+The fields come in this order: `versions`, `services`, `links`, `settings`. `versions` is the same as in the report of `compile`.
+
+`services` lists the services a definition can write, in the order of their names. The parts archwire only adds, the Internet Gateway and the NAT gateways, are not in it. Each has the name to write (`name`), the service's name in English (`label`), the kinds that can be written after it in parentheses (`kinds`, empty when there are none), and `in_vpc`, true for a service that is always drawn in the VPC. `lambda` has `in_vpc` false, although a function that sends a main flow to `aurora` is drawn in the VPC.
+
+<!-- archwire-test: report-part -->
+```json
+{
+  "name": "ecs",
+  "label": "Amazon ECS",
+  "kinds": [
+    "fargate"
+  ],
+  "in_vpc": true
+}
+```
+
+`links` lists the accepted connections, in the order of `rules/aws/links.toml`, the same as the table in [Which connections are accepted](definition.md#which-connections-are-accepted). Each has `from`, `to`, the `symbol` to write between them (`->`, `~>` or `--`) and the line label in English (`label`). `kind_labels` gives the label for each kind of the `to` part, when it depends on the kind; `label` is then the one used while the kind is undecided. `role_labels` gives the label for the Aurora writer and for a reader. Both are empty objects for the other connections.
+
+<!-- archwire-test: report-part -->
+```json
+{
+  "from": "cognito",
+  "to": "apigateway",
+  "symbol": "--",
+  "label": "Verify tokens",
+  "kind_labels": {
+    "http": "JWT authorizer",
+    "rest": "Cognito authorizer"
+  },
+  "role_labels": {}
+}
+```
+
+`settings` lists the keys of `set`, in the order of their names, each with the `values` it accepts and `vpc_only`, true for a key only a definition with a VPC may write. `readers` lists every value some definition accepts; the values a definition accepts stop at its `azs` minus 1, see [set](definition.md#set).
+
 ## Compatibility
 
 This page describes the report of archwire 0.1.0. A report says which archwire and which rules data produced it in `versions`, so compare those first when two reports for one definition differ. A new version of the rules data can change the reasons, the labels and the diagram for the same definition.

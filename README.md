@@ -47,6 +47,7 @@ This puts `archwire` in Cargo's bin folder, usually `~/.cargo/bin`.
 ```sh
 archwire compile <definition> -o <diagram.drawio>
 archwire set <definition> <place> <value>
+archwire list
 ```
 
 `compile` writes the diagram and prints the report as JSON on standard output. To keep the report, redirect it:
@@ -75,7 +76,14 @@ archwire set web.yaml choose.route.ecs.s3 endpoint
 archwire compile web.yaml -o web.drawio
 ```
 
-How to write a definition and answer each hole is in [Writing a definition](docs/definition.md). The report's fields and the reasons stored in the diagram are in [Reading the report](docs/report.md).
+`list` prints, as JSON, the services, the accepted connections and the settings a definition can use, taken from the built-in rules data, so that a program writing definitions, such as an AI agent, does not need to read the documents first:
+
+<!-- archwire-test: run exit=0 -->
+```sh
+archwire list > list.json
+```
+
+How to write a definition and answer each hole is in [Writing a definition](docs/definition.md). The report's fields, the reasons stored in the diagram and the fields of `list` are in [Reading the report](docs/report.md).
 
 ## Supported architectures
 
