@@ -332,6 +332,138 @@ fn the_connection_table_lists_every_accepted_connection_with_its_label() {
     finish(problems);
 }
 
+/// What `archwire list` prints, read as JSON.
+fn listed() -> serde_json::Value {
+    let out = Command::new(env!("CARGO_BIN_EXE_archwire")).arg("list").output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "archwire list failed");
+    serde_json::from_slice(&out.stdout).expect("archwire list prints JSON")
+}
+
+/// The text of a JSON array of strings.
+fn strings(v: &serde_json::Value) -> Vec<String> {
+    v.as_array().unwrap().iter().map(|s| s.as_str().unwrap().to_string()).collect()
+}
+
+/// The label of a connection in `archwire list`, spelt out as the connection table writes it.
+fn listed_label(link: &serde_json::Value) -> String {
+    let base = link["label"].as_str().unwrap().to_string();
+    let kinds = link["kind_labels"].as_object().unwrap();
+    if !kinds.is_empty() {
+        let mut parts: Vec<String> = kinds.iter().map(|(kind, label)| format!("{} for `{kind}`", label.as_str().unwrap())).collect();
+        parts.push(format!("{base} while the kind is undecided"));
+        return parts.join(", ");
+    }
+    let roles = link["role_labels"].as_object().unwrap();
+    if !roles.is_empty() {
+        let writer = roles.get("writer").map(|l| format!("{} to the writer", l.as_str().unwrap()));
+        let reader = roles.get("reader").map(|l| format!("{} to a reader", l.as_str().unwrap()));
+        return writer.into_iter().chain(reader).collect::<Vec<_>>().join(", ");
+    }
+    base
+}
+
+#[test]
+fn archwire_list_gives_the_services_and_connections_of_the_tables() {
+    let src = read("docs/definition.md");
+    let list = listed();
+    let mut problems = Vec::new();
+
+    let (at, rows) = table(&src, &["Name", "Service", "Kinds", "Where it is drawn"]).expect("docs/definition.md has no service table");
+    let documented: BTreeMap<String, BTreeSet<String>> = rows
+        .iter()
+        .filter_map(|(_, row)| code_spans(&row[0]).into_iter().next().map(|n| (n, code_spans(row.get(2).map(String::as_str).unwrap_or("")).into_iter().collect())))
+        .collect();
+    let services = list["services"].as_array().unwrap();
+    let mut seen = BTreeSet::new();
+    for s in services {
+        let name = s["name"].as_str().unwrap().to_string();
+        if !seen.insert(name.clone()) {
+            problems.push(format!("archwire list gives the service `{name}` twice"));
+        }
+        let kinds: BTreeSet<String> = strings(&s["kinds"]).into_iter().collect();
+        match documented.get(&name) {
+            None => problems.push(format!("docs/definition.md:{at}: archwire list gives the service `{name}`, which the service table does not list")),
+            Some(want) if *want != kinds => problems.push(format!("docs/definition.md:{at}: archwire list gives `{name}` the kinds {kinds:?}, the service table {want:?}")),
+            Some(_) => {}
+        }
+    }
+    for name in documented.keys().filter(|n| !seen.contains(*n)) {
+        problems.push(format!("docs/definition.md:{at}: the service table lists `{name}`, which archwire list does not give"));
+    }
+
+    let (at, rows) = table(&src, &["From", "Symbol", "To", "Line label"]).expect("docs/definition.md has no connection table");
+    let one = |cell: &str| code_spans(cell).into_iter().next().unwrap_or_default();
+    let documented: BTreeMap<(String, String, String), String> = rows.iter().map(|(_, row)| ((one(&row[0]), one(&row[1]), one(&row[2])), row.get(3).cloned().unwrap_or_default())).collect();
+    let links = list["links"].as_array().unwrap();
+    let mut seen = BTreeSet::new();
+    for l in links {
+        let key = (l["from"].as_str().unwrap().to_string(), l["symbol"].as_str().unwrap().to_string(), l["to"].as_str().unwrap().to_string());
+        let (from, symbol, to) = &key;
+        if !seen.insert(key.clone()) {
+            problems.push(format!("archwire list gives `{from} {symbol} {to}` twice"));
+        }
+        let label = listed_label(l);
+        match documented.get(&key) {
+            None => problems.push(format!("docs/definition.md:{at}: archwire list gives `{from} {symbol} {to}`, which the connection table does not list")),
+            Some(want) if *want != label => problems.push(format!("docs/definition.md:{at}: archwire list labels `{from} {symbol} {to}` `{label}`, the connection table `{want}`")),
+            Some(_) => {}
+        }
+    }
+    for (from, symbol, to) in documented.keys().filter(|k| !seen.contains(*k)) {
+        problems.push(format!("docs/definition.md:{at}: the connection table lists `{from} {symbol} {to}`, which archwire list does not give"));
+    }
+    if links.len() != rows.len() {
+        problems.push(format!("archwire list gives {} connections, the connection table has {} rows", links.len(), rows.len()));
+    }
+
+    let (at, rows) = table(&src, &["Key", "Values", "Default"]).expect("docs/definition.md has no table of settings");
+    let mut documented: Vec<String> = rows.iter().map(|(_, row)| one(&row[0])).collect();
+    documented.sort();
+    let settings: Vec<String> = list["settings"].as_array().unwrap().iter().map(|s| s["key"].as_str().unwrap().to_string()).collect();
+    if settings != documented {
+        problems.push(format!("docs/definition.md:{at}: archwire list gives the settings {settings:?}, the table of `set` {documented:?}"));
+    }
+    finish(problems);
+}
+
+// Fails if `archwire list` leaves out a writable service of the rules data or a connection, or
+// gives one the rules data does not have, so the list cannot drift even where a table does.
+#[test]
+fn archwire_list_follows_the_rules_data() {
+    let list = listed();
+    let mut problems = Vec::new();
+    let services = entries(&rules_toml("services.toml"), "service");
+    let labels = rules_toml("labels.toml");
+    let mut want = Vec::new();
+    for s in services.iter().filter(|s| s.get("derived_only").and_then(|v| v.as_bool()) != Some(true)) {
+        let kinds: Vec<String> = s.get("options").and_then(|o| o.as_table()).map(|t| t.keys().cloned().collect()).unwrap_or_default();
+        let label = s["label"].as_str().unwrap();
+        let label = labels.get(label).and_then(|l| l.get("en")).and_then(|v| v.as_str()).unwrap_or(label);
+        want.push(serde_json::json!({"name": s["key"], "label": label, "kinds": kinds, "in_vpc": s["scope"].as_str() == Some("vpc")}));
+    }
+    want.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    if list["services"].as_array().unwrap() != &want {
+        problems.push(format!("archwire list gives the services\n{:#}\nbut rules/aws/services.toml gives\n{:#}", list["services"], serde_json::Value::Array(want)));
+    }
+    let links = entries(&rules_toml("links.toml"), "link");
+    let listed: Vec<String> = list["links"].as_array().unwrap().iter().map(|l| format!("{} {} {}: {}", l["from"].as_str().unwrap(), l["symbol"].as_str().unwrap(), l["to"].as_str().unwrap(), listed_label(l))).collect();
+    let want: Vec<String> = links
+        .iter()
+        .map(|l| {
+            let symbol = match l["rel"].as_str().unwrap() {
+                "main" => "->",
+                "aux" => "~>",
+                _ => "--",
+            };
+            format!("{} {symbol} {}: {}", l["from"].as_str().unwrap(), l["to"].as_str().unwrap(), documented_label(l, &labels))
+        })
+        .collect();
+    if listed != want {
+        problems.push(format!("archwire list gives the connections, in order,\n{}\nbut rules/aws/links.toml gives\n{}", listed.join("\n"), want.join("\n")));
+    }
+    finish(problems);
+}
+
 #[test]
 fn every_toml_excerpt_in_the_documents_is_in_the_rules_data() {
     let data: Vec<String> = ["services.toml", "rules.toml", "labels.toml", "links.toml"].iter().map(|n| read(&format!("rules/aws/{n}"))).collect();
