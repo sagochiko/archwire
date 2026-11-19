@@ -580,10 +580,11 @@ const TURN_ROOM: i32 = 20;
 /// When a line's label has no clear spot, the other lines leaving the same side of its part that
 /// run out, across and on turn nearer the part, all by the same `LANE_STEP`s, until the labels
 /// have a clear spot: lines either side of a straight line ran along it to turns halfway, and
-/// left its label no room between them or beyond their turns. The nearest turns that leave fewer
-/// labels without a clear spot are kept, when every moved line is clear of everything drawn,
-/// turns at no corner of another line, the lines cross no more lines than before and no more
-/// frame sides run under the labels; else the lines and labels stay as they were.
+/// left its label no room between them or beyond their turns. The first turns that leave fewer
+/// labels without a clear spot are kept, when every moved line is clear of everything drawn and
+/// turns at no corner of a line it shares no end with, no label that had a clear spot loses it,
+/// the lines cross no more lines than before and no more frame sides run under the labels; else
+/// the lines and labels stay as they were.
 fn turn_nearer_for_labels(ctx: &Ctx, specs: &[Line], drafts: &[Draft], ports: &[(Port, Port)], paths: &mut [Vec<Pt>], spots: &mut Vec<LabelSpot>, on_frames: &mut usize) {
     let unclear = |spots: &[LabelSpot]| spots.iter().filter(|s| !s.clear).count();
     let crossings = |drawn: &[Vec<Pt>]| {
@@ -639,7 +640,9 @@ fn turn_nearer_for_labels(ctx: &Ctx, specs: &[Line], drafts: &[Draft], ports: &[
                 continue;
             }
             let (moved, frames) = place_labels(ctx, specs, drafts, &drawn);
-            if unclear(&moved) < before && frames <= *on_frames {
+            // No label that had a clear spot may lose it: a fault is not moved on to another line.
+            let none_lost = spots.iter().zip(&moved).all(|(old, new)| !old.clear || new.clear);
+            if unclear(&moved) < before && none_lost && frames <= *on_frames {
                 paths.clone_from_slice(&drawn);
                 *spots = moved;
                 *on_frames = frames;
