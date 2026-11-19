@@ -1,0 +1,57 @@
+name: wheels
+
+# Builds the Python wheels that carry the archwire command, and the source distribution.
+# Nothing is uploaded to a package index from here.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  wheel:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64, manylinux: auto }
+          - { os: ubuntu-latest, target: aarch64, manylinux: auto }
+          - { os: macos-latest, target: aarch64, manylinux: "off" }
+          - { os: macos-latest, target: x86_64, manylinux: "off" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --out dist
+      - name: Install the wheel and compile a case with it
+        if: matrix.target == 'x86_64' && matrix.os == 'ubuntu-latest' || matrix.target == 'aarch64' && matrix.os == 'macos-latest'
+        run: |
+          python3 -m venv venv
+          venv/bin/pip install dist/*.whl
+          venv/bin/archwire compile tests/cases/web-2az-en/def.yaml -o out.drawio > out.json
+          cmp out.drawio tests/cases/web-2az-en/expected.drawio
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.os }}-${{ matrix.target }}
+          path: dist
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - name: Build from the source distribution and compile a case with it
+        run: |
+          python3 -m venv venv
+          venv/bin/pip install dist/*.tar.gz
+          venv/bin/archwire compile tests/cases/web-2az-en/def.yaml -o out.drawio > out.json
+          cmp out.drawio tests/cases/web-2az-en/expected.drawio
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist

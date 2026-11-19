@@ -1,0 +1,26 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "archwire"
+description = "Turns a short definition of how services connect into a draw.io diagram, for AWS"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.8"
+dynamic = ["version"]
+classifiers = [
+    "Environment :: Console",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Documentation",
+]
+
+[project.urls]
+Repository = "https://github.com/sagochiko/archwire"
+
+[tool.maturin]
+bindings = "bin"
+manifest-path = "crates/archwire/Cargo.toml"
+# The built-in rules are read from outside the crates at compile time.
+include = [{ path = "rules/aws/*.toml", format = "sdist" }]
