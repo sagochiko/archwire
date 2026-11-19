@@ -32,7 +32,15 @@ The VPC, the Internet Gateway, the subnets, the second Availability Zone, the NA
 
 ## Install
 
-archwire is a Rust program and needs a recent stable Rust toolchain. Get the repository and install from its top folder:
+archwire is published on PyPI as a wheel that carries the command, for macOS and Linux. With [uv](https://docs.astral.sh/uv/), run it without installing:
+
+```sh
+uvx archwire --version
+```
+
+Or install it with `uv tool install archwire` or `pip install archwire`. Rust is not needed for these.
+
+To build from source, you need a recent stable Rust toolchain:
 
 ```sh
 git clone https://github.com/sagochiko/archwire.git

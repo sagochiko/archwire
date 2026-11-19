@@ -32,7 +32,15 @@ VPC、Internet Gateway、サブネット、2つ目の Availability Zone、NAT ga
 
 ## インストール
 
-archwire は Rust のプログラムで、新しめの安定版の Rust ツールチェーンが要る。リポジトリを取ってきて、その直下からインストールする。
+archwire は、コマンドを入れたホイールとして PyPI に置いてある。macOS と Linux で使える。[uv](https://docs.astral.sh/uv/) があれば、インストールせずにそのまま動かせる。
+
+```sh
+uvx archwire --version
+```
+
+`uv tool install archwire` か `pip install archwire` で入れてもよい。どちらも Rust は要らない。
+
+ソースから作るときは、新しめの安定版の Rust ツールチェーンが要る。
 
 ```sh
 git clone https://github.com/sagochiko/archwire.git
