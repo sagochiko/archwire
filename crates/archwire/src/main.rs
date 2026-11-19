@@ -25,11 +25,17 @@ enum Command {
         at: String,
         value: String,
     },
+    /// Print the services, connections and settings a definition can use, as JSON
+    List,
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
+        Command::List => {
+            print!("{}", archwire_core::list::list().to_json());
+            ExitCode::SUCCESS
+        }
         Command::Set { def, at, value } => {
             let text = match std::fs::read_to_string(&def) {
                 Ok(t) => t,

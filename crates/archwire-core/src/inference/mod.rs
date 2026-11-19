@@ -58,6 +58,27 @@ const DIRECTIONS: [&str; 2] = ["down", "right"];
 const NAT_MODES: [&str; 2] = ["per-az", "single"];
 const ROUTE_CHOICES: [&str; 2] = ["endpoint", "nat"];
 
+/// Every setting a definition may write, in key order, with the values the checks below accept
+/// and whether only a definition with a VPC may write it.
+pub fn settings() -> Vec<(&'static str, Vec<String>, bool)> {
+    let most_azs: usize = AZ_COUNTS.iter().map(|n| n.parse::<usize>().expect("listed value")).max().expect("listed values");
+    VPC_SETTINGS
+        .iter()
+        .map(|&key| {
+            let values = match key {
+                "azs" => strings(&AZ_COUNTS),
+                "direction" => strings(&DIRECTIONS),
+                "lang" => strings(&LANGS),
+                "nat" => strings(&NAT_MODES),
+                "readers" => (1..most_azs).map(|n| n.to_string()).collect(),
+                "region" => strings(&REGIONS),
+                other => unreachable!("no values for the setting `{other}`"),
+            };
+            (key, values, !FLOW_SETTINGS.contains(&key))
+        })
+        .collect()
+}
+
 /// The settings a model is built with.
 pub(crate) struct Settings {
     region: String,

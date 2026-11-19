@@ -385,6 +385,16 @@ impl Rules {
         self.services.keys().cloned().collect()
     }
 
+    /// The services, in the order of their keys.
+    pub fn services(&self) -> impl Iterator<Item = &Service> {
+        self.services.values()
+    }
+
+    /// The accepted connections, in the order links.toml lists them.
+    pub fn links(&self) -> &[LinkRule] {
+        &self.links
+    }
+
     /// Panics on an unknown id: that is a bug in the program, not in the input.
     pub fn rule(&self, id: &str) -> &Rule {
         self.rules.get(id).unwrap_or_else(|| panic!("unknown rule id `{id}`"))

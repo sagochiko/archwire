@@ -5,6 +5,7 @@ pub mod drawio;
 pub mod edit;
 pub mod inference;
 pub mod layout;
+pub mod list;
 pub mod model;
 pub mod route;
 pub mod rules;
