@@ -629,7 +629,7 @@ mod tests {
 
     // Fails if a frame loses its name or parent, or a part its name, its line count or its frame.
     #[test]
-    fn frames_labels_and_parents_follow_the_skill_diagram() {
+    fn frames_labels_and_parents_of_the_web_diagram() {
         for axis in [Axis::Down, Axis::Right] {
             let l = laid(&format!("{WEB2}  - waf -- cloudfront\n  - acm -- cloudfront\n"), axis);
             let frames: Vec<_> = l.frames.iter().map(|f| (f.id.as_str(), f.label.as_str(), f.parent.as_deref())).collect();

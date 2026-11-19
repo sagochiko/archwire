@@ -107,7 +107,7 @@ fn every_case_matches_its_expected_output() {
 }
 
 #[test]
-fn case_list_is_what_the_plan_says() {
+fn case_list_matches_the_cases_folder() {
     let mut names: Vec<String> = std::fs::read_dir(cases_dir())
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())

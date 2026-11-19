@@ -267,7 +267,7 @@ For example, each of these stops with `UNSUPPORTED`:
 
 `alb -- waf` stops the same way as `alb -- acm`: write the attached part first. So do `user -> aurora`, `alb -> s3`, `user ~> alb`, `internet -> alb`, `ecs -> user` and `waf -> alb` in a definition with a VPC. The auxiliary flows `cloudfront ~> s3` and `cloudfront ~> cloudwatch` are accepted in every definition, and so is `- user -> alb` alone.
 
-A main flow from a part in a private subnet to a part in the Region outside the VPC leaves a hole for its route, see [choose](#choose). With the list above that is `ecs` to `s3`, `dynamodb` or `cloudwatch`, `ec2` to `s3`, `dynamodb`, `cloudwatch` or `ssm`, `aurora` to `s3` or `cloudwatch`, and a function attached to the VPC to `s3`, `dynamodb`, `sqs`, `sns` or `eventbridge`. A queue that invokes a function attached to the VPC, `sqs -> lambda`, leaves no hole: the Lambda service reads the queue and passes the messages to the function. A table's stream, `dynamodb -> lambda`, leaves none either.
+A main flow from a part in a private subnet to a part in the Region outside the VPC leaves a hole for its route, see [choose](#choose). With the list above that is `ecs` to `s3`, `dynamodb`, `cloudwatch`, `sqs` or `sns`, `ec2` to `s3`, `dynamodb`, `cloudwatch`, `ssm`, `sqs` or `sns`, `aurora` to `s3`, and a function attached to the VPC to `s3`, `dynamodb`, `sqs`, `sns` or `eventbridge`. A queue that invokes a function attached to the VPC, `sqs -> lambda`, leaves no hole: the Lambda service reads the queue and passes the messages to the function. A table's stream, `dynamodb -> lambda`, leaves none either.
 
 ## Definitions with a VPC
 

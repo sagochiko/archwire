@@ -727,7 +727,11 @@ fn count_lines_meeting_at_corners() {
     }
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let hand: Vec<(String, Model)> = super::azgrid::tests::inputs().into_iter().filter(|(n, _, _)| n.starts_with("mix-")).map(|(n, m, _)| (n, m)).collect();
-    let mut eighty: Vec<std::path::PathBuf> = std::fs::read_dir(root.join("out/view/m2b/gen-before")).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|e| e == "yaml")).collect();
+    // Extra definitions to measure, from a folder named by ARCHWIRE_EXTRA_DEFS (none when unset).
+    let mut eighty: Vec<std::path::PathBuf> = match std::env::var_os("ARCHWIRE_EXTRA_DEFS") {
+        Some(dir) => std::fs::read_dir(root.join(dir)).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|e| e == "yaml")).collect(),
+        None => Vec::new(),
+    };
     eighty.sort();
     for f in eighty {
         let src = std::fs::read_to_string(&f).unwrap();
@@ -823,7 +827,11 @@ fn count_labels_by_names() {
     }
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let hand: Vec<(String, Model)> = super::azgrid::tests::inputs().into_iter().filter(|(n, _, _)| n.starts_with("mix-")).map(|(n, m, _)| (n, m)).collect();
-    let mut eighty: Vec<std::path::PathBuf> = std::fs::read_dir(root.join("out/view/m2b/gen-before")).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|e| e == "yaml")).collect();
+    // Extra definitions to measure, from a folder named by ARCHWIRE_EXTRA_DEFS (none when unset).
+    let mut eighty: Vec<std::path::PathBuf> = match std::env::var_os("ARCHWIRE_EXTRA_DEFS") {
+        Some(dir) => std::fs::read_dir(root.join(dir)).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|e| e == "yaml")).collect(),
+        None => Vec::new(),
+    };
     eighty.sort();
     for f in eighty {
         let src = std::fs::read_to_string(&f).unwrap();
