@@ -204,6 +204,27 @@ pub(super) fn layered(model: &Model, rules: &Rules, axis: Axis, piece: Option<&P
     let round_the_vpc = |j: usize| {
         targets(j).into_iter().filter(|&t| area(t) == Area::Region).filter_map(|t| v[t]).any(|t| vpc_across.is_none_or(|(lo, hi)| lo - ICON < t && t < hi))
     };
+    // Top to bottom, a side part attached to two or more main parts of the rank next to each
+    // other, and to nothing else, goes between two of them: after the first of two, after the
+    // middle one of three. Past them all, its line to the first would run past the others and
+    // cross the lines from the users coming down into them. With three, either gap leaves one
+    // such crossing; after the first, the step it takes moves the second right, where its line
+    // down into the Region can cross the third's. By the main part it goes after, in model order.
+    let between: Vec<(usize, usize)> = if axis == Axis::Down {
+        g_side
+            .iter()
+            .filter_map(|&i| {
+                let id = &nodes[i].id;
+                let only_assoc = model.edges.iter().filter(|e| &e.from == id || &e.to == id).all(|e| e.rel == Rel::Assoc);
+                let ps = partners(model, i);
+                let at: Vec<usize> = (0..g_main.len()).filter(|&k| ps.contains(&g_main[k])).collect();
+                let next_to = at.windows(2).all(|w| w[1] == w[0] + 1);
+                (only_assoc && ps.len() > 1 && at.len() == ps.len() && next_to).then(|| (g_main[at[(at.len() - 1) / 2]], i))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let place = |rows: bool, split: bool| -> (Vec<Option<i32>>, Vec<bool>, Vec<i32>) {
         let (mut v, mut in_row, mut lefts) = (v.clone(), vec![false; nodes.len()], vec![0; nodes.len()]);
         let mut before: Option<(i32, i32)> = None;
@@ -243,7 +264,15 @@ pub(super) fn layered(model: &Model, rules: &Rules, axis: Axis, piece: Option<&P
             let (left, at) = chosen;
             v[i] = Some(at);
             lefts[i] = left;
-            before = Some((at, if in_row[i] { n - left + 1 } else { 2 }));
+            // The parts shared with the next main parts follow this one's own side parts, or
+            // take their step when it has none.
+            let own = g_side.iter().any(|&s| partners(model, s).as_slice() == [i]);
+            let mut steps = if in_row[i] { n - left + 1 } else if own { 2 } else { 1 };
+            for &(_, s) in between.iter().filter(|b| b.0 == i) {
+                v[s] = Some(at + steps * r);
+                steps += 1;
+            }
+            before = Some((at, steps.max(2)));
         }
         (v, in_row, lefts)
     };
@@ -279,8 +308,9 @@ pub(super) fn layered(model: &Model, rules: &Rules, axis: Axis, piece: Option<&P
         }
         _ => {}
     }
-    // Side parts with one partner sit one step across from it; ones with more, past everything
-    // else in the rank. Each such line of side parts runs along the main axis, in model order.
+    // Side parts with one partner sit one step across from it; ones with more, between two of
+    // them where placed so above, else past everything else in the rank. Each such line of side
+    // parts runs along the main axis, in model order.
     let mut side_rows: Vec<(i32, Vec<usize>)> = Vec::new();
     let put = |rows: &mut Vec<(i32, Vec<usize>)>, at: i32, i: usize| match rows.iter_mut().find(|(rv, _)| *rv == at) {
         Some(row) => row.1.push(i),
@@ -300,6 +330,7 @@ pub(super) fn layered(model: &Model, rules: &Rules, axis: Axis, piece: Option<&P
         }
         match partners(model, i).as_slice() {
             [one] if v[*one].is_some() => put(&mut side_rows, v[*one].expect("checked") + r, i),
+            _ if v[i].is_some() => side_rows.push((v[i].expect("checked"), vec![i])),
             _ => shared.push(i),
         }
     }
@@ -2191,8 +2222,8 @@ set:
 
     // Fails if, top to bottom with a VPC, four named parts attached to one CloudFront come out
     // with a line named in a note or a dotted line crossing an icon, a name, a label or another
-    // line, or a web ACL attached to two with a note or a dotted line crossing an icon, a name or
-    // a label; or if a single attached part leaves its place one step
+    // line, or a web ACL attached to two with a note or a dotted line crossing an icon, a name, a
+    // label or another line; or if a single attached part leaves its place one step
     // right of CloudFront in its row.
     #[test]
     fn more_attached_parts_and_a_shared_one_route_cleanly() {
@@ -2203,16 +2234,56 @@ set:
         assert_attachments_route_cleanly(&m, &p, four);
         let shared = format!("{TWO_FRONTS}  - waf -- cloudfront.a\n  - waf -- cloudfront.b\n  - acm.a -- cloudfront.a\n  - route53.a -- cloudfront.a\nset:\n  azs: 3\n");
         let (m, p) = arranged(&shared, Axis::Down);
-        assert!(at(&p, "waf").x > at(&p, "cloudfront.b").x && at(&p, "waf").y == at(&p, "cloudfront.b").y, "{shared}");
-        // The dotted line from the first distribution to the shared web ACL, past the second,
-        // crosses the line from the users into the second; that crossing is not checked here.
-        attachments_route(&m, &p, &shared, false);
+        let (a, waf, b) = (at(&p, "cloudfront.a"), at(&p, "waf"), at(&p, "cloudfront.b"));
+        assert!(a.x < waf.x && waf.x < b.x && waf.y == b.y, "{shared}");
+        assert_attachments_route_cleanly(&m, &p, &shared);
         for lang in ["en", "ja"] {
             let one = format!("flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - waf -- cloudfront\nset:\n  lang: {lang}\n");
             let (m, p) = arranged(&one, Axis::Down);
             let (cf, waf) = (at(&p, "cloudfront"), at(&p, "waf"));
             assert_eq!((waf.x, waf.y), (cf.x + p.row_step, cf.y), "{one}");
             assert_attachments_route_cleanly(&m, &p, &one);
+        }
+    }
+
+    // Fails if, top to bottom, a part attached to two distributions does not sit in their row
+    // between them, or if its dotted lines cross an icon, a name, a label or another line or a
+    // line is named in a note: the web ACL, the certificate or the hosted zone shared, with and
+    // without parts of their own on the distributions, with and without a VPC, two or three
+    // zones, in English and Japanese.
+    #[test]
+    fn a_part_shared_by_two_distributions_sits_between_them() {
+        let shapes = [
+            (TWO_FRONTS, &[2, 3][..]),
+            ("flows:\n  - user -> cloudfront.a -> s3.a\n  - user -> cloudfront.b -> s3.b\n", &[0][..]),
+            ("flows:\n  - user -> cloudfront.a -> s3.a\n  - user -> cloudfront.b -> apigateway(http) -> lambda -> dynamodb\n", &[0][..]),
+        ];
+        let own = ["", "  - acm.a -- cloudfront.a\n  - route53.a -- cloudfront.a\n", "  - route53.a -- cloudfront.a\n  - waf.b -- cloudfront.b\n"];
+        for (shape, zones) in shapes {
+            for shared in ["waf", "acm", "route53"] {
+                for extra in own.iter().filter(|o| !o.contains(&format!("  - {shared}."))) {
+                    for &azs in zones {
+                        for lang in ["en", "ja"] {
+                            let zones = if azs > 0 { format!("  azs: {azs}\n") } else { String::new() };
+                            let src = format!("{shape}  - {shared} -- cloudfront.a\n  - {shared} -- cloudfront.b\n{extra}set:\n{zones}  lang: {lang}\n");
+                            let (m, p) = arranged(&src, Axis::Down);
+                            let (a, s, b) = (at(&p, "cloudfront.a"), at(&p, shared), at(&p, "cloudfront.b"));
+                            assert!(a.x < s.x && s.x < b.x && s.y == a.y, "{src}");
+                            assert_attachments_route_cleanly(&m, &p, &src);
+                        }
+                    }
+                }
+            }
+        }
+        // Attached to three, it goes between the second and the third; its line to the first
+        // runs over the second and crosses the line from the users into it, as one line must
+        // wherever it goes, so crossings are not checked.
+        for azs in [2, 3] {
+            let src = format!("{TWO_FRONTS}  - user -> cloudfront.c -> s3.c\n  - waf -- cloudfront.a\n  - waf -- cloudfront.b\n  - waf -- cloudfront.c\n  - acm.a -- cloudfront.a\nset:\n  azs: {azs}\n");
+            let (m, p) = arranged(&src, Axis::Down);
+            let (b, s, c) = (at(&p, "cloudfront.b"), at(&p, "waf"), at(&p, "cloudfront.c"));
+            assert!(b.x < s.x && s.x < c.x && s.y == b.y, "{src}");
+            attachments_route(&m, &p, &src, false);
         }
     }
 
@@ -2467,7 +2538,8 @@ set:
         }
     }
 
-    // Fails if side parts stay below the main parts when lines run down.
+    // Fails if side parts stay below the main parts when lines run down. A global part attached
+    // to two distributions next to each other sits between them, right of the first.
     #[test]
     fn down_puts_side_parts_to_the_right() {
         for (src, m, p) in down_layouts().0 {
@@ -2476,7 +2548,10 @@ set:
             for (k, n) in m.nodes.iter().enumerate().filter(|(_, n)| !on_main(&m, &n.id)) {
                 let side = icon(&n.id);
                 let against: Vec<&Icon> = if n.area == Area::Cloud {
-                    partners(&m, k).into_iter().map(|j| icon(&m.nodes[j].id)).collect()
+                    let mut ps: Vec<&Icon> = partners(&m, k).into_iter().map(|j| icon(&m.nodes[j].id)).collect();
+                    ps.sort_by_key(|i| i.rect.x);
+                    ps.truncate(1);
+                    ps
                 } else {
                     icons.iter().filter(|i| i.parent == side.parent && on_main(&m, &i.id)).collect()
                 };
