@@ -85,6 +85,17 @@ archwire list > list.json
 
 How to write a definition and answer each hole is in [Writing a definition](docs/definition.md). The report's fields, the reasons stored in the diagram and the fields of `list` are in [Reading the report](docs/report.md).
 
+## Use from Claude Code
+
+[`skills/archwire`](skills/archwire/SKILL.md) is a skill for Claude Code. With it, you describe an architecture in your own words, and the agent writes the definition, compiles it and shows the diagram. Copy the folder into your skills folder:
+
+```sh
+git clone https://github.com/sagochiko/archwire.git
+cp -r archwire/skills/archwire ~/.claude/skills/
+```
+
+The skill tells the agent to read `archwire list` before writing, to ask you when a hole needs an answer, and to come back to you instead of dropping or replacing a part when archwire cannot draw what you asked for.
+
 ## Supported architectures
 
 - A Web architecture with an Application Load Balancer, ECS or EC2, and Aurora, in one VPC with two or three Availability Zones

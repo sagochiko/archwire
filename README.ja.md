@@ -85,6 +85,17 @@ archwire list > list.json
 
 定義の書き方と穴ごとの答え方は [Writing a definition](docs/definition.md) にある。レポートの項目、図に入る理由、`list` の出す項目は [Reading the report](docs/report.md) にある（どちらも英語）。
 
+## Claude Code から使う
+
+[`skills/archwire`](skills/archwire/SKILL.md) は Claude Code の skill。入れておくと、構成を言葉で伝えるだけで、エージェントが定義を書き、変換し、図を見せる。フォルダを skill の置き場にコピーする。
+
+```sh
+git clone https://github.com/sagochiko/archwire.git
+cp -r archwire/skills/archwire ~/.claude/skills/
+```
+
+skill はエージェントに3つのことを指示している。定義を書く前に `archwire list` を読む。穴に答えが要るときは利用者に聞く。頼まれた構成を archwire が描けないときは、部品を削ったり置き換えたりせずに利用者に返す。
+
 ## 描ける構成
 
 - Application Load Balancer、ECS か EC2、Aurora を使う Web 構成。VPC は1つで、Availability Zone は2つか3つ
