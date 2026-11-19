@@ -791,11 +791,15 @@ impl<'a> Ctx<'a> {
         // The way the line crosses the VPC's side at the gate. A moved outer part that runs back
         // against it somewhere wanders round the parts outside instead of going to its end.
         let (ep, np) = (port_point(self.layout.rect(&s.from), ports[me].0), port_point(self.layout.rect(&s.to), ports[me].1));
-        let across = if t.inner_is_start { dir_of(*t.inner.last().unwrap_or(&ep), t.gate) } else { dir_of(t.gate, *t.inner.first().unwrap_or(&np)) };
+        // Taken from the split at the gate, as the search takes it: where the gate is the inner
+        // end's own port, or an inner point repeats the gate, it is the way the line leaves or
+        // enters there.
+        let sp = split(t, ep, np, outward(ports[me].0.side), reverse(outward(ports[me].1.side)));
+        let across = if t.inner_is_start { sp.start.1 } else { sp.goal.1 };
         let runs_back = |p: &[Pt]| {
             let Some(at) = p.iter().position(|&q| q == t.gate) else { return true };
             let outer_part = if t.inner_is_start { &p[at..] } else { &p[..=at] };
-            across.is_some_and(|a| outer_part.windows(2).any(|w| dir_of(w[0], w[1]) == Some(reverse(a))))
+            outer_part.windows(2).any(|w| dir_of(w[0], w[1]) == Some(reverse(across)))
         };
         let mut tried: Vec<Side> = vec![planned];
         let mut best: Option<(i32, Vec<Pt>, (Port, Port))> = None;
