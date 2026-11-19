@@ -1,0 +1,44 @@
+{
+  "versions": {
+    "archwire": "0.1.0",
+    "rules": "2026.11.14"
+  },
+  "derived": [],
+  "holes": [],
+  "errors": [
+    {
+      "code": "UNSUPPORTED",
+      "at": "flows[1]",
+      "got": "aurora -> ecs",
+      "allowed": [],
+      "rule": null,
+      "message": "`aurora -> ecs` is not a supported connection"
+    },
+    {
+      "code": "UNSUPPORTED",
+      "at": "flows[2]",
+      "got": "aurora -> ec2",
+      "allowed": [],
+      "rule": null,
+      "message": "`aurora -> ec2` is not a supported connection"
+    },
+    {
+      "code": "UNSUPPORTED",
+      "at": "flows[3]",
+      "got": "aurora ~> s3",
+      "allowed": [],
+      "rule": null,
+      "message": "`aurora ~> s3` is not a supported connection"
+    },
+    {
+      "code": "UNSUPPORTED",
+      "at": "flows[4]",
+      "got": "aurora -> cloudwatch",
+      "allowed": [],
+      "rule": null,
+      "message": "`aurora -> cloudwatch` is not a supported connection"
+    }
+  ],
+  "warnings": [],
+  "notes": []
+}

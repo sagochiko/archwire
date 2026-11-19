@@ -1142,7 +1142,8 @@ mod tests {
     }
 
     // Fails if a loop of main flows that stays inside the subnets of the VPC, which is drawn, is
-    // stopped as a loop.
+    // stopped as a loop. No accepted pair closes such a loop, so the test rules accept the pairs
+    // from Aurora back.
     #[test]
     fn a_loop_inside_the_subnets_is_still_drawn() {
         for src in [
@@ -1151,7 +1152,7 @@ mod tests {
             "flows:\n  - user -> alb -> ecs.a -> aurora.a\n  - aurora.a -> ecs.a\n  - alb -> ecs.b\n",
         ] {
             for direction in ["down", "right"] {
-                let out = crate::compile(&format!("{src}set:\n  direction: {direction}\n"));
+                let out = crate::compile_with(&format!("{src}set:\n  direction: {direction}\n"), &crate::test_inputs::rules_with_test_links());
                 assert_eq!(out.diagnostics.exit_code(), 0, "{src} {direction}: {:?}", out.diagnostics.errors);
                 assert!(out.drawio.is_some(), "{src} {direction}");
             }
@@ -1255,16 +1256,15 @@ mod tests {
         let pairs = [
             ("alb", "ec2", m, "http", "flows:\n  - user -> alb -> ec2\n", "alb", "ec2-1a"),
             ("ec2", "aurora", m, "read_write", "flows:\n  - ec2 -> aurora\n", "ec2-1a", "aurora-1a"),
-            ("aurora", "ec2", m, "http", "flows:\n  - ec2 -> aurora\n  - aurora -> ec2\n", "aurora-1a", "ec2-1a"),
             ("ec2", "s3", m, "read_write", "flows:\n  - ec2 -> s3\nchoose:\n  route.ec2.s3: endpoint\n", "ec2-1c", "s3"),
             ("ec2", "dynamodb", m, "read_write", "flows:\n  - ec2 -> dynamodb\nchoose:\n  route.ec2.dynamodb: endpoint\n", "ec2-1c", "dynamodb"),
             ("ec2", "cloudwatch", m, "logs_metrics", "flows:\n  - ec2 -> cloudwatch\nchoose:\n  route.ec2.cloudwatch: endpoint\n", "ec2-1c", "cloudwatch"),
             ("ec2", "internet", m, "outbound", "flows:\n  - user -> alb -> ec2 -> internet\n", "ec2-1a", "nat-1a"),
-            ("ec2", "s3", a, "logs_metrics", "flows:\n  - user -> alb -> ec2\n  - ec2 ~> s3\n", "ec2-1c", "s3"),
+            ("ec2", "s3", a, "logs", "flows:\n  - user -> alb -> ec2\n  - ec2 ~> s3\n", "ec2-1c", "s3"),
             ("ec2", "cloudwatch", a, "logs_metrics", "flows:\n  - user -> alb -> ec2\n  - ec2 ~> cloudwatch\n", "ec2-1c", "cloudwatch"),
             ("ec2", "ssm", m, "https", "flows:\n  - ec2 -> ssm\nchoose:\n  route.ec2.ssm: endpoint\n", "ec2-1c", "ssm"),
         ];
-        assert_eq!(pairs.len(), 10);
+        assert_eq!(pairs.len(), 9);
         for (from, to, rel, key, flows, a_id, b_id) in pairs {
             assert_eq!(r.link(from, to, rel).map(|l| l.label.as_str()), Some(key), "{from} {rel:?} {to}");
             let (m, d) = run(flows);
@@ -2723,10 +2723,11 @@ mod tests {
         }
 
         #[test]
-        fn an_auxiliary_flow_is_labelled_logs_and_metrics_whatever_its_target() {
-            let m = run("flows:\n  - user -> cloudfront -> alb -> ecs\n  - alb ~> s3\n  - cloudfront ~> s3\n").0.unwrap();
-            assert_eq!(label(&m, "alb", "s3"), "logs_metrics");
-            assert_eq!(label(&m, "cloudfront", "s3"), "logs_metrics");
+        fn an_auxiliary_flow_to_s3_is_labelled_logs_and_one_to_cloudwatch_logs_and_metrics() {
+            let m = run("flows:\n  - user -> cloudfront -> alb -> ecs\n  - alb ~> s3\n  - cloudfront ~> s3\n  - ecs ~> cloudwatch\n").0.unwrap();
+            assert_eq!(label(&m, "alb", "s3"), "logs");
+            assert_eq!(label(&m, "cloudfront", "s3"), "logs");
+            assert_eq!(label(&m, "ecs-1a", "cloudwatch"), "logs_metrics");
         }
 
         #[test]
@@ -2814,13 +2815,18 @@ mod tests {
         #[test]
         fn links_outside_the_allowlist_stop_with_unsupported() {
             let base = "flows:\n  - user -> alb -> ecs -> aurora\n";
-            for line in ["cloudfront -> ecs", "user -> aurora", "user ~> cloudfront", "ecs -> user", "ecs -> cloudfront", "alb -> s3", "user -> dynamodb"] {
+            for line in [
+                "cloudfront -> ecs", "user -> aurora", "user ~> cloudfront", "ecs -> user", "ecs -> cloudfront", "alb -> s3", "user -> dynamodb",
+                "aurora -> ecs", "aurora -> ec2", "aurora ~> s3", "aurora -> cloudwatch",
+            ] {
                 let (m, d) = run(&format!("{base}  - {line}\n"));
                 assert!(m.is_none(), "{line}");
                 assert_eq!((d.errors[0].code.as_str(), d.errors[0].at.as_deref(), d.errors[0].got.as_deref()), ("UNSUPPORTED", Some("flows[1]"), Some(line)), "{line}");
                 assert_eq!(d.errors[0].message, format!("`{line}` is not a supported connection"), "{line}");
             }
-            assert!(run(&format!("{base}  - aurora -> ecs\n")).0.is_some());
+            for line in ["ecs -> aurora", "aurora -> s3", "aurora ~> cloudwatch"] {
+                assert!(run(&format!("{base}  - {line}\n")).0.is_some(), "{line}");
+            }
         }
 
         #[test]

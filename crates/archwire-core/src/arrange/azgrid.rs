@@ -1618,8 +1618,9 @@ pub(in crate::arrange) mod tests {
     use crate::test_inputs::{FEWER_READERS, WEB_CASES};
     use std::sync::OnceLock;
 
+    /// Inferred with the test rules, which accept `FEWER_READERS` and the loops inside the subnets.
     pub(in crate::arrange) fn grid(src: &str) -> (Model, Diagnostics) {
-        let (m, d) = crate::inference::infer(&crate::def::parse(src).unwrap(), &Rules::builtin());
+        let (m, d) = crate::inference::infer(&crate::def::parse(src).unwrap(), &crate::test_inputs::rules_with_test_links());
         (m.unwrap_or_else(|| panic!("{:?}\n{src}", d.errors)), d)
     }
 

@@ -120,6 +120,7 @@ fn case_list_is_what_the_plan_says() {
             "api-names-ja", "api-queue-ja", "api-rest-en", "api-stream-ja", "aux-to-side", "cloudfront-lines-ja", "detect-hub-ja", "detect-respond-en",
             "detect-trail-en", "direct-upload-en", "ec2-aurora-ja", "ec2-internet-en", "ec2-s3-endpoint-ja", "ec2-ssm-en", "edge-route53-en-right",
             "edge-waf-en", "endpoint-3az-en", "endpoint-3az-ja", "endpoint-ja", "endpoint-ja-right", "err-unknown-service", "err-unsupported",
+            "err-unsupported-aurora",
             "hole-apigateway", "hole-s3", "mix-beside-ja", "mix-logs-ja", "mix-min-en", "mix-nat-ja", "mix-queue-ja",
             "mix-vpc-ja", "mix-vpc-ja-right", "mix-web-ja", "mix-web-ja-right", "s3-event-en", "s3-fanout-en-right", "security-lake-en",
             "signin-api-ja",
@@ -132,7 +133,7 @@ fn case_list_is_what_the_plan_says() {
 
 #[test]
 fn error_cases_have_no_expected_diagram() {
-    for name in ["err-unknown-service", "err-unsupported"] {
+    for name in ["err-unknown-service", "err-unsupported", "err-unsupported-aurora"] {
         assert!(!cases_dir().join(name).join("expected.drawio").exists(), "{name}");
     }
 }

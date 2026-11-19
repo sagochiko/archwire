@@ -243,6 +243,7 @@ mod tests {
     // Fails if a VPC that no main line enters or leaves is not laid out: its parts start the flows
     // and send only to each other or out through a NAT gateway, with or without other flows
     // beside it in the Region, along either axis. The router must name no line it could not draw.
+    // `aurora -> ec2` is accepted by the test rules only.
     #[test]
     fn a_vpc_no_main_line_crosses_is_laid_out() {
         let defs = [
@@ -255,7 +256,7 @@ mod tests {
         for def in defs {
             for way in ["down", "right"] {
                 let src = with_setting(def, &format!("direction: {way}"));
-                let out = crate::compile(&src);
+                let out = crate::compile_with(&src, &crate::test_inputs::rules_with_test_links());
                 assert!(out.diagnostics.errors.is_empty(), "{src}{:?}", out.diagnostics.errors);
                 assert!(out.drawio.is_some(), "{src}");
                 assert_eq!(out.diagnostics.exit_code(), 0, "{src}");
@@ -533,13 +534,14 @@ mod tests {
         for (k, (src, model)) in picked.iter().enumerate() {
             for (axis, way) in [(Axis::Right, "right"), (Axis::Down, "down")] {
                 let name = format!("v{:02}-{way}", k + 1);
-                // A definition goes through compile, with its direction written; a model built
-                // by hand is laid out, routed and written the way compile does.
+                // A definition goes through compile, with its direction written and the test
+                // rules, which accept `FEWER_READERS`; a model built by hand is laid out, routed
+                // and written the way compile does.
                 let (drawn, yaml) = match src {
                     Ok(s) => {
                         let s = with_direction(s, way);
                         assert_eq!(grid(&s).0.direction, Some(axis), "{name}");
-                        let out = crate::compile(&s);
+                        let out = crate::compile_with(&s, &crate::test_inputs::rules_with_test_links());
                         let drawn = match out.drawio {
                             Some(x) if out.diagnostics.errors.is_empty() => Ok((x, out.diagnostics)),
                             _ => Err(out.diagnostics.errors),

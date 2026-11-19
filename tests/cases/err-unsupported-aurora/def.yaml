@@ -1,0 +1,6 @@
+flows:
+  - user -> alb -> ecs -> aurora
+  - aurora -> ecs
+  - aurora -> ec2
+  - aurora ~> s3
+  - aurora -> cloudwatch

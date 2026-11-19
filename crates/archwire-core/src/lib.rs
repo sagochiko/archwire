@@ -35,7 +35,11 @@ pub fn versions() -> Versions {
 
 /// parse, infer, arrange, route, write. Errors give no diagram; holes still do.
 pub fn compile(def_text: &str) -> Output {
-    let rules = Rules::builtin();
+    compile_with(def_text, &Rules::builtin())
+}
+
+/// `compile` with the given rules.
+pub(crate) fn compile_with(def_text: &str, rules: &Rules) -> Output {
     let stop = |errors| {
         let versions = Versions { archwire: env!("CARGO_PKG_VERSION").to_string(), rules: rules.version.clone() };
         Output { drawio: None, diagnostics: Diagnostics { versions, errors, ..Default::default() } }
@@ -45,13 +49,13 @@ pub fn compile(def_text: &str) -> Output {
         Err(errors) => return stop(errors),
     };
     // Every definition, with a VPC or without, goes through the one inference.
-    let (model, diagnostics) = inference::infer(&def, &rules);
+    let (model, diagnostics) = inference::infer(&def, rules);
     let Some(model) = model else {
         return Output { drawio: None, diagnostics };
     };
     let axis = model.direction.unwrap_or_else(|| arrange::default_axis(&model));
-    let placed = arrange::arrange(&model, &rules, axis);
-    flow_output(&model, placed, diagnostics, &rules)
+    let placed = arrange::arrange(&model, rules, axis);
+    flow_output(&model, placed, diagnostics, rules)
 }
 
 /// The rest of the layout once the parts are placed: a layout that failed its checks gives its
@@ -417,16 +421,23 @@ mod tests {
         }
     }
 
-    // Fails if a line from a zone without a Reader stops naming the zones it comes from, or the fallback note is missing or doubled.
+    // Fails if a line from a zone without a Reader stops naming the zones it comes from, or the
+    // fallback note is missing or doubled. The note needs `aurora -> ecs`, which only the test
+    // rules accept; the label is checked with the built-in rules too, without that line.
     #[test]
     fn fewer_readers_name_their_zones() {
-        let src = "flows:\n  - user -> alb -> ecs -> aurora\n  - aurora -> ecs\n  - aurora -> s3\nset:\n  azs: 3\n  readers: 1\nchoose:\n  route.aurora.s3: endpoint\n";
-        let out = compile(src);
-        assert_eq!(out.diagnostics.exit_code(), 0, "{:?}", out.diagnostics.errors);
-        let x = out.drawio.unwrap();
-        let to_s3: Vec<&str> = x.lines().filter(|l| l.contains("<mxCell") && l.contains("edge=\"1\"") && l.contains("target=\"s3\"")).collect();
-        assert_eq!(to_s3.len(), 1, "{to_s3:?}");
-        assert!(to_s3[0].contains("(from 1a, 1c)") && !to_s3[0].contains("(all AZs)"), "{}", to_s3[0]);
+        let src = crate::test_inputs::FEWER_READERS;
+        let accepted = src.replace("  - aurora -> ecs\n", "");
+        let to_s3_label = |out: &Output| {
+            assert_eq!(out.diagnostics.exit_code(), 0, "{:?}", out.diagnostics.errors);
+            let x = out.drawio.clone().unwrap();
+            let to_s3: Vec<String> = x.lines().filter(|l| l.contains("<mxCell") && l.contains("edge=\"1\"") && l.contains("target=\"s3\"")).map(String::from).collect();
+            assert_eq!(to_s3.len(), 1, "{to_s3:?}");
+            assert!(to_s3[0].contains("(from 1a, 1c)") && !to_s3[0].contains("(all AZs)"), "{}", to_s3[0]);
+        };
+        to_s3_label(&compile(&accepted));
+        let out = compile_with(src, &crate::test_inputs::rules_with_test_links());
+        to_s3_label(&out);
         let fallback = |n: &str| {
             let mut rest = n.strip_prefix("In ").unwrap_or("");
             for piece in [", ", " has no ", " in its own zone, so the line from ", " in another zone is drawn."] {
@@ -439,6 +450,8 @@ mod tests {
         };
         let notes = &out.diagnostics.notes;
         assert_eq!(notes.iter().filter(|n| fallback(n)).count(), 1, "{notes:?}");
+        let notes = compile(&accepted).diagnostics.notes;
+        assert_eq!(notes.iter().filter(|n| fallback(n)).count(), 0, "{notes:?}");
     }
 
     // Fails if writing a direction changes anything but the picture, or does not change the picture.

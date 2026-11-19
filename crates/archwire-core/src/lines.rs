@@ -270,8 +270,9 @@ mod tests {
         (m, l)
     }
 
+    /// Inferred with the test rules, which accept `FEWER_READERS`.
     fn gathered(src: &str) -> (Model, Vec<Line>, Vec<String>) {
-        let r = Rules::builtin();
+        let r = crate::test_inputs::rules_with_test_links();
         let (m, l) = model_and_layout(src, &r);
         let (lines, notes) = gather(&m, &l, &r);
         (m, lines, notes)

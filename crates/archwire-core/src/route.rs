@@ -722,9 +722,11 @@ pub(crate) mod tests {
     use crate::test_inputs::{CROWDED_SIDE_EN, CROWDED_S3_JA};
 
     /// The model, layout, wires and notes the drawing path gives a definition along `axis`.
+    /// Inferred with the test rules, so the loops inside the subnets and the lines from another
+    /// zone that only those rules accept are drawn too.
     fn planned(src: &str, axis: Axis) -> (Model, Layout, Vec<Wire>, Vec<String>) {
         let r = Rules::builtin();
-        let m = crate::inference::infer(&crate::def::parse(src).unwrap(), &r).0.unwrap();
+        let m = crate::inference::infer(&crate::def::parse(src).unwrap(), &crate::test_inputs::rules_with_test_links()).0.unwrap();
         let p = crate::arrange::arrange(&m, &r, axis).unwrap_or_else(|e| panic!("{axis:?}: {e:?}\n{src}"));
         let (w, n) = route_planned(&m, &p.layout, &r, &p.lines);
         (m, p.layout, w, n)
@@ -732,7 +734,7 @@ pub(crate) mod tests {
 
     /// Like `planned`, along the direction the definition writes, else the default one.
     fn compiled(src: &str) -> (Model, Layout, Vec<Wire>, Vec<String>) {
-        let r = Rules::builtin();
+        let r = crate::test_inputs::rules_with_test_links();
         let m = crate::inference::infer(&crate::def::parse(src).unwrap(), &r).0.unwrap();
         planned(src, m.direction.unwrap_or_else(|| crate::arrange::default_axis(&m)))
     }
@@ -1308,6 +1310,7 @@ pub(crate) mod tests {
     }
 
     /// Accepted definitions beyond the acceptance cases: other settings, every allowed link, reversed and extra flows.
+    /// `aurora -> ecs` is accepted by the test rules only.
     fn more_definitions() -> Vec<String> {
         let heavy = HEAVY;
         let single = "flows:\n  - user -> cloudfront -> alb -> ecs -> aurora\n  - ecs -> s3\n  - ecs ~> cloudwatch\n  - waf -- cloudfront\n  - acm -- cloudfront\n  - ecs -> internet\n";
@@ -1981,8 +1984,7 @@ pub(crate) mod tests {
     // Fails if a line whose target AZ has no copy of the sender is dropped instead of drawn from another AZ.
     #[test]
     fn three_zones_with_fewer_readers_keep_every_edge() {
-        let src = "flows:\n  - user -> alb -> ecs -> aurora\n  - aurora -> ecs\n  - aurora -> s3\nset:\n  azs: 3\n  readers: 1\nchoose:\n  route.aurora.s3: endpoint\n";
-        let (m, _, w, _) = compiled(src);
+        let (m, _, w, _) = compiled(crate::test_inputs::FEWER_READERS);
         let mut drawn: Vec<(String, String)> = w.iter().flat_map(|x| x.represents.clone()).collect();
         let mut want: Vec<(String, String)> = m.edges.iter().map(|e| (e.from.clone(), e.to.clone())).collect();
         drawn.sort();

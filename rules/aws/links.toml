@@ -160,12 +160,6 @@ to_role.writer = "read_write"
 to_role.reader = "read"
 
 [[link]]
-from = "aurora"
-to = "ecs"
-rel = "main"
-label = "http"
-
-[[link]]
 from = "ecs"
 to = "s3"
 rel = "main"
@@ -188,12 +182,6 @@ from = "aurora"
 to = "s3"
 rel = "main"
 label = "read_write"
-
-[[link]]
-from = "aurora"
-to = "cloudwatch"
-rel = "main"
-label = "logs_metrics"
 
 [[link]]
 from = "ecs"
@@ -220,12 +208,6 @@ rel = "main"
 label = "read_write"
 to_role.writer = "read_write"
 to_role.reader = "read"
-
-[[link]]
-from = "aurora"
-to = "ec2"
-rel = "main"
-label = "http"
 
 [[link]]
 from = "ec2"
@@ -261,7 +243,7 @@ label = "https"
 from = "cloudfront"
 to = "s3"
 rel = "aux"
-label = "logs_metrics"
+label = "logs"
 
 [[link]]
 from = "cloudfront"
@@ -273,7 +255,7 @@ label = "logs_metrics"
 from = "alb"
 to = "s3"
 rel = "aux"
-label = "logs_metrics"
+label = "logs"
 
 [[link]]
 from = "alb"
@@ -285,7 +267,7 @@ label = "logs_metrics"
 from = "ecs"
 to = "s3"
 rel = "aux"
-label = "logs_metrics"
+label = "logs"
 
 [[link]]
 from = "ecs"
@@ -297,17 +279,11 @@ label = "logs_metrics"
 from = "ec2"
 to = "s3"
 rel = "aux"
-label = "logs_metrics"
+label = "logs"
 
 [[link]]
 from = "ec2"
 to = "cloudwatch"
-rel = "aux"
-label = "logs_metrics"
-
-[[link]]
-from = "aurora"
-to = "s3"
 rel = "aux"
 label = "logs_metrics"
 

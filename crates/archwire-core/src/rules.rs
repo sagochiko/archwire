@@ -919,37 +919,38 @@ mod tests {
             ("cloudfront", "alb", m, "https"),
             ("alb", "ecs", m, "http"),
             ("ecs", "aurora", m, "read_write"),
-            ("aurora", "ecs", m, "http"),
             ("ecs", "s3", m, "read_write"),
             ("ecs", "cloudwatch", m, "logs_metrics"),
             ("aurora", "s3", m, "read_write"),
-            ("aurora", "cloudwatch", m, "logs_metrics"),
             ("ecs", "internet", m, "outbound"),
             ("aurora", "internet", m, "outbound"),
-            ("cloudfront", "s3", a, "logs_metrics"),
+            ("cloudfront", "s3", a, "logs"),
             ("cloudfront", "cloudwatch", a, "logs_metrics"),
-            ("alb", "s3", a, "logs_metrics"),
+            ("alb", "s3", a, "logs"),
             ("alb", "cloudwatch", a, "logs_metrics"),
-            ("ecs", "s3", a, "logs_metrics"),
+            ("ecs", "s3", a, "logs"),
             ("ecs", "cloudwatch", a, "logs_metrics"),
-            ("aurora", "s3", a, "logs_metrics"),
             ("aurora", "cloudwatch", a, "logs_metrics"),
             ("alb", "ec2", m, "http"),
             ("ec2", "aurora", m, "read_write"),
-            ("aurora", "ec2", m, "http"),
             ("ec2", "s3", m, "read_write"),
             ("ec2", "dynamodb", m, "read_write"),
             ("ec2", "cloudwatch", m, "logs_metrics"),
             ("ec2", "internet", m, "outbound"),
             ("ec2", "ssm", m, "https"),
-            ("ec2", "s3", a, "logs_metrics"),
+            ("ec2", "s3", a, "logs"),
             ("ec2", "cloudwatch", a, "logs_metrics"),
         ];
-        assert_eq!(want.len(), 29);
+        assert_eq!(want.len(), 25);
         for (from, to, rel, label) in want {
             let listed = r.links.iter().filter(|l| l.from == from && l.to == to && l.rel == rel).count();
             assert_eq!(listed, 1, "{from} {rel:?} {to}");
             assert_eq!(r.link(from, to, rel).unwrap_or_else(|| panic!("{from} {rel:?} {to}")).label, label, "{from} {rel:?} {to}");
+        }
+        // Aurora starts no traffic to an application, writes no logs or metrics of its own to S3,
+        // and its metrics reach CloudWatch as an auxiliary flow only.
+        for (to, rel) in [("ecs", m), ("ec2", m), ("s3", a), ("cloudwatch", m)] {
+            assert!(r.link("aurora", to, rel).is_none(), "aurora {rel:?} {to}");
         }
         for from in ["ecs", "ec2"] {
             let roles = &r.link(from, "aurora", Rel::Main).unwrap().to_role;

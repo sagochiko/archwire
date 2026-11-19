@@ -20,8 +20,25 @@ pub(crate) const WEB_CASES: [(&str, &str); 10] = [
     ("web-attach-en", include_str!("../../../tests/cases/web-attach-en/def.yaml")),
 ];
 
+/// Pairs that `links.toml` does not accept, added for tests only: main flows from Aurora back
+/// into ECS and EC2. No accepted pair sends from a part with copies in fewer zones (Aurora with
+/// fewer Readers) to a part with a copy in every zone, or closes a loop inside the subnets of the
+/// VPC, so these keep the drawing of both shapes under test.
+const TEST_ONLY_LINKS: &str = "\n[[link]]\nfrom = \"aurora\"\nto = \"ecs\"\nrel = \"main\"\nlabel = \"http\"\n\n[[link]]\nfrom = \"aurora\"\nto = \"ec2\"\nrel = \"main\"\nlabel = \"http\"\n";
+
+/// The built-in rules with `TEST_ONLY_LINKS` added.
+pub(crate) fn rules_with_test_links() -> crate::rules::Rules {
+    crate::rules::Rules::load(
+        include_str!("../../../rules/aws/services.toml"),
+        include_str!("../../../rules/aws/rules.toml"),
+        include_str!("../../../rules/aws/labels.toml"),
+        &format!("{}{TEST_ONLY_LINKS}", include_str!("../../../rules/aws/links.toml")),
+    )
+    .unwrap_or_else(|e| panic!("{e:?}"))
+}
+
 /// Three zones and one Reader: Aurora has copies in the first two zones only, and lines run
-/// back up from Aurora to ECS.
+/// back up from Aurora to ECS. `aurora -> ecs` is accepted by `rules_with_test_links` only.
 pub(crate) const FEWER_READERS: &str = "flows:\n  - user -> alb -> ecs -> aurora\n  - aurora -> ecs\n  - aurora -> s3\nset:\n  azs: 3\n  readers: 1\nchoose:\n  route.aurora.s3: endpoint\n";
 
 /// Every web definition with a VPC the generator makes, in order: two or three zones, one NAT
@@ -280,6 +297,17 @@ mod tests {
         assert_eq!(API_CASES.len(), 7);
         assert_eq!(generated().len(), GENERATED_COUNT);
         assert_eq!(ONE_FUNCTION_THREE_WAYS.len(), 3);
+    }
+
+    // Fails if a pair added for tests only is accepted by the built-in rules, or not by the test rules.
+    #[test]
+    fn the_test_only_pairs_are_accepted_by_the_test_rules_alone() {
+        use crate::def::Rel;
+        let (builtin, test) = (crate::rules::Rules::builtin(), rules_with_test_links());
+        for to in ["ecs", "ec2"] {
+            assert!(builtin.link("aurora", to, Rel::Main).is_none(), "aurora -> {to}");
+            assert_eq!(test.link("aurora", to, Rel::Main).map(|l| l.label.as_str()), Some("http"), "aurora -> {to}");
+        }
     }
 
     // Fails if a definition no longer parses or is listed twice in one list.

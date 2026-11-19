@@ -202,7 +202,8 @@ fn draw_stages(src: &str, axis: Axis) -> (Drawn, Vec<String>) {
         Ok(d) => d,
         Err(e) => return stop(Drawn::Errors(e)),
     };
-    let (model, mut diag) = match guarded("infer", || crate::inference::infer(&def, &r)) {
+    // The test rules accept `fewer-readers-mix`; the generated definitions use none of their extra pairs.
+    let (model, mut diag) = match guarded("infer", || crate::inference::infer(&def, &crate::test_inputs::rules_with_test_links())) {
         Ok(x) => x,
         Err(p) => return stop(Drawn::Panicked(p)),
     };
@@ -474,7 +475,7 @@ fn the_mixed_generator_keeps_its_count() {
     }
     let reps = mixed_representatives();
     assert_eq!(reps.len(), REPRESENTATIVES);
-    let r = Rules::builtin();
+    let r = crate::test_inputs::rules_with_test_links();
     for (i, (n, s)) in reps.iter().enumerate() {
         assert!(!reps[..i].iter().any(|(m, t)| m == n || t == s), "{n} twice");
         assert!(!defs.contains(s), "{n} is also generated");
@@ -574,7 +575,7 @@ fn mixed_diagrams_for_the_checker() {
     }
     picked.extend(generated.into_iter().cloned());
     assert_eq!(picked.len(), MIXED_FOR_THE_CHECKER);
-    let r = Rules::builtin();
+    let r = crate::test_inputs::rules_with_test_links();
     for src in &picked {
         let (m, d): (Option<Model>, Diagnostics) = crate::inference::infer(&crate::def::parse(src).unwrap(), &r);
         assert!(m.is_some() && d.errors.is_empty(), "{:?}\n{src}", d.errors);
@@ -886,10 +887,11 @@ fn lines_sharing_no_end_never_turn_at_one_point() {
 // stops a definition that is drawn: a fixed case, a
 // generated definition with a VPC, mixed with one or without one. Each set is counted, so a set
 // that shrinks by accident fails too. Loops inside the subnets of the VPC, such as `ec2 -> aurora`
-// with `aurora -> ec2`, are among them.
+// with `aurora -> ec2`, are among them; no accepted pair closes one, so they are read with the
+// test rules, and the built-in rules stop them as connections not in the list.
 #[test]
 fn the_loop_check_stops_no_drawn_definition() {
-    let r = Rules::builtin();
+    let r = crate::test_inputs::rules_with_test_links();
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/cases");
     let mut cases: Vec<String> = Vec::new();
     let mut dirs: Vec<_> = std::fs::read_dir(&root).unwrap().map(|e| e.unwrap().path()).collect();
@@ -935,4 +937,11 @@ fn the_loop_check_stops_no_drawn_definition() {
     let (name, fixed, looped) = counts.remove(0);
     assert!(name == "fixed cases" && fixed > 0 && looped == 0, "{name}: {fixed} definitions, {looped} with a loop inside the subnets");
     assert_eq!(counts, [("with a VPC", 1008, 0), ("mixed", 865, 1), ("without a VPC", 1212, 0), ("loops inside the subnets", 4, 4)]);
+    let builtin = Rules::builtin();
+    for src in &sets[4].1 {
+        let def = crate::def::parse(src).unwrap();
+        assert!(!crate::inference::main_flow_loop_inside_subnets(&def, &builtin), "{src}");
+        let (m, d) = crate::inference::infer(&def, &builtin);
+        assert!(m.is_none() && d.errors.iter().all(|e| e.code == "UNSUPPORTED" && e.message.ends_with("is not a supported connection")), "{src}{:?}", d.errors);
+    }
 }
