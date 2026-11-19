@@ -1,0 +1,9 @@
+flows:
+  - user -> cloudfront.a -> alb.web -> ecs.web -> aurora
+  - user -> cloudfront.b -> alb.admin -> ecs.admin
+  - waf -- cloudfront.a
+  - waf -- cloudfront.b
+  - acm.a -- cloudfront.a
+  - route53.a -- cloudfront.a
+set:
+  azs: 3

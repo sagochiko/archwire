@@ -125,7 +125,7 @@ fn case_list_is_what_the_plan_says() {
             "signin-api-ja",
             "trail-athena-ja", "user-lines-api-ja", "user-lines-ja", "user-lines-web-ja", "web-2az-en", "web-2az-ja", "web-2az-ja-right",
             "web-3az-en", "web-3az-en-right", "web-3az-ja", "web-alb-attach-en", "web-attach-en", "web-detect-ja", "web-ec2-ja",
-            "web-kms-en", "web-named-ja", "web-queue-ja", "web-route53-ja", "web-two-albs-ja",
+            "web-kms-en", "web-named-ja", "web-queue-ja", "web-route53-ja", "web-shared-waf-en", "web-two-albs-ja",
         ]
     );
 }
