@@ -224,10 +224,15 @@ pub fn route_planned(model: &Model, layout: &Layout, rules: &Rules, plans: &[Lin
 const DETOUR: i32 = 200;
 
 /// Lays line `i`: its path, its new ports when it moved to free sides, and whether it is clear.
-/// A kept draft is never moved to other sides: it is drawn as planned and named.
+/// A line kept whole is never moved to other sides: it is drawn as planned and named. A line kept
+/// inside may move only its outer end, to a free side of the part outside.
 fn lay_one(ctx: &Ctx, specs: &[Line], i: usize, d: &Draft, ports: &[(Port, Port)], placed: &[Vec<Pt>]) -> (Vec<Pt>, Option<(Port, Port)>, bool) {
     match ctx.lay(&specs[i], d, ports[i], placed) {
         Ok(p) => (p, None, true),
+        Err(best) if matches!(d.keep, Keep::Inner(_)) => match ctx.outer_on_free_sides(specs, i, d, ports, placed) {
+            Some((p, moved)) => (p, Some(moved), true),
+            None => (best, None, false),
+        },
         Err(best) if d.keep != Keep::Free => (best, None, false),
         Err(best) => match ctx.on_free_sides(specs, i, ports, placed) {
             Some((p, moved)) => (p, Some(moved), true),
@@ -1284,6 +1289,21 @@ pub(crate) mod tests {
                 let src = format!("flows:\n  - user -> alb.a\n  - user -> alb.b\n  - alb.a ~> cloudwatch\nset:\n  azs: {azs}\n");
                 let (_, named) = faults(&src, axis);
                 assert_eq!(named, ["The line edge-alb.a-to-cloudwatch could not avoid every icon, label and other line; check it in the diagram."], "{axis:?} {azs}");
+            }
+        }
+    }
+
+    // Fails if, with four functions behind one API and two named log groups, a line from the zone
+    // copies of the functions in the VPC to a log group, where the group shares its row with
+    // another function, crosses that function or another line or text, or comes out named, in
+    // either direction and either language.
+    #[test]
+    fn a_side_line_out_of_the_vpc_into_a_crowded_row_goes_round_the_part_in_it() {
+        for lang in ["en", "ja"] {
+            let src = format!("{}set:\n  lang: {lang}\n", crate::test_inputs::PARTIAL_SENDERS);
+            for axis in AXES {
+                let v = violations(&src, axis);
+                assert!(v.is_empty(), "{lang} {axis:?}: {v:?}");
             }
         }
     }
@@ -2467,17 +2487,45 @@ pub(crate) mod tests {
         assert!(notes.is_empty(), "{notes:?}");
     }
 
-    // Fails if the outer part of a line kept inside, which no search can draw, moves its outer end to another side or goes without a note.
+    /// An icon with no name at (x, y), the size of every icon here.
+    fn blocker(id: &str, x: i32, y: i32) -> Icon {
+        Icon { id: id.to_string(), label: String::new(), lines: 1, rect: Rect { x, y, w: 60, h: 60 }, parent: Some("region".to_string()) }
+    }
+
+    // Fails if the outer part of a line kept inside, which cannot leave or reach the side its
+    // draft plans at the part outside, does not move that end to a free side and come out clear
+    // of the icon, with the inner end, the gate and the inner points kept, in either direction.
+    #[test]
+    fn the_outer_part_blocked_on_its_planned_side_moves_its_outer_end_to_a_free_side() {
+        // Entering: x touches a's right side, where the outer part starts.
+        let (m, mut l, plans) = crossing();
+        l.icons.push(blocker("x", 60, 100));
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        let ab = wire(&w, "a", "b");
+        assert!(ab.exit.side != Side::Right && (ab.entry.side, ab.entry.pos) == (Side::Left, 50), "{ab:?}");
+        assert_kept_inner_round(ab, &l, &[(200, 130), (300, 130), (400, 130)]);
+        assert!(notes.is_empty(), "{notes:?}");
+        // Leaving: x touches b's left side, where the outer part ends.
+        let (m, l, plans) = leaving(&[("x", 390, 100, "")]);
+        let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &plans);
+        let ab = wire(&w, "a", "b");
+        assert!((ab.exit.side, ab.exit.pos) == (Side::Right, 50) && ab.entry.side != Side::Left, "{ab:?}");
+        assert_kept_inner_round(ab, &l, &[(60, 130), (150, 130), (250, 130)]);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    // Fails if the outer part of a line kept inside, which no search can draw on any side of the
+    // part outside, is not drawn as planned or goes without a note, in either direction.
     #[test]
     fn the_outer_part_no_search_can_draw_is_kept_as_planned_and_named() {
-        // Entering: w touches a's right side, where the outer part starts.
+        // Entering: icons touch every side of a, where the outer part starts.
         let (m, mut l, plans) = crossing();
-        l.icons.push(Icon { id: "w".to_string(), label: String::new(), lines: 1, rect: Rect { x: 60, y: 100, w: 60, h: 60 }, parent: Some("region".to_string()) });
+        l.icons.extend([blocker("w1", 60, 100), blocker("w2", -60, 100), blocker("w3", 0, 40), blocker("w4", 0, 160)]);
         let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &plans);
         assert_eq!(drawn(wire(&w, "a", "b"), &l), [(60, 130), (200, 130), (300, 130), (400, 130)]);
         assert!(notes.contains(&unrouted("edge-a-to-b")), "{notes:?}");
-        // Leaving: w touches b's left side, where the outer part ends.
-        let (m, l, plans) = leaving(&[("w", 390, 100, "")]);
+        // Leaving: icons touch every side of b, where the outer part ends.
+        let (m, l, plans) = leaving(&[("w1", 390, 100, ""), ("w2", 510, 100, ""), ("w3", 450, 40, ""), ("w4", 450, 160, "")]);
         let (w, notes) = route_planned(&m, &l, &Rules::builtin(), &plans);
         assert_eq!(drawn(wire(&w, "a", "b"), &l), [(60, 130), (150, 130), (250, 130), (450, 130)]);
         assert!(notes.contains(&unrouted("edge-a-to-b")), "{notes:?}");

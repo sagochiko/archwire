@@ -284,6 +284,9 @@ pub(crate) const MIX_NAT: &str = "flows:\n  - user -> apigateway(http) -> lambda
 pub(crate) const MIX_WEB: &str = "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> dynamodb\n  - user -> apigateway(http) -> lambda.api -> aurora\n  - user -> apigateway -> lambda.report -> dynamodb\n  - ecs ~> cloudwatch\n  - lambda.api ~> cloudwatch\nset:\n  lang: ja\n";
 /// Two functions behind one API, one reaching a database in a VPC, both sending logs.
 pub(crate) const MIX_LOGS: &str = "flows:\n  - user -> apigateway(http) -> lambda.api -> aurora\n  - apigateway -> lambda.report -> dynamodb\n  - lambda.api ~> cloudwatch\n  - lambda.report ~> cloudwatch\n";
+/// Four functions behind one API, two of them reaching a database in a VPC, sending logs to two
+/// named log groups: drawn down the page, a log group shares its row with a function.
+pub(crate) const PARTIAL_SENDERS: &str = "flows:\n  - user -> apigateway(http) -> lambda.resize-images-fast -> dynamodb.images\n  - apigateway -> lambda.thumbnails-generator -> dynamodb.images\n  - apigateway -> lambda.metadata-extractor -> dynamodb.meta\n  - apigateway -> lambda.notification-sender -> dynamodb.meta\n  - lambda.resize-images-fast ~> cloudwatch.app\n  - lambda.thumbnails-generator ~> cloudwatch.app\n  - lambda.metadata-extractor ~> cloudwatch.app\n  - lambda.metadata-extractor ~> cloudwatch.audit\n  - lambda.notification-sender ~> cloudwatch.audit\n  - lambda.resize-images-fast -> aurora\n  - lambda.metadata-extractor -> aurora\n";
 
 #[cfg(test)]
 mod tests {
@@ -322,7 +325,7 @@ mod tests {
             ("generated", generated()),
             ("named and small shapes", vec![ID_CLASH.to_string(), TWO_WEBS.to_string(), TWIN_APPS.to_string(), LOAD_BALANCER_ALONE.to_string()]),
             ("ONE_FUNCTION_THREE_WAYS", ONE_FUNCTION_THREE_WAYS.iter().map(|s| s.to_string()).collect()),
-            ("MIX", vec![MIX_SMALLEST.to_string(), MIX_NAT.to_string(), MIX_WEB.to_string(), MIX_LOGS.to_string()]),
+            ("MIX", vec![MIX_SMALLEST.to_string(), MIX_NAT.to_string(), MIX_WEB.to_string(), MIX_LOGS.to_string(), PARTIAL_SENDERS.to_string()]),
         ];
         for (name, list) in &lists {
             for (i, src) in list.iter().enumerate() {

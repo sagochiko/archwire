@@ -10,7 +10,7 @@ use crate::lines::Line;
 use crate::model::{Area, Axis, Model};
 use crate::route::{port_point, LinePlan, Wire};
 use crate::rules::Rules;
-use crate::test_inputs::{ID_CLASH, MIX_LOGS, MIX_NAT, MIX_SMALLEST, MIX_WEB, ONE_FUNCTION_THREE_WAYS, TWIN_APPS};
+use crate::test_inputs::{ID_CLASH, MIX_LOGS, MIX_NAT, MIX_SMALLEST, MIX_WEB, ONE_FUNCTION_THREE_WAYS, PARTIAL_SENDERS, TWIN_APPS};
 
 /// How many definitions `generated_mixed` makes.
 pub(in crate::arrange) const MIXED_DEFINITIONS: usize = 840;
@@ -19,10 +19,7 @@ pub(in crate::arrange) const MIXED_DEFINITIONS: usize = 840;
 const REPRESENTATIVES: usize = 25;
 
 /// The named inputs drawn for the diagram checker, by name, in this order: the first twenty
-/// named ones but `partial-senders`, with `both-to-the-internet` in its place, a web stack and a
-/// function sending traffic out through the same NAT gateways.
-/// Left out: `partial-senders`, whose top-to-bottom drawing has a line over an icon that the
-/// router does not avoid; the run over every mixed definition counts it.
+/// named ones.
 const REPRESENTATIVES_FOR_THE_CHECKER: [&str; 20] = [
     "web-and-api",
     "mix-web",
@@ -33,7 +30,7 @@ const REPRESENTATIVES_FOR_THE_CHECKER: [&str; 20] = [
     "mix-web-attach",
     "mix-web-aux",
     "four-functions",
-    "both-to-the-internet",
+    "partial-senders",
     "aux-order",
     "fewer-readers-mix",
     "mix-logs",
@@ -121,7 +118,6 @@ const TWIN_APPS_3AZ: &str = "flows:\n  - user -> cloudfront -> alb -> ecs.web ->
 const MIX_WEB_ATTACH: &str = "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> dynamodb\n  - user -> apigateway(http) -> lambda.api -> aurora\n  - user -> apigateway -> lambda.report -> dynamodb\n  - ecs ~> cloudwatch\n  - lambda.api ~> cloudwatch\n  - waf -- cloudfront\n  - acm -- cloudfront\nset:\n  lang: ja\n";
 const MIX_WEB_AUX: &str = "flows:\n  - user -> cloudfront -> alb -> ecs(fargate) -> aurora\n  - cloudfront -> s3\n  - ecs -> dynamodb\n  - user -> apigateway(http) -> lambda.api -> aurora\n  - user -> apigateway -> lambda.report -> dynamodb\n  - ecs ~> cloudwatch\n  - lambda.api ~> cloudwatch\n  - alb ~> cloudwatch\n  - aurora ~> cloudwatch\nset:\n  lang: ja\n";
 const FOUR_FUNCTIONS: &str = "flows:\n  - user -> apigateway(http) -> lambda.a -> aurora\n  - apigateway -> lambda.b -> aurora\n  - apigateway -> lambda.c -> dynamodb\n  - apigateway -> lambda.d -> dynamodb\n  - lambda.a ~> cloudwatch\n  - lambda.c ~> cloudwatch\n";
-const PARTIAL_SENDERS: &str = "flows:\n  - user -> apigateway(http) -> lambda.resize-images-fast -> dynamodb.images\n  - apigateway -> lambda.thumbnails-generator -> dynamodb.images\n  - apigateway -> lambda.metadata-extractor -> dynamodb.meta\n  - apigateway -> lambda.notification-sender -> dynamodb.meta\n  - lambda.resize-images-fast ~> cloudwatch.app\n  - lambda.thumbnails-generator ~> cloudwatch.app\n  - lambda.metadata-extractor ~> cloudwatch.app\n  - lambda.metadata-extractor ~> cloudwatch.audit\n  - lambda.notification-sender ~> cloudwatch.audit\n  - lambda.resize-images-fast -> aurora\n  - lambda.metadata-extractor -> aurora\n";
 const AUX_ORDER: &str = "flows:\n  - user -> apigateway(http) -> lambda.api -> aurora\n  - apigateway -> lambda.report -> dynamodb\n  - lambda.report ~> cloudwatch\n  - lambda.api ~> cloudwatch\n";
 const FEWER_READERS_MIX: &str = "flows:\n  - user -> alb -> ecs -> aurora\n  - aurora -> ecs\n  - aurora -> s3\n  - user -> apigateway(http) -> lambda -> aurora\nset:\n  azs: 3\n  readers: 1\nchoose:\n  route.aurora.s3: endpoint\n";
 const TWO_ATTACHED_TO_ONE_LOG: &str = "flows:\n  - user -> apigateway(http) -> lambda.a -> aurora\n  - apigateway -> lambda.b -> aurora\n  - lambda.a ~> cloudwatch\n  - lambda.b ~> cloudwatch\n";
@@ -546,8 +542,8 @@ const MIXED_FOR_THE_CHECKER: usize = 40;
 /// Ten are in English and ten in Japanese.
 const GENERATED_FOR_THE_CHECKER: [usize; 20] = [14, 6, 227, 1, 48, 99, 148, 197, 246, 297, 344, 395, 444, 495, 542, 593, 642, 691, 740, 791];
 
-// Fails if an input handed to the checker gives no model, a named one picked is missing, picked
-// twice or is `partial-senders`, the generated ones picked change or lose their mix of
+// Fails if an input handed to the checker gives no model, the named ones picked are not the
+// first twenty named ones in order, the generated ones picked change or lose their mix of
 // languages, or fewer definitions or diagrams are written than picked.
 /// With `ARCHWIRE_GEN_OUT=<dir>`, removes the `m<number>-<axis>` files a run left there, then
 /// writes each picked input drawn along both axes as `<dir>/m<number>-<axis>.yaml` (the
@@ -557,10 +553,7 @@ const GENERATED_FOR_THE_CHECKER: [usize; 20] = [14, 6, 227, 1, 48, 99, 148, 197,
 #[test]
 fn mixed_diagrams_for_the_checker() {
     let named = mixed_representatives();
-    assert!(!REPRESENTATIVES_FOR_THE_CHECKER.contains(&"partial-senders"));
-    for (i, n) in REPRESENTATIVES_FOR_THE_CHECKER.iter().enumerate() {
-        assert!(!REPRESENTATIVES_FOR_THE_CHECKER[..i].contains(n), "{n} twice");
-    }
+    assert!(named.iter().map(|(n, _)| *n).take(REPRESENTATIVES_FOR_THE_CHECKER.len()).eq(REPRESENTATIVES_FOR_THE_CHECKER));
     let mut picked: Vec<String> = REPRESENTATIVES_FOR_THE_CHECKER
         .iter()
         .map(|n| named.iter().find(|(m, _)| m == n).unwrap_or_else(|| panic!("no named input {n}")).1.clone())

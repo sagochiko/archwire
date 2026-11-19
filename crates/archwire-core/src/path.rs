@@ -769,6 +769,55 @@ impl<'a> Ctx<'a> {
         })
     }
 
+    /// For a line kept inside whose outer part cannot reach the side its draft plans at the outer
+    /// end: the outer part searched from the gate into the middle of each side of the outer end no
+    /// other line uses, and the shortest line kept, the side nearest the straight line first at a
+    /// tie. An outer part that runs anywhere back the way the line crossed the gate is not kept.
+    /// The inner part, the gate and the inner end stay as planned. Returns the path and the new
+    /// ports.
+    pub(crate) fn outer_on_free_sides(&self, specs: &[Line], me: usize, d: &Draft, ports: &[(Port, Port)], placed: &[Vec<Pt>]) -> Option<(Vec<Pt>, (Port, Port))> {
+        let Keep::Inner(t) = &d.keep else { return None };
+        let s = &specs[me];
+        let outer = if t.inner_is_start { s.to.as_str() } else { s.from.as_str() };
+        let planned = if t.inner_is_start { ports[me].1.side } else { ports[me].0.side };
+        let taken = |side: Side| {
+            specs.iter().zip(ports).enumerate().any(|(j, (o, (e, n)))| j != me && ((o.from == outer && e.side == side) || (o.to == outer && n.side == side)))
+        };
+        let gate = Rect { x: t.gate.0, y: t.gate.1, w: 0, h: 0 };
+        let or = self.layout.rect(outer);
+        let (fr, tr) = if t.inner_is_start { (gate, or) } else { (or, gate) };
+        let mut sides: Vec<Side> = self.candidates(fr, tr).iter().map(|c| if t.inner_is_start { c.entry } else { c.exit }).collect();
+        sides.extend(ALL_SIDES);
+        // The way the line crosses the VPC's side at the gate. A moved outer part that runs back
+        // against it somewhere wanders round the parts outside instead of going to its end.
+        let (ep, np) = (port_point(self.layout.rect(&s.from), ports[me].0), port_point(self.layout.rect(&s.to), ports[me].1));
+        let across = if t.inner_is_start { dir_of(*t.inner.last().unwrap_or(&ep), t.gate) } else { dir_of(t.gate, *t.inner.first().unwrap_or(&np)) };
+        let runs_back = |p: &[Pt]| {
+            let Some(at) = p.iter().position(|&q| q == t.gate) else { return true };
+            let outer_part = if t.inner_is_start { &p[at..] } else { &p[..=at] };
+            across.is_some_and(|a| outer_part.windows(2).any(|w| dir_of(w[0], w[1]) == Some(reverse(a))))
+        };
+        let mut tried: Vec<Side> = vec![planned];
+        let mut best: Option<(i32, Vec<Pt>, (Port, Port))> = None;
+        for side in sides {
+            if tried.contains(&side) || taken(side) {
+                continue;
+            }
+            tried.push(side);
+            let moved = if t.inner_is_start { (ports[me].0, self.port(&s.to, side, 50)) } else { (self.port(&s.from, side, 50), ports[me].1) };
+            let mut d = d.clone();
+            d.shape = Shape::Search;
+            (d.exit, d.entry) = (moved.0.side, moved.1.side);
+            if let Some(p) = self.lay(s, &d, moved, placed).ok().filter(|p| !runs_back(p)) {
+                let length = p.windows(2).map(|w| (w[1].0 - w[0].0).abs() + (w[1].1 - w[0].1).abs()).sum();
+                if best.as_ref().map_or(true, |b| length < b.0) {
+                    best = Some((length, p, moved));
+                }
+            }
+        }
+        best.map(|(_, p, moved)| (p, moved))
+    }
+
     /// Whether a draft can be drawn past the icons, labels and frame names, with its ports in the
     /// middle of their sides or where the draft fixes or pins them.
     pub(crate) fn fits(&self, s: &Line, d: &Draft) -> bool {
