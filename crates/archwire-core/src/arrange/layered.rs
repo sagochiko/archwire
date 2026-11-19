@@ -2115,10 +2115,11 @@ set:
     /// association out of the global rank that crosses an icon, a name or a label or runs along
     /// another line, or, with `crossings`, crosses another line.
     fn assert_attachments_route_cleanly(m: &Model, p: &Placement, src: &str) {
-        attachments_route(m, p, src, true)
+        attachments_route(m, p, src, None)
     }
 
-    fn attachments_route(m: &Model, p: &Placement, src: &str, crossings: bool) {
+    /// `may_cross` names the one part whose dotted lines may cross other lines.
+    fn attachments_route(m: &Model, p: &Placement, src: &str, may_cross: Option<&str>) {
         let r = Rules::builtin();
         let (w, notes) = crate::route::route_planned(m, &p.layout, &r, &p.lines);
         let (faults, named) = crate::route::tests::wire_faults(&p.layout, &w, &notes);
@@ -2129,8 +2130,9 @@ set:
         let bad: Vec<&(String, String)> = faults.iter().filter(|(id, what)| dotted.contains(&id.as_str()) || dotted.iter().any(|d| what.ends_with(d))).collect();
         assert!(bad.is_empty(), "{bad:?}\n{src}");
         let paths: Vec<(&str, Vec<(i32, i32)>)> = w.iter().map(|x| (x.id.as_str(), crate::route::tests::full_path(x, &p.layout))).collect();
-        for (id, a) in paths.iter().filter(|(id, _)| crossings && dotted.contains(id)) {
-            for (other, b) in paths.iter().filter(|(o, _)| o != id) {
+        let free: Vec<&str> = w.iter().filter(|x| may_cross.is_some_and(|c| x.from == c || x.to == c)).map(|x| x.id.as_str()).collect();
+        for (id, a) in paths.iter().filter(|(id, _)| dotted.contains(id) && !free.contains(id)) {
+            for (other, b) in paths.iter().filter(|(o, _)| o != id && !free.contains(o)) {
                 let crossed = a.windows(2).any(|s| b.windows(2).any(|t| crate::path::crosses(s[0], s[1], t[0], t[1])));
                 assert!(!crossed, "{id} crosses {other}\n{src}");
             }
@@ -2277,14 +2279,20 @@ set:
         }
         // Attached to three, it goes between the second and the third; its line to the first
         // runs over the second and crosses the line from the users into it, as one line must
-        // wherever it goes, so crossings are not checked.
+        // wherever it goes, so the crossings of its own lines are not checked.
         for azs in [2, 3] {
             let src = format!("{TWO_FRONTS}  - user -> cloudfront.c -> s3.c\n  - waf -- cloudfront.a\n  - waf -- cloudfront.b\n  - waf -- cloudfront.c\n  - acm.a -- cloudfront.a\nset:\n  azs: {azs}\n");
             let (m, p) = arranged(&src, Axis::Down);
             let (b, s, c) = (at(&p, "cloudfront.b"), at(&p, "waf"), at(&p, "cloudfront.c"));
             assert!(b.x < s.x && s.x < c.x && s.y == b.y, "{src}");
-            attachments_route(&m, &p, &src, false);
+            attachments_route(&m, &p, &src, Some("waf"));
         }
+        // Attached to the first and the third of three, with the second among them, it stays
+        // past them all.
+        let src = format!("{TWO_FRONTS}  - user -> cloudfront.c -> s3.c\n  - waf -- cloudfront.a\n  - waf -- cloudfront.c\nset:\n  azs: 2\n");
+        let (_, p) = arranged(&src, Axis::Down);
+        let (b, c, s) = (at(&p, "cloudfront.b"), at(&p, "cloudfront.c"), at(&p, "waf"));
+        assert!(b.x < c.x && c.x < s.x && s.y == c.y, "{src}");
     }
 
     // Fails if, top to bottom, the parts attached to CloudFront leave the column one step across
@@ -2550,7 +2558,13 @@ set:
                 let against: Vec<&Icon> = if n.area == Area::Cloud {
                     let mut ps: Vec<&Icon> = partners(&m, k).into_iter().map(|j| icon(&m.nodes[j].id)).collect();
                     ps.sort_by_key(|i| i.rect.x);
-                    ps.truncate(1);
+                    // Between its partners only when no other main part sits among them; else
+                    // right of them all.
+                    let (first, last) = (ps[0].rect.x, ps[ps.len() - 1].rect.x);
+                    let among = icons.iter().any(|i| i.parent == side.parent && on_main(&m, &i.id) && first < i.rect.x && i.rect.x < last && !ps.iter().any(|q| q.id == i.id));
+                    if !among && side.rect.x < last {
+                        ps.truncate(1);
+                    }
                     ps
                 } else {
                     icons.iter().filter(|i| i.parent == side.parent && on_main(&m, &i.id)).collect()
