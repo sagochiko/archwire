@@ -121,4 +121,5 @@ Every folder under `tests/cases` holds a definition (`def.yaml`) and the output 
 | `api-queue-ja`, `api-fanout-en-right`, `s3-event-en`, `mix-queue-ja`, `web-queue-ja` | events: a queue between two functions, a topic fanned out to two queues, event notifications from a bucket, a queue invoking a function attached to the VPC, and ECS sending to a queue through a VPC endpoint |
 | `api-kms-ja`, `web-kms-en` | a KMS key attached to S3 and DynamoDB without a VPC, and to S3 in a Web architecture with a VPC |
 | `web-route53-ja`, `edge-route53-en-right` | Route 53 attached to CloudFront, next to a certificate and a web ACL in a Web architecture, and on a static site drawn from left to right |
+| `web-shared-waf-en` | one web ACL attached to two CloudFront distributions, placed between them in a Web architecture |
 | `err-unknown-service`, `err-unsupported` | definitions that stop with an error |
