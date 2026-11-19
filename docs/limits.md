@@ -1,6 +1,6 @@
 # Limits
 
-This page is for archwire 0.1.0 with rules data 2026.11.13. The counts below were measured on that version by compiling each definition and counting the notes that name a line (see [Notes](report.md#notes)). Notes that explain the drawing, such as the one on auxiliary flows or on three zones, may be there at any count and are not counted.
+This page is for archwire 0.1.0 with rules data 2026.11.14. The counts below were measured on that version by compiling each definition and counting the notes that name a line (see [Notes](report.md#notes)). Notes that explain the drawing, such as the one on auxiliary flows or on three zones, may be there at any count and are not counted.
 
 A note naming a line means the diagram is still written, but that line could not avoid every icon, label and other line; look at it in the diagram. `LAYOUT_FAILED` means no diagram is written. Writing fewer parts avoids both. They are limits of this layout, not of AWS.
 

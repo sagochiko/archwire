@@ -28,7 +28,7 @@ There are three connection symbols.
 
 `->` is a main flow, the path traffic takes. `~>` is an auxiliary flow, such as logs going to CloudWatch. It is drawn as a dashed line, and archwire does not work out a network route for it. `--` is an association, for something attached to something else. Write the thing being attached first. An association is drawn as a dashed line without an arrowhead, because nothing flows along it. Which connections are accepted is listed under [Which connections are accepted](#which-connections-are-accepted). `waf`, `acm` and `route53` are attachments: they may not be the source or the target of `->` or `~>`. `cognito` is attached to API Gateway with `--`, and may be the target of one main flow only, the sign-in `user -> cognito`; it may not be the source of `->` or `~>`.
 
-One pair of parts can be connected with one relation only. `ecs -> s3` together with `ecs ~> s3` is the error `CONFLICTING_RELATION`. Direction matters. `ecs -> aurora` and `aurora -> ecs` are two different pairs.
+One pair of parts can be connected with one relation only. `ecs -> s3` together with `ecs ~> s3` is the error `CONFLICTING_RELATION`. Direction matters. `lambda -> sqs` and `sqs -> lambda` are two different pairs.
 
 ### With a VPC or without
 
@@ -142,7 +142,7 @@ The accepted connections are listed pair by pair in `rules/aws/links.toml`, and 
 | `cloudfront` | `->` | `s3` | Static files |
 | `cloudfront` | `->` | `apigateway` | HTTPS |
 | `cloudfront` | `->` | `alb` | HTTPS |
-| `cloudfront` | `~>` | `s3` | Logs and metrics |
+| `cloudfront` | `~>` | `s3` | Logs |
 | `cloudfront` | `~>` | `cloudwatch` | Logs and metrics |
 | `waf` | `--` | `cloudfront` | Web ACL |
 | `acm` | `--` | `cloudfront` | Certificate |
@@ -158,16 +158,15 @@ The accepted connections are listed pair by pair in `rules/aws/links.toml`, and 
 | `lambda` | `->` | `internet` | Outbound |
 | `lambda` | `~>` | `cloudwatch` | Logs and metrics |
 | `alb` | `->` | `ecs` | HTTP |
-| `alb` | `~>` | `s3` | Logs and metrics |
+| `alb` | `~>` | `s3` | Logs |
 | `alb` | `~>` | `cloudwatch` | Logs and metrics |
 | `ecs` | `->` | `aurora` | Read/Write to the writer, Read to a reader |
 | `ecs` | `->` | `s3` | Read/Write |
 | `ecs` | `->` | `dynamodb` | Read/Write |
 | `ecs` | `->` | `cloudwatch` | Logs and metrics |
 | `ecs` | `->` | `internet` | Outbound |
-| `ecs` | `~>` | `s3` | Logs and metrics |
+| `ecs` | `~>` | `s3` | Logs |
 | `ecs` | `~>` | `cloudwatch` | Logs and metrics |
-| `aurora` | `->` | `ecs` | HTTP |
 | `alb` | `->` | `ec2` | HTTP |
 | `ec2` | `->` | `aurora` | Read/Write to the writer, Read to a reader |
 | `ec2` | `->` | `s3` | Read/Write |
@@ -175,13 +174,10 @@ The accepted connections are listed pair by pair in `rules/aws/links.toml`, and 
 | `ec2` | `->` | `cloudwatch` | Logs and metrics |
 | `ec2` | `->` | `ssm` | HTTPS |
 | `ec2` | `->` | `internet` | Outbound |
-| `ec2` | `~>` | `s3` | Logs and metrics |
+| `ec2` | `~>` | `s3` | Logs |
 | `ec2` | `~>` | `cloudwatch` | Logs and metrics |
-| `aurora` | `->` | `ec2` | HTTP |
 | `aurora` | `->` | `s3` | Read/Write |
-| `aurora` | `->` | `cloudwatch` | Logs and metrics |
 | `aurora` | `->` | `internet` | Outbound |
-| `aurora` | `~>` | `s3` | Logs and metrics |
 | `aurora` | `~>` | `cloudwatch` | Logs and metrics |
 | `guardduty` | `->` | `eventbridge` | Findings |
 | `guardduty` | `->` | `securityhub` | Findings |
@@ -230,6 +226,8 @@ The accepted connections are listed pair by pair in `rules/aws/links.toml`, and 
 
 A pair means the services, whatever the parts are named: `lambda.resize -> s3.uploads` is the pair `lambda -> s3`.
 
+`ecs -> cloudwatch` and `ec2 -> cloudwatch` may be written as a main flow or as an auxiliary flow. Write the main flow when the diagram should show how the logs leave the private subnets: it leaves a route to choose, a NAT gateway or a VPC endpoint, like the other lines out of the VPC. Write `~>` when the route is not to be drawn. `aurora` sends to CloudWatch with `~>` only, because Aurora sends its metrics to CloudWatch itself: "By default, Amazon Aurora automatically sends metric data to CloudWatch in 1-minute periods." ([Monitoring Amazon Aurora metrics with Amazon CloudWatch](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/monitoring-cloudwatch.html)). An auxiliary flow to S3 is labelled Logs, and one to CloudWatch Logs and metrics.
+
 `config -> securityhub` is drawn as one line. AWS Config sends its rule evaluations to Security Hub through EventBridge, but that is a link between the two services, not an EventBridge rule the definition writes.
 
 `user -> cognito` is the sign-in to a user pool, drawn from the users although the tokens go to their app. `user -> s3` is an upload or download straight to a bucket, with a presigned URL or with temporary credentials from a Cognito identity pool; the identity pool is not drawn. The users of `user -> athena` are the people who run the queries. Security Lake keeps its data lake in S3 buckets in the account, so `securitylake -> s3` is drawn as a main flow. GuardDuty, Inspector and Config findings reach Security Lake through Security Hub, so there is no line from them to `securitylake`; write `securityhub -> securitylake`. The settings of Security Lake's subscribers are not drawn. `securitylake -> sqs` is the SQS queue Security Lake creates for a data access subscriber, and a function that reads that queue can be drawn after it, as in `- cloudtrail -> securitylake -> sqs -> lambda`.
@@ -240,7 +238,7 @@ Besides the list, archwire checks the following, and stops with `UNSUPPORTED` wh
 
 - There is at least one main flow (`at` `flows`), and every main flow can be reached along main flows from a starting point (`at` the line that cannot be reached). The starting points are `user` and the services that start a flow by themselves: `guardduty`, `inspector`, `securityhub`, `config`, `cloudtrail`, `eventbridge`, `cloudwatch` and `ec2`. EC2 instances start flows of their own, so `- ec2 -> s3` alone is accepted; ECS and Lambda are not starting points. `sns`, `sqs`, `stepfunctions`, `ssm`, `athena`, `securitylake` and the other services are not starting points: a main flow from one of them is accepted once a main flow from a starting point reaches it, so a definition cannot start with them.
 - The source of an auxiliary flow and the target of an association are on a main flow reached from a starting point.
-- No main flow comes back to a part it left through a part outside the subnets of the VPC (`at` the line that closes the loop: of the lines in the loop, the one written last). A loop that stays inside the subnets, such as `- ec2 -> aurora` with `- aurora -> ec2`, is drawn.
+- No main flow comes back to a part it left through a part outside the subnets of the VPC (`at` the line that closes the loop: of the lines in the loop, the one written last). None of the accepted pairs closes a loop that stays inside the subnets.
 - No main flow that leaves the subnets of the VPC comes back into them (`at` the line from a part outside the subnets to a part in them, when that outside part is reached along main flows from a part in the subnets). So `- user -> cloudfront -> alb -> ecs -> aurora` with `- ecs -> sqs -> lambda -> aurora` stops at the second line with `got` `sqs -> lambda`, while `- ecs -> sqs -> lambda.worker` with a function outside the VPC, and `- eventbridge -> sqs -> lambda -> aurora`, which only comes in, are drawn.
 - A main flow to `internet` comes from a part in a private subnet of the VPC: ECS, EC2, Aurora, or a function attached to the VPC.
 
@@ -334,7 +332,7 @@ flows:
   - waf -- alb
 ```
 
-A line's label says which zones it stands for. With two zones, archwire draws the lines between parts in different zones. With three zones it draws no line between copies of two different services in different zones: the line inside the target's zone stands for the lines from every zone into the same part, and a note in the report says so. Two kinds of line still cross zones: the replication line from Aurora's writer to each reader, and a line from another zone when the target's zone has no sender, described below. A label ends with "(all AZs)" when the sender has a copy in every zone, and names the zones otherwise. For example, with `azs: 3` and `readers: 1`, Aurora has a copy in two zones only, and `aurora ~> cloudwatch` is labelled "Logs and metrics (from 1a, 1c)". When a target in one zone has no sender in the same zone, the line comes from a sender in another zone, and a note names it. With the same settings, `aurora -> ecs` gives the note "In ap-northeast-1d, ecs-1d has no aurora in its own zone, so the line from aurora-1a in another zone is drawn."
+A line's label says which zones it stands for. With two zones, archwire draws the lines between parts in different zones. With three zones it draws no line between copies of two different services in different zones: the line inside the target's zone stands for the lines from every zone into the same part, and a note in the report says so. The replication line from Aurora's writer to each reader still crosses zones. A label ends with "(all AZs)" when the sender has a copy in every zone, and names the zones otherwise. For example, with `azs: 3` and `readers: 1`, Aurora has a copy in two zones only, and `aurora ~> cloudwatch` is labelled "Logs and metrics (from 1a, 1c)". No accepted pair sends from Aurora to a part with a copy in every zone, so every target with a copy in each zone has a sender in its own zone.
 
 Some diagrams are correct but harder to read than they could be, and many services behind one load balancer crowd its lines. Both are described, with the counts measured, in [Limits](limits.md).
 
@@ -603,7 +601,7 @@ flows:
 {
   "versions": {
     "archwire": "0.1.0",
-    "rules": "2026.11.13"
+    "rules": "2026.11.14"
   },
   "derived": [],
   "holes": [],

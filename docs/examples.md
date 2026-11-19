@@ -122,4 +122,4 @@ Every folder under `tests/cases` holds a definition (`def.yaml`) and the output 
 | `api-kms-ja`, `web-kms-en` | a KMS key attached to S3 and DynamoDB without a VPC, and to S3 in a Web architecture with a VPC |
 | `web-route53-ja`, `edge-route53-en-right` | Route 53 attached to CloudFront, next to a certificate and a web ACL in a Web architecture, and on a static site drawn from left to right |
 | `web-shared-waf-en` | one web ACL attached to two CloudFront distributions, placed between them in a Web architecture |
-| `err-unknown-service`, `err-unsupported` | definitions that stop with an error |
+| `err-unknown-service`, `err-unsupported`, `err-unsupported-aurora` | definitions that stop with an error; the last writes the main flows from Aurora back to ECS and EC2, the main flow from Aurora to CloudWatch and the auxiliary flow from Aurora to S3, none of which is accepted |
