@@ -1,0 +1,24 @@
+name: A diagram that looks wrong / 図がおかしい
+description: The definition compiled, but the diagram is hard to read or says something that is not true. 変換は通ったが、図が読みにくい、または事実と違う。
+title: "Diagram: "
+labels: ["diagram"]
+body:
+  - type: textarea
+    id: definition
+    attributes:
+      label: Definition / 定義
+      render: yaml
+    validations:
+      required: true
+  - type: textarea
+    id: wrong
+    attributes:
+      label: What looks wrong / おかしい所
+      description: Which part, line or label, and why. A screenshot helps. どの部品、線、ラベルが、どうおかしいか。画像があると助かります。
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version / 版
+      description: The output of `archwire --version`.

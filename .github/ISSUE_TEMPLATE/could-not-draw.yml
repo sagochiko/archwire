@@ -1,0 +1,36 @@
+name: A definition archwire could not draw / 描けなかった構成
+description: A definition that stopped with an error, or an architecture you could not write down. 止まった定義や、書けなかった構成を教えてください。
+title: "Could not draw: "
+labels: ["could-not-draw"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        What gets added next is decided from these reports. A definition that does not compile is as useful as one that does.
+        次に何を足すかは、ここに届いた定義で決めます。変換が通らない定義も、通る定義と同じくらい役に立ちます。日本語で書いて構いません。
+  - type: textarea
+    id: definition
+    attributes:
+      label: Definition / 定義
+      description: The YAML you wrote, or the flows you wanted to write. 書いた YAML、または書きたかったつながり。
+      render: yaml
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: What archwire returned / archwire の出力
+      description: The errors or notes in the report, if any. レポートの errors や notes があれば。
+      render: json
+  - type: textarea
+    id: wanted
+    attributes:
+      label: What you wanted to draw / 描きたかった図
+      description: One or two lines on the architecture, and what the diagram is for (an article, a design proposal, teaching material, ...). どんな構成で、何に使う図か（記事、設計の案、教材など）。
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version / 版
+      description: The output of `archwire --version`.
